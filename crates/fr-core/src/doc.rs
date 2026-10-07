@@ -1,0 +1,1333 @@
+//! The document: parameters and an ordered list of features. Bodies are
+//! never stored; they are rebuilt from the features.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use glam::{DVec2, DVec3};
+use serde::{Deserialize, Serialize};
+
+use crate::csg::{self, Bool};
+use crate::exact::{self, Lumps, Place};
+use crate::expr::{self, Kind, Quantity, Value};
+use crate::mesh::{self, Mesh};
+use crate::profile::{self, Profile};
+use crate::sketch::{Geom, Id, Sketch};
+use crate::solver;
+use crate::threads;
+use crate::units::{Unit, fmt_len, trim_num};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Param {
+    pub name: String,
+    pub expr: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Op {
+    #[default]
+    New,
+    Join,
+    Cut,
+    Intersect,
+}
+
+impl Op {
+    pub const ALL: [Op; 4] = [Op::New, Op::Join, Op::Cut, Op::Intersect];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Op::New => "new",
+            Op::Join => "join",
+            Op::Cut => "cut",
+            Op::Intersect => "intersect",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Op::New => "New Body",
+            Op::Join => "Join",
+            Op::Cut => "Cut",
+            Op::Intersect => "Intersect",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Op> {
+        Op::ALL.into_iter().find(|o| o.name() == s || (s == "new_body" && *o == Op::New))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Axis {
+    /// The sketch's own x axis.
+    X,
+    Y,
+    /// A line in the sketch.
+    Line(Id),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Extrude {
+    pub sketch: Id,
+    /// Each profile is named by the entities on its outer boundary.
+    pub profiles: Vec<Vec<Id>>,
+    pub distance: Value,
+    #[serde(default)]
+    pub symmetric: bool,
+    #[serde(default)]
+    pub op: Op,
+    /// Degrees the walls lean outward as they leave the sketch plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taper: Option<Value>,
+    /// Go past every body in the direction of `distance` instead of stopping at it.
+    #[serde(default)]
+    pub through_all: bool,
+}
+
+/// Where the copies of a patterned feature go. Axes are the world's: 0 = X, 1 = Y, 2 = Z.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternKind {
+    /// `count` copies in all, spread around an axis through the origin over `angle` degrees.
+    Circular { axis: usize, count: u32, angle: Value },
+    /// `count` copies in all, `spacing` apart along an axis.
+    Linear { axis: usize, count: u32, spacing: Value },
+    /// One copy, reflected through the origin plane whose normal is `axis`.
+    Mirror { axis: usize },
+}
+
+/// Repeats what an earlier extrude, revolve or import did.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pattern {
+    pub source: Id,
+    pub kind: PatternKind,
+}
+
+impl Pattern {
+    /// Where each copy goes.
+    pub fn placements(&self) -> Result<Vec<Place>, String> {
+        let unit = |axis: usize| [DVec3::X, DVec3::Y, DVec3::Z].get(axis).copied().ok_or("the axis must be x, y or z".to_owned());
+        match &self.kind {
+            PatternKind::Circular { axis, count, angle } => {
+                if !(2..=360).contains(count) {
+                    return Err("a pattern needs between 2 and 360 copies".into());
+                }
+                // A full turn spaces the copies evenly; a part turn puts one at each end.
+                let step = if angle.v.abs() >= 360.0 - 1e-9 { angle.v / *count as f64 } else { angle.v / (*count - 1) as f64 };
+                let u = unit(*axis)?;
+                Ok((1..*count).map(|k| Place::Turn { origin: DVec3::ZERO, axis: u, angle: (step * k as f64).to_radians() }).collect())
+            }
+            PatternKind::Linear { axis, count, spacing } => {
+                if !(2..=1000).contains(count) {
+                    return Err("a pattern needs between 2 and 1000 copies".into());
+                }
+                let u = unit(*axis)?;
+                Ok((1..*count).map(|k| Place::Shift(u * spacing.v * k as f64)).collect())
+            }
+            PatternKind::Mirror { axis } => {
+                let u = unit(*axis)?;
+                Ok(vec![Place::Mirror { origin: DVec3::ZERO, normal: u }])
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Revolve {
+    pub sketch: Id,
+    pub profiles: Vec<Vec<Id>>,
+    pub axis: Axis,
+    pub angle: Value,
+    #[serde(default)]
+    pub op: Op,
+}
+
+/// Moves a body: scale about the origin, then rotate about X, Y and Z, then translate.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Transform {
+    pub body: Id,
+    pub translate: [Value; 3],
+    pub rotate: [Value; 3],
+    pub scale: Value,
+}
+
+/// Rounds or bevels edges of a body. Edges are named by a point on them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Blend {
+    pub body: Id,
+    pub edges: Vec<DVec3>,
+    /// Fillet radius, or the distance a chamfer takes off each face.
+    pub size: Value,
+    #[serde(default)]
+    pub chamfer: bool,
+    /// The body's bounds when the edges were picked, so they can be found again if it changes size.
+    #[serde(default)]
+    pub frame: Option<[DVec3; 2]>,
+}
+
+/// Hollows a body, leaving the named faces open. Faces are named by a point on them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Shell {
+    pub body: Id,
+    pub faces: Vec<DVec3>,
+    pub thickness: Value,
+    #[serde(default)]
+    pub frame: Option<[DVec3; 2]>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoleShape {
+    #[default]
+    Simple,
+    Counterbore,
+    Countersink,
+}
+
+impl HoleShape {
+    pub const ALL: [HoleShape; 3] = [HoleShape::Simple, HoleShape::Counterbore, HoleShape::Countersink];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            HoleShape::Simple => "simple",
+            HoleShape::Counterbore => "counterbore",
+            HoleShape::Countersink => "countersink",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HoleShape::Simple => "Simple",
+            HoleShape::Counterbore => "Counterbore",
+            HoleShape::Countersink => "Countersink",
+        }
+    }
+}
+
+/// What the hole is for, which with a thread size decides how wide it is drilled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoleFit {
+    /// The diameter is given outright.
+    #[default]
+    Plain,
+    /// A screw passes through: close, normal or loose around it.
+    Close,
+    Normal,
+    Loose,
+    /// The screw threads into it.
+    Tapped,
+}
+
+impl HoleFit {
+    pub const ALL: [HoleFit; 5] = [HoleFit::Plain, HoleFit::Close, HoleFit::Normal, HoleFit::Loose, HoleFit::Tapped];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            HoleFit::Plain => "plain",
+            HoleFit::Close => "close",
+            HoleFit::Normal => "normal",
+            HoleFit::Loose => "loose",
+            HoleFit::Tapped => "tapped",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HoleFit::Plain => "Plain (by diameter)",
+            HoleFit::Close => "Clearance, close",
+            HoleFit::Normal => "Clearance, normal",
+            HoleFit::Loose => "Clearance, loose",
+            HoleFit::Tapped => "Tapped",
+        }
+    }
+}
+
+/// Drilled holes, sized by hand or from the thread catalog. Each enters the
+/// body at a point of `at` and runs along `dir`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hole {
+    pub body: Id,
+    pub at: Vec<DVec3>,
+    pub dir: DVec3,
+    #[serde(default)]
+    pub shape: HoleShape,
+    #[serde(default)]
+    pub fit: HoleFit,
+    /// A name from the thread catalog; needed by every fit but plain.
+    #[serde(default)]
+    pub thread: String,
+    /// For plain holes.
+    #[serde(default)]
+    pub diameter: Option<Value>,
+    /// `None` goes all the way through.
+    #[serde(default)]
+    pub depth: Option<Value>,
+    /// The included angle of a pointed bottom; `None` is flat.
+    #[serde(default)]
+    pub tip_angle: Option<Value>,
+    /// The counterbore or countersink; left out, they come from the thread.
+    #[serde(default)]
+    pub head_diameter: Option<Value>,
+    #[serde(default)]
+    pub head_depth: Option<Value>,
+    #[serde(default)]
+    pub head_angle: Option<Value>,
+    /// Cut the thread itself into a tapped hole, rather than leaving it at the tap drill size.
+    #[serde(default)]
+    pub modeled: bool,
+    #[serde(default)]
+    pub left: bool,
+    /// Added to every diameter, to allow for a printer that makes holes small.
+    #[serde(default)]
+    pub extra: Option<Value>,
+}
+
+/// A hole's sizes once the catalog and the defaults have been applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HoleSizes {
+    pub diameter: f64,
+    pub head: Option<exact::DrillHead>,
+    /// The major diameter and pitch of a thread to cut; `diameter` is then across its roots.
+    pub thread: Option<(f64, f64)>,
+}
+
+impl Hole {
+    pub fn sizes(&self) -> Result<HoleSizes, String> {
+        let spec = if self.thread.trim().is_empty() { None } else { Some(threads::find(&self.thread)?) };
+        let extra = self.extra.as_ref().map_or(0.0, |v| v.v);
+        let need = |what: &str| format!("{what} needs a thread size, such as M3");
+        let diameter = extra
+            + match self.fit {
+                HoleFit::Plain => self.diameter.as_ref().map(|v| v.v).ok_or("a plain hole needs a diameter")?,
+                HoleFit::Close => spec.ok_or_else(|| need("a clearance hole"))?.clearance[0],
+                HoleFit::Normal => spec.ok_or_else(|| need("a clearance hole"))?.clearance[1],
+                HoleFit::Loose => spec.ok_or_else(|| need("a clearance hole"))?.clearance[2],
+                HoleFit::Tapped => spec.ok_or_else(|| need("a tapped hole"))?.tap_drill,
+            };
+        let given = |v: &Option<Value>, from_spec: Option<f64>, what: &str| v.as_ref().map(|v| v.v).or(from_spec).ok_or(format!("the {what} is needed when there is no thread size to take it from"));
+        let head = match self.shape {
+            HoleShape::Simple => None,
+            HoleShape::Counterbore => Some(exact::DrillHead::Counterbore {
+                diameter: extra + given(&self.head_diameter, spec.map(|t| t.counterbore), "counterbore diameter")?,
+                depth: given(&self.head_depth, spec.map(|t| t.counterbore_depth), "counterbore depth")?,
+            }),
+            HoleShape::Countersink => Some(exact::DrillHead::Countersink {
+                diameter: extra + given(&self.head_diameter, spec.map(|t| t.countersink().0), "countersink diameter")?,
+                angle: given(&self.head_angle, spec.map(|t| t.countersink().1), "countersink angle")?,
+            }),
+        };
+        let thread = match (self.fit, self.modeled, spec) {
+            (HoleFit::Tapped, true, Some(t)) => Some((t.major + extra, t.pitch)),
+            _ => None,
+        };
+        Ok(HoleSizes { diameter, head, thread })
+    }
+}
+
+/// A screw thread cut onto a rod or into a hole. The cylinder is named by a point on it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Thread {
+    pub body: Id,
+    pub face: DVec3,
+    #[serde(default)]
+    pub frame: Option<[DVec3; 2]>,
+    /// A name from the thread catalog.
+    pub thread: String,
+    /// How far from the start of the cylinder the thread begins; with `length`, `None` is the whole face.
+    #[serde(default)]
+    pub offset: Option<Value>,
+    #[serde(default)]
+    pub length: Option<Value>,
+    #[serde(default)]
+    pub left: bool,
+    /// Room for the thread to turn: a hole's thread is made this much wider across and a
+    /// rod's this much thinner. Printed threads at their exact sizes do not go together.
+    #[serde(default)]
+    pub extra: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Combine {
+    pub target: Id,
+    pub tools: Vec<Id>,
+    pub op: Op,
+    #[serde(default)]
+    pub keep_tools: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureKind {
+    Sketch(Sketch),
+    Extrude(Extrude),
+    Revolve(Revolve),
+    /// A mesh brought in from a file, already in millimetres.
+    Import(Mesh),
+    Transform(Transform),
+    Combine(Combine),
+    Pattern(Pattern),
+    Blend(Blend),
+    Shell(Shell),
+    Hole(Hole),
+    Thread(Thread),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Feature {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub suppressed: bool,
+    pub kind: FeatureKind,
+}
+
+impl Feature {
+    pub fn type_name(&self) -> &'static str {
+        match &self.kind {
+            FeatureKind::Sketch(_) => "sketch",
+            FeatureKind::Extrude(_) => "extrude",
+            FeatureKind::Revolve(_) => "revolve",
+            FeatureKind::Import(_) => "import",
+            FeatureKind::Transform(_) => "transform",
+            FeatureKind::Combine(_) => "combine",
+            FeatureKind::Pattern(_) => "pattern",
+            FeatureKind::Blend(b) if b.chamfer => "chamfer",
+            FeatureKind::Blend(_) => "fillet",
+            FeatureKind::Shell(_) => "shell",
+            FeatureKind::Hole(_) => "hole",
+            FeatureKind::Thread(_) => "thread",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Document {
+    #[serde(default)]
+    pub units: Unit,
+    #[serde(default)]
+    pub params: Vec<Param>,
+    pub features: Vec<Feature>,
+    #[serde(default)]
+    pub hidden_bodies: Vec<Id>,
+    pub next_id: Id,
+    /// The timeline's roll-back marker: only this many features are built, and
+    /// new ones go in at this point. `None` is the end of the timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Body {
+    /// The feature that created it.
+    pub id: Id,
+    pub name: String,
+    /// Triangles for display, picking and STL.
+    pub mesh: Mesh,
+    /// The exact shape, for bodies made from sketches. Empty for imported
+    /// meshes and for anything that has been combined with one.
+    pub solids: Lumps,
+    /// The exact shape's edges as polylines, for picking and drawing.
+    pub edges: Vec<Vec<DVec3>>,
+    /// Modeled threads. Each is a closed shell of its own that overlaps the
+    /// body, and its triangles follow the body's own at the end of `mesh`.
+    pub threads: Vec<Mesh>,
+    /// How many of `mesh`'s triangles are the body itself.
+    pub plain: usize,
+}
+
+impl Body {
+    pub fn is_exact(&self) -> bool {
+        !self.solids.is_empty()
+    }
+
+    fn set_exact(&mut self, solids: Lumps) -> Result<(), String> {
+        (self.mesh, self.edges) = exact::tessellate(&solids)?;
+        self.solids = solids;
+        self.dress();
+        Ok(())
+    }
+
+    fn set_mesh(&mut self, mesh: Mesh) {
+        self.mesh = mesh;
+        self.solids.clear();
+        self.edges.clear();
+        self.dress();
+    }
+
+    /// Puts the threads back on a mesh that has just been rebuilt without them.
+    fn dress(&mut self) {
+        self.plain = self.mesh.tris.len();
+        let faces = !self.mesh.face_ids.is_empty();
+        for (k, t) in self.threads.iter().enumerate() {
+            self.mesh.tris.extend(&t.tris);
+            if faces {
+                // Clear of anything the kernel numbers its faces with.
+                self.mesh.face_ids.extend(t.face_ids.iter().map(|part| u64::MAX - (k as u64 * 8 + part)));
+            }
+        }
+    }
+
+    /// The body without its threads, as booleans need it.
+    fn bare(&self) -> Mesh {
+        Mesh { tris: self.mesh.tris[..self.plain].to_vec(), face_ids: Vec::new() }
+    }
+
+    fn add_thread(&mut self, thread: Mesh) {
+        let mesh = Mesh { tris: self.mesh.tris[..self.plain].to_vec(), face_ids: self.mesh.face_ids[..self.plain.min(self.mesh.face_ids.len())].to_vec() };
+        self.mesh = mesh;
+        self.threads.push(thread);
+        self.dress();
+    }
+
+    /// Takes an exact shape out of the body, which stays exact if it was.
+    fn cut(&mut self, tool: &Lumps) -> Result<(), String> {
+        if self.is_exact() {
+            let made = exact::boolean(&self.solids, tool, Bool::Subtract)?;
+            return self.set_exact(made);
+        }
+        let tool = exact::tessellate(tool)?.0;
+        let made = csg::boolean(&self.bare(), &Mesh { tris: tool.tris, face_ids: Vec::new() }, Bool::Subtract)?;
+        self.set_mesh(made);
+        Ok(())
+    }
+
+    /// Moves the body through a series of placements.
+    fn place(&mut self, steps: &[Place]) -> Result<(), String> {
+        // The kernel has no inside-out solids, so a negative scale falls back to the mesh.
+        for t in &mut self.threads {
+            for p in steps {
+                t.map(|v| p.point(v));
+                if p.flips() {
+                    t.flip();
+                }
+            }
+        }
+        if self.is_exact() && !steps.iter().any(|p| matches!(p, Place::Scale { factor, .. } if *factor < 0.0)) {
+            let moved = steps.iter().fold(std::mem::take(&mut self.solids), |s, p| exact::place(s, p));
+            return self.set_exact(moved);
+        }
+        let mut mesh = self.bare();
+        for p in steps {
+            mesh.map(|v| p.point(v));
+            if p.flips() {
+                mesh.flip();
+            }
+        }
+        self.set_mesh(mesh);
+        Ok(())
+    }
+}
+
+/// What a feature adds or removes, before it meets the bodies.
+enum Shape {
+    Exact(Lumps),
+    Mesh(Mesh),
+}
+
+impl Shape {
+    fn bbox(&self) -> Option<(DVec3, DVec3)> {
+        match self {
+            Shape::Exact(l) => exact::bounds(l),
+            Shape::Mesh(m) => m.bbox(),
+        }
+    }
+
+    fn mesh(&self) -> Result<Mesh, String> {
+        match self {
+            Shape::Exact(l) => exact::tessellate(l).map(|t| Mesh { tris: t.0.tris, face_ids: Vec::new() }),
+            Shape::Mesh(m) => Ok(m.clone()),
+        }
+    }
+
+    fn placed(&self, p: &Place) -> Shape {
+        match self {
+            Shape::Exact(l) => Shape::Exact(exact::place(l.clone(), p)),
+            Shape::Mesh(m) => {
+                let mut m = m.clone();
+                m.map(|v| p.point(v));
+                if p.flips() {
+                    m.flip();
+                }
+                Shape::Mesh(m)
+            }
+        }
+    }
+
+    fn body(self, id: Id, name: String) -> Result<Body, String> {
+        let mut b = Body { id, name, mesh: Mesh::default(), solids: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
+        match self {
+            Shape::Exact(l) => b.set_exact(l)?,
+            Shape::Mesh(m) => b.set_mesh(m),
+        }
+        Ok(b)
+    }
+}
+
+/// What the features produce.
+#[derive(Clone, Debug, Default)]
+pub struct Built {
+    pub bodies: Vec<Body>,
+    /// Features that failed, with the reason.
+    pub errors: BTreeMap<Id, String>,
+}
+
+impl Built {
+    pub fn body(&self, id: Id) -> Option<&Body> {
+        self.bodies.iter().find(|b| b.id == id)
+    }
+
+    /// A body's bounds, as fillets, chamfers and shells record them when their edges or faces are picked.
+    pub fn frame(&self, id: Id) -> Option<[DVec3; 2]> {
+        self.body(id).and_then(|b| b.mesh.bbox()).map(|(lo, hi)| [lo, hi])
+    }
+}
+
+fn overlap(a: Option<(DVec3, DVec3)>, b: Option<(DVec3, DVec3)>) -> bool {
+    match (a, b) {
+        (Some((alo, ahi)), Some((blo, bhi))) => (alo - DVec3::splat(1e-6)).cmple(bhi).all() && (blo - DVec3::splat(1e-6)).cmple(ahi).all(),
+        _ => false,
+    }
+}
+
+impl Document {
+    pub fn new(units: Unit) -> Document {
+        Document { units, next_id: 1, ..Default::default() }
+    }
+
+    pub fn feature(&self, id: Id) -> Option<&Feature> {
+        self.features.iter().find(|f| f.id == id)
+    }
+
+    pub fn feature_mut(&mut self, id: Id) -> Option<&mut Feature> {
+        self.features.iter_mut().find(|f| f.id == id)
+    }
+
+    pub fn sketch(&self, id: Id) -> Option<&Sketch> {
+        match &self.feature(id)?.kind {
+            FeatureKind::Sketch(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn sketch_mut(&mut self, id: Id) -> Option<&mut Sketch> {
+        match &mut self.feature_mut(id)?.kind {
+            FeatureKind::Sketch(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn sketches(&self) -> impl Iterator<Item = (&Feature, &Sketch)> {
+        self.features.iter().filter_map(|f| match &f.kind {
+            FeatureKind::Sketch(s) => Some((f, s)),
+            _ => None,
+        })
+    }
+
+    /// Appends a feature, naming it after its type (`Sketch2`, `Extrude1`).
+    pub fn add_feature(&mut self, kind: FeatureKind) -> Id {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut f = Feature { id, name: String::new(), suppressed: false, kind };
+        let n = self.features.iter().filter(|o| o.type_name() == f.type_name()).count() + 1;
+        let t = f.type_name();
+        f.name = format!("{}{}{n}", t[..1].to_uppercase(), &t[1..]);
+        // With the timeline rolled back, new features go in at the marker.
+        match self.rollback.filter(|at| *at < self.features.len()) {
+            Some(at) => {
+                self.features.insert(at, f);
+                self.rollback = Some(at + 1);
+            }
+            None => self.features.push(f),
+        }
+        id
+    }
+
+    /// How many features the timeline currently builds.
+    pub fn active(&self) -> usize {
+        self.rollback.map_or(self.features.len(), |at| at.min(self.features.len()))
+    }
+
+    /// Moves the roll-back marker so that `count` features are built; the end clears it.
+    pub fn roll_to(&mut self, count: usize) {
+        self.rollback = (count < self.features.len()).then_some(count);
+    }
+
+    fn parameter_at(&self, name: &str, depth: usize, cache: &RefCell<BTreeMap<String, Result<Quantity, String>>>) -> Option<Result<Quantity, String>> {
+        let p = self.params.iter().find(|p| p.name == name)?;
+        if let Some(value) = cache.borrow().get(name) {
+            return Some(value.clone());
+        }
+        if depth >= 24 {
+            return Some(Err(format!("parameter '{name}' is cyclic or nested too deeply")));
+        }
+        let value = expr::eval(&p.expr, self.units, &|name| self.parameter_at(name, depth + 1, cache));
+        cache.borrow_mut().insert(name.to_owned(), value.clone());
+        Some(value)
+    }
+
+    pub fn quantity(&self, expr: &str) -> Result<Quantity, String> {
+        let cache = RefCell::new(BTreeMap::new());
+        expr::eval(expr, self.units, &|name| self.parameter_at(name, 0, &cache))
+    }
+
+    fn pinned_quantity(&self, expr: &str) -> Result<(Quantity, String), String> {
+        let cache = RefCell::new(BTreeMap::new());
+        expr::eval_pinned(expr, self.units, &|name| self.parameter_at(name, 0, &cache))
+    }
+
+    /// Evaluates an expression to millimetres, degrees or a plain number.
+    pub fn eval(&self, expr: &str, kind: Kind) -> Result<f64, String> {
+        expr::to_kind(self.quantity(expr)?, kind, self.units)
+    }
+
+    /// Turns typed text into a stored value, pinning bare numbers to the
+    /// current units.
+    pub fn value(&self, text: &str, kind: Kind) -> Result<Value, String> {
+        let (q, text) = self.pinned_quantity(text)?;
+        let v = expr::to_kind(q, kind, self.units)?;
+        let pinned = expr::pin_unit(&text, q, kind, self.units);
+        if pinned != text {
+            // The outer unit annotation also counts toward input/nesting limits.
+            self.quantity(&pinned)?;
+        }
+        Ok(Value { expr: pinned, v })
+    }
+
+    /// Like [`Document::value`], and also accepts `name = expression`, which
+    /// defines (or redefines) a parameter and uses it.
+    pub fn enter(&mut self, text: &str, kind: Kind) -> Result<Value, String> {
+        let Some((name, rhs)) = text.split_once('=') else { return self.value(text, kind) };
+        let name = name.trim().trim_start_matches('$');
+        let v = self.value(rhs, kind)?;
+        self.set_param(name, &v.expr)?;
+        Ok(Value { expr: format!("${name}"), v: v.v })
+    }
+
+    pub fn set_param(&mut self, name: &str, expr: &str) -> Result<(), String> {
+        if !expr::valid_name(name) {
+            return Err(format!("'{name}' cannot be used as a parameter name"));
+        }
+        let old = self.params.clone();
+        match self.params.iter_mut().find(|p| p.name == name) {
+            Some(p) => p.expr = expr.trim().to_owned(),
+            None => self.params.push(Param { name: name.to_owned(), expr: expr.trim().to_owned() }),
+        }
+        match self.quantity(&format!("${name}")).and_then(|_| self.pinned_quantity(expr)) {
+            Ok((_, pinned)) => self.params.iter_mut().find(|p| p.name == name).unwrap().expr = pinned,
+            Err(e) => {
+                self.params = old;
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// A parameter's value for display, such as `10 mm` or `45 deg`.
+    pub fn show_param(&self, name: &str) -> String {
+        match self.quantity(&format!("${name}")) {
+            Ok(q) => match q.dim {
+                expr::Dim::Length => format!("{} {}", fmt_len(q.v, self.units), self.units.name()),
+                expr::Dim::Angle => format!("{} deg", trim_num(q.v, 4)),
+                expr::Dim::None => trim_num(q.v, 6),
+            },
+            Err(e) => e,
+        }
+    }
+
+    /// A stored value for display in the document's units.
+    pub fn show(&self, v: &Value, kind: Kind) -> String {
+        let num = match kind {
+            Kind::Length => fmt_len(v.v, self.units),
+            Kind::Angle => format!("{}\u{b0}", trim_num(v.v, 3)),
+            Kind::Scalar => trim_num(v.v, 6),
+        };
+        if v.is_formula() { format!("fx: {num}") } else { num }
+    }
+
+    /// The profiles of a sketch that `refs` name.
+    fn pick<'a>(all: &'a [Profile], refs: &[Vec<Id>]) -> Result<Vec<&'a Profile>, String> {
+        if refs.is_empty() {
+            return Err("no profile is selected".into());
+        }
+        refs.iter().map(|r| all.iter().find(|p| &p.edges == r).ok_or_else(|| "a profile it used is no longer closed".to_owned())).collect()
+    }
+
+    fn tool(&self, f: &Feature, bodies: &[Body]) -> Result<Option<(Shape, Op)>, String> {
+        let sk = |id: Id| self.sketch(id).ok_or("its sketch was deleted".to_owned());
+        match &f.kind {
+            FeatureKind::Extrude(e) => {
+                let s = sk(e.sketch)?;
+                let all = profile::profiles(s);
+                let (mut z0, mut z1) = if e.symmetric { (-e.distance.v / 2.0, e.distance.v / 2.0) } else { (0.0, e.distance.v) };
+                if e.through_all {
+                    // Far enough to clear every body on the side the distance points to (both, if symmetric).
+                    let n = s.plane.normal();
+                    let reach = bodies.iter().filter_map(|b| b.mesh.bbox()).flat_map(|(lo, hi)| (0..8).map(move |i| DVec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z }))).map(|c| (c - s.plane.origin).dot(n));
+                    let (lo, hi) = reach.fold((0.0f64, 0.0f64), |(lo, hi), v| (lo.min(v), hi.max(v)));
+                    (z0, z1) = match (e.symmetric, e.distance.v >= 0.0) {
+                        (true, _) => (lo - 1.0, hi + 1.0),
+                        (false, true) => (0.0, hi + 1.0),
+                        (false, false) => (lo - 1.0, 0.0),
+                    };
+                }
+                let picked = Self::pick(&all, &e.profiles)?;
+                // The kernel has no tapered sweep here, so a taper is built as a mesh.
+                let shape = match e.taper.as_ref().filter(|t| t.v.abs() > 1e-9) {
+                    Some(t) => Shape::Mesh(mesh::extrude_tapered(&picked, &s.plane, z0, z1, t.v)?),
+                    None => Shape::Exact(exact::extrude(&picked, &s.plane, z0, z1)?),
+                };
+                Ok(Some((shape, e.op)))
+            }
+            FeatureKind::Revolve(r) => {
+                let s = sk(r.sketch)?;
+                let all = profile::profiles(s);
+                let (a, b) = match r.axis {
+                    Axis::X => (DVec2::ZERO, DVec2::X),
+                    Axis::Y => (DVec2::ZERO, DVec2::Y),
+                    Axis::Line(l) => s.line(l).ok_or("its axis line was deleted")?,
+                };
+                Ok(Some((Shape::Exact(exact::revolve(&Self::pick(&all, &r.profiles)?, &s.plane, a, b, r.angle.v)?), r.op)))
+            }
+            FeatureKind::Import(m) => Ok(Some((Shape::Mesh(m.clone()), Op::New))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Re-evaluates every expression, re-solves the sketches and regenerates the bodies.
+    pub fn rebuild(&mut self) -> Built {
+        let mut built = Built::default();
+        // Legacy documents have no implicit-unit metadata. Make their existing
+        // expressions explicit in the units in which the document was opened.
+        let parameters = Document { units: self.units, params: self.params.clone(), ..Document::default() };
+        for param in &mut self.params {
+            if let Ok((_, pinned)) = parameters.pinned_quantity(&param.expr) {
+                param.expr = pinned;
+            }
+        }
+        let probe = self.clone();
+        for f in &mut self.features {
+            let mut err = None;
+            let mut set = |v: &mut Value, kind: Kind| match probe.value(&v.expr, kind) {
+                Ok(x) => *v = x,
+                Err(e) => err = Some(e),
+            };
+            match &mut f.kind {
+                FeatureKind::Sketch(s) => {
+                    for c in s.constraints.values_mut() {
+                        if let (Some(v), Some(kind)) = (&mut c.value, c.kind.value_kind()) {
+                            set(v, kind);
+                        }
+                    }
+                    if err.is_none() && !solver::solve(s, &[]).ok {
+                        err = Some("the sketch's constraints cannot all be satisfied".into());
+                    }
+                }
+                FeatureKind::Extrude(e) => {
+                    set(&mut e.distance, Kind::Length);
+                    if let Some(t) = &mut e.taper {
+                        set(t, Kind::Angle);
+                    }
+                }
+                FeatureKind::Pattern(p) => match &mut p.kind {
+                    PatternKind::Circular { angle, .. } => set(angle, Kind::Angle),
+                    PatternKind::Linear { spacing, .. } => set(spacing, Kind::Length),
+                    PatternKind::Mirror { .. } => {}
+                },
+                FeatureKind::Revolve(r) => set(&mut r.angle, Kind::Angle),
+                FeatureKind::Transform(t) => {
+                    t.translate.iter_mut().for_each(|v| set(v, Kind::Length));
+                    t.rotate.iter_mut().for_each(|v| set(v, Kind::Angle));
+                    set(&mut t.scale, Kind::Scalar);
+                }
+                FeatureKind::Blend(b) => set(&mut b.size, Kind::Length),
+                FeatureKind::Shell(sh) => set(&mut sh.thickness, Kind::Length),
+                FeatureKind::Hole(h) => {
+                    for v in [&mut h.diameter, &mut h.depth, &mut h.head_diameter, &mut h.head_depth, &mut h.extra].into_iter().flatten() {
+                        set(v, Kind::Length);
+                    }
+                    for v in [&mut h.tip_angle, &mut h.head_angle].into_iter().flatten() {
+                        set(v, Kind::Angle);
+                    }
+                }
+                FeatureKind::Thread(t) => {
+                    for v in [&mut t.offset, &mut t.length, &mut t.extra].into_iter().flatten() {
+                        set(v, Kind::Length);
+                    }
+                }
+                FeatureKind::Import(_) | FeatureKind::Combine(_) => {}
+            }
+            if let Some(e) = err {
+                built.errors.insert(f.id, e);
+            }
+        }
+
+        let mut count = 0;
+        for f in self.features.iter().take(self.active()).filter(|f| !f.suppressed) {
+            if built.errors.contains_key(&f.id) {
+                continue;
+            }
+            if matches!(f.kind, FeatureKind::Sketch(_)) {
+                continue;
+            }
+            // A feature can touch several bodies or drill several holes. Publish
+            // its result only after all of those operations have succeeded.
+            let mut bodies = built.bodies.clone();
+            let mut next_count = count;
+            match self.apply(f, &mut bodies, &mut next_count) {
+                Ok(()) => {
+                    built.bodies = bodies;
+                    count = next_count;
+                }
+                Err(e) => {
+                    built.errors.insert(f.id, e);
+                }
+            }
+        }
+        built
+    }
+
+    fn apply(&self, f: &Feature, bodies: &mut Vec<Body>, count: &mut usize) -> Result<(), String> {
+        let find = |bodies: &[Body], id: Id| bodies.iter().position(|b| b.id == id).ok_or("a body it used no longer exists".to_owned());
+        const MESH_ONLY: &str = "this body is a mesh (imported, tapered, or combined with one), and only exact bodies made from sketches can do that";
+        match &f.kind {
+            FeatureKind::Transform(t) => {
+                let i = find(bodies, t.body)?;
+                if t.scale.v.abs() < 1e-9 {
+                    return Err("the scale is zero".into());
+                }
+                let turn = |axis: DVec3, v: &Value| Place::Turn { origin: DVec3::ZERO, axis, angle: v.v.to_radians() };
+                bodies[i].place(&[
+                    Place::Scale { centre: DVec3::ZERO, factor: t.scale.v },
+                    turn(DVec3::X, &t.rotate[0]),
+                    turn(DVec3::Y, &t.rotate[1]),
+                    turn(DVec3::Z, &t.rotate[2]),
+                    Place::Shift(DVec3::new(t.translate[0].v, t.translate[1].v, t.translate[2].v)),
+                ])
+            }
+            FeatureKind::Combine(c) => {
+                let op = match c.op {
+                    Op::Cut => Bool::Subtract,
+                    Op::Intersect => Bool::Intersect,
+                    _ => Bool::Union,
+                };
+                let ti = find(bodies, c.target)?;
+                let tools: Vec<usize> = c.tools.iter().map(|t| if *t == c.target { Err("a body cannot be combined with itself".to_owned()) } else { find(bodies, *t) }).collect::<Result<_, _>>()?;
+                if bodies[ti].is_exact() && tools.iter().all(|t| bodies[*t].is_exact()) {
+                    let mut result = bodies[ti].solids.clone();
+                    for t in &tools {
+                        result = exact::boolean(&result, &bodies[*t].solids, op)?;
+                    }
+                    bodies[ti].set_exact(result)?;
+                } else {
+                    let mut result = bodies[ti].bare();
+                    for t in &tools {
+                        result = csg::boolean(&result, &bodies[*t].bare(), op)?;
+                    }
+                    bodies[ti].set_mesh(result);
+                }
+                // What is joined on brings its threads with it.
+                if c.op == Op::Join {
+                    let carried: Vec<Mesh> = tools.iter().flat_map(|t| bodies[*t].threads.clone()).collect();
+                    for t in carried {
+                        bodies[ti].add_thread(t);
+                    }
+                }
+                if !c.keep_tools {
+                    bodies.retain(|b| !c.tools.contains(&b.id));
+                }
+                bodies.retain(|b| !b.mesh.tris.is_empty());
+                Ok(())
+            }
+            FeatureKind::Blend(b) => {
+                let i = find(bodies, b.body)?;
+                if !bodies[i].is_exact() {
+                    return Err(MESH_ONLY.into());
+                }
+                let made = exact::blend(&bodies[i].solids, &exact::candidates(&bodies[i].solids, &b.edges, b.frame), b.size.v, b.chamfer)?;
+                bodies[i].set_exact(made)
+            }
+            FeatureKind::Shell(sh) => {
+                let i = find(bodies, sh.body)?;
+                if !bodies[i].is_exact() {
+                    return Err(MESH_ONLY.into());
+                }
+                let made = exact::shell(&bodies[i].solids, &exact::candidates(&bodies[i].solids, &sh.faces, sh.frame), sh.thickness.v)?;
+                bodies[i].set_exact(made)
+            }
+            FeatureKind::Hole(h) => {
+                let i = find(bodies, h.body)?;
+                let sizes = h.sizes()?;
+                let dir = h.dir.try_normalize().ok_or("the hole has no direction")?;
+                if h.at.is_empty() {
+                    return Err("the hole needs at least one position".into());
+                }
+                let (lo, hi) = bodies[i].mesh.bbox().ok_or("the body is empty")?;
+                // Far enough to come out of the other side, wherever that is.
+                let through = |at: DVec3| (0..8).map(|k| (DVec3::new(if k & 1 == 0 { lo.x } else { hi.x }, if k & 2 == 0 { lo.y } else { hi.y }, if k & 4 == 0 { lo.z } else { hi.z }) - at).dot(dir)).fold(0.0, f64::max) + 1.0;
+                let depth = |at: DVec3| h.depth.as_ref().map_or_else(|| through(at), |d| d.v);
+                let before = bodies[i].bare().volume();
+                // Where the drill comes out, for a thread that runs the whole way: the last surface on its line.
+                let bare = bodies[i].bare();
+                let exit = |at: DVec3| bare.ray(at + dir * through(at), -dir).map_or(through(at) - 1.0, |hit| through(at) - hit.0);
+                // A modeled thread sits in a hole drilled to its full diameter.
+                let drilled = sizes.thread.map_or(sizes.diameter, |(major, _)| major + threads::BED);
+                let sunk = match sizes.head {
+                    Some(exact::DrillHead::Counterbore { depth, .. }) => depth,
+                    Some(exact::DrillHead::Countersink { diameter, angle }) => (diameter - drilled).max(0.0) / 2.0 / (angle.to_radians() / 2.0).tan(),
+                    None => 0.0,
+                };
+                let mut sleeves = Vec::new();
+                for at in &h.at {
+                    if let Some((major, pitch)) = sizes.thread {
+                        let length = h.depth.as_ref().map_or_else(|| exit(*at), |d| d.v) - sunk;
+                        if length <= 1e-6 {
+                            return Err("the counterbore or countersink leaves no depth for the thread".into());
+                        }
+                        let mut sleeve = threads::sleeve(major, sizes.diameter, major + 2.0 * threads::BED, pitch, length, h.left)?;
+                        let turn = glam::DQuat::from_rotation_arc(DVec3::Z, dir);
+                        sleeve.map(|v| *at + turn * (v + DVec3::Z * sunk));
+                        sleeves.push(sleeve);
+                    }
+                    let tool = exact::drill(*at, dir, &exact::Drill { diameter: drilled, depth: depth(*at), tip_angle: h.tip_angle.as_ref().map(|v| v.v), head: sizes.head })?;
+                    bodies[i].cut(&tool)?;
+                }
+                if before - bodies[i].bare().volume() < 1e-9 {
+                    return Err("the hole does not touch the body; check its position and direction".into());
+                }
+                for sleeve in sleeves {
+                    bodies[i].add_thread(sleeve);
+                }
+                Ok(())
+            }
+            FeatureKind::Thread(t) => {
+                let i = find(bodies, t.body)?;
+                if !bodies[i].is_exact() {
+                    return Err(MESH_ONLY.into());
+                }
+                let spec = threads::find(&t.thread)?;
+                let mut barrel = exact::barrel(&bodies[i].solids, &exact::candidates(&bodies[i].solids, &[t.face], t.frame)[0])?;
+                // Offsets are measured from the cylinder's outer end: a rod's tip, a hole's mouth.
+                if let Some((lo, hi)) = bodies[i].mesh.bbox() {
+                    let (middle, far) = ((lo + hi) / 2.0, barrel.start + barrel.axis * barrel.length);
+                    if far.distance(middle) > barrel.start.distance(middle) + 1e-9 {
+                        barrel = exact::Barrel { start: far, axis: -barrel.axis, ..barrel };
+                    }
+                }
+                let across = barrel.radius * 2.0;
+                let room = t.extra.as_ref().map_or(0.0, |v| v.v);
+                if room < 0.0 || room > spec.pitch {
+                    return Err(format!("the allowance should be between 0 and the thread's pitch, {} mm", fmt_len(spec.pitch, Unit::Mm)));
+                }
+                // A hole is remade to suit the thread and a thick rod turned down to it, but a thin rod cannot be built up.
+                if !barrel.internal && across < spec.major * 0.9 {
+                    return Err(format!("{} goes on a rod of {} mm or more; this one is {} mm", spec.name, fmt_len(spec.major, Unit::Mm), fmt_len(across, Unit::Mm)));
+                }
+                let (from, length) = match (&t.offset, &t.length) {
+                    (None, None) => (0.0, barrel.length),
+                    (offset, length) => {
+                        let from = offset.as_ref().map_or(0.0, |v| v.v);
+                        (from, length.as_ref().map_or(barrel.length - from, |v| v.v))
+                    }
+                };
+                if from < -1e-9 || length <= 1e-9 || from + length > barrel.length + 1e-6 {
+                    return Err("the thread's offset and length do not fit on the cylinder".into());
+                }
+                let (start, end) = (barrel.start + barrel.axis * from, barrel.start + barrel.axis * (from + length));
+                let turn = glam::DQuat::from_rotation_arc(DVec3::Z, barrel.axis);
+                let mut thread = if barrel.internal {
+                    // A hole wider than the thread (a clearance hole, say) is filled in first. Then it is
+                    // opened out to the thread's full diameter and the thread set into it.
+                    let major = spec.major + room;
+                    let wide = across > major + threads::BED + 1e-9;
+                    if wide {
+                        let filled = exact::boolean(&bodies[i].solids, &exact::cylinder(start, end, barrel.radius)?, Bool::Union)?;
+                        bodies[i].set_exact(filled)?;
+                    }
+                    if wide || across < major + threads::BED {
+                        bodies[i].cut(&exact::cylinder(start, end, (major + threads::BED) / 2.0)?)?;
+                    }
+                    // The crests stand where the hole's wall was if that is near the tap drill size, and at that size otherwise.
+                    let crests = if across >= spec.minor() * 0.9 && across <= spec.major - 0.2 * spec.pitch { across.max(spec.tap_drill + room) } else { spec.tap_drill + room };
+                    threads::sleeve(major, crests, major + 2.0 * threads::BED, spec.pitch, length, t.left)?
+                } else {
+                    // The rod is turned down to just under the thread's roots, and the thread set over it.
+                    // At a free end the core stops just short, so the thread's own end is the one that shows.
+                    let bare = bodies[i].bare();
+                    // Looking back along the axis from well outside, a free end is the first thing in the way.
+                    let far = bare.bbox().map_or(1.0, |(lo, hi)| lo.distance(hi)) + 1.0;
+                    let free = |p: DVec3, out: DVec3| bare.ray(p + out * far, -out).is_some_and(|hit| (hit.0 - far).abs() < 1e-6);
+                    let ends = [free(start, -barrel.axis), free(end, barrel.axis)];
+                    // A chamfer made before threading lies beyond the picked cylindrical face.
+                    // Leaving it untouched leaves a full-diameter collar that cannot pass the
+                    // nut's crests. Turn that free-end chamfer down to a pilot as well.
+                    let chamfer = |at: DVec3, out: DVec3, at_face_end: bool| {
+                        if !at_face_end { return 0.0; }
+                        exact::end_chamfer(&bodies[i].solids, at, out, barrel.radius)
+                            .filter(|d| free(at + out * *d, out)).unwrap_or(0.0)
+                    };
+                    let caps = [chamfer(start, -barrel.axis, from.abs() < 1e-6), chamfer(end, barrel.axis, (from + length - barrel.length).abs() < 1e-6)];
+                    let (stock_start, stock_end) = (start - barrel.axis * caps[0], end + barrel.axis * caps[1]);
+                    let inset = |is_free: bool| if is_free { threads::BED.min(length / 4.0) } else { 0.0 };
+                    let core = exact::cylinder(stock_start + barrel.axis * inset(ends[0]), stock_end - barrel.axis * inset(ends[1]), (spec.minor() - room) / 2.0 - threads::BED)?;
+                    let stock = exact::cylinder(stock_start, stock_end, barrel.radius.max(spec.major / 2.0) + 0.01)?;
+                    bodies[i].cut(&exact::boolean(&stock, &core, Bool::Subtract)?)?;
+                    threads::rod_with_lead(spec.major - room, spec.pitch, length, t.left, [ends[0] || caps[0] > 0.0, ends[1] || caps[1] > 0.0])?
+                };
+                thread.map(|v| start + turn * v);
+                bodies[i].add_thread(thread);
+                Ok(())
+            }
+            FeatureKind::Pattern(p) => {
+                let source = self.feature(p.source).filter(|s| !s.suppressed).ok_or("the feature it repeats is missing or suppressed")?;
+                let (tool, op) = self.tool(source, bodies)?.ok_or("only extrudes, revolves and imports can be patterned")?;
+                let mut landed = 0;
+                for (k, place) in p.placements()?.iter().enumerate() {
+                    let copy = tool.placed(place);
+                    // A cut that lands clear of every body has nothing to do; the others still apply.
+                    if matches!(op, Op::Cut | Op::Intersect) && !bodies.iter().any(|b| overlap(b.mesh.bbox(), copy.bbox())) {
+                        continue;
+                    }
+                    landed += 1;
+                    // Bodies are named by the feature that made them; copies get ids of their own beside it.
+                    Self::merge(copy, op, f.id * 1000 + k as Id + 1, bodies, count)?;
+                }
+                if landed == 0 {
+                    return Err("none of the copies reach a body; try another axis, or a negative spacing or angle".into());
+                }
+                Ok(())
+            }
+            _ => match self.tool(f, bodies)? {
+                Some((tool, op)) => Self::merge(tool, op, f.id, bodies, count),
+                None => Ok(()),
+            },
+        }
+    }
+
+    /// Adds a feature's shape to the bodies it touches, as its operation says.
+    fn merge(tool: Shape, op: Op, id: Id, bodies: &mut Vec<Body>, count: &mut usize) -> Result<(), String> {
+        let reach = tool.bbox();
+        let hits: Vec<usize> = (0..bodies.len()).filter(|i| overlap(bodies[*i].mesh.bbox(), reach)).collect();
+        // Exact against exact stays exact; a mesh on either side makes the result a mesh.
+        let exact_tool = |bodies: &[Body]| match &tool {
+            Shape::Exact(l) if hits.iter().all(|i| bodies[*i].is_exact()) => Some(l.clone()),
+            _ => None,
+        };
+        match op {
+            Op::Join if !hits.is_empty() => {
+                match exact_tool(bodies) {
+                    Some(mut all) => {
+                        for i in &hits {
+                            all = exact::boolean(&bodies[*i].solids, &all, Bool::Union)?;
+                        }
+                        bodies[hits[0]].set_exact(all)?;
+                    }
+                    None => {
+                        let mut m = tool.mesh()?;
+                        for i in &hits {
+                            m = csg::boolean(&bodies[*i].bare(), &m, Bool::Union)?;
+                        }
+                        bodies[hits[0]].set_mesh(m);
+                    }
+                }
+                for i in hits[1..].iter().rev() {
+                    for t in bodies.remove(*i).threads {
+                        bodies[hits[0]].add_thread(t);
+                    }
+                }
+            }
+            Op::New | Op::Join => {
+                *count += 1;
+                bodies.push(tool.body(id, format!("Body{count}"))?);
+            }
+            Op::Cut | Op::Intersect => {
+                if hits.is_empty() {
+                    return Err(format!("there is no body here to {}", op.name()));
+                }
+                let how = if op == Op::Cut { Bool::Subtract } else { Bool::Intersect };
+                match exact_tool(bodies) {
+                    Some(solids) => {
+                        for i in hits {
+                            let made = exact::boolean(&bodies[i].solids, &solids, how)?;
+                            bodies[i].set_exact(made)?;
+                        }
+                    }
+                    None => {
+                        let m = tool.mesh()?;
+                        for i in hits {
+                            let made = csg::boolean(&bodies[i].bare(), &m, how)?;
+                            bodies[i].set_mesh(made);
+                        }
+                    }
+                }
+                bodies.retain(|b| !b.mesh.tris.is_empty());
+            }
+        }
+        Ok(())
+    }
+
+    /// The middle of what feature `id` adds or removes, for showing where its copies will go.
+    pub fn tool_center(&self, id: Id, bodies: &[Body]) -> Option<DVec3> {
+        let (shape, _) = self.tool(self.feature(id)?, bodies).ok()??;
+        shape.bbox().map(|(lo, hi)| (lo + hi) / 2.0)
+    }
+
+    /// The axis line of a revolve in sketch coordinates, for drawing.
+    pub fn axis_line(s: &Sketch, axis: Axis) -> Option<(DVec2, DVec2)> {
+        match axis {
+            Axis::X => Some((DVec2::ZERO, DVec2::X)),
+            Axis::Y => Some((DVec2::ZERO, DVec2::Y)),
+            Axis::Line(l) => match s.entities.get(&l)?.geom {
+                Geom::Line { .. } => s.line(l),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// A document being worked on: its built bodies, undo history and file.
+pub struct Session {
+    pub doc: Document,
+    pub built: Built,
+    undo: Vec<Document>,
+    redo: Vec<Document>,
+    checkpoint: Option<Checkpoint>,
+    pub path: Option<PathBuf>,
+    /// Changed since it was last saved.
+    pub dirty: bool,
+    /// Goes up every time the bodies are rebuilt.
+    pub rev: u64,
+    /// Goes up whenever the document may have changed.
+    pub edits: u64,
+}
+
+/// History metadata belonging to the most recent in-progress edit. Keeping
+/// this separate lets failed commands and cancelled drags restore redo too.
+struct Checkpoint {
+    redo: Vec<Document>,
+    dirty: bool,
+    evicted: Option<Document>,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Session::new(Document::new(Unit::Mm))
+    }
+}
+
+impl Session {
+    pub fn new(mut doc: Document) -> Session {
+        let built = doc.rebuild();
+        Session { doc, built, undo: Vec::new(), redo: Vec::new(), checkpoint: None, path: None, dirty: false, rev: 1, edits: 0 }
+    }
+
+    /// Records the current state as an undo step; call before changing the document.
+    pub fn snapshot(&mut self) {
+        self.undo.push(self.doc.clone());
+        let evicted = (self.undo.len() > 200).then(|| self.undo.remove(0));
+        self.checkpoint = Some(Checkpoint { redo: std::mem::take(&mut self.redo), dirty: self.dirty, evicted });
+        self.dirty = true;
+        self.edits += 1;
+    }
+
+    /// Drops the last undo step and returns to it, abandoning a change in progress.
+    pub fn abort(&mut self) {
+        let Some(checkpoint) = self.checkpoint.take() else { return };
+        if let Some(d) = self.undo.pop() {
+            self.doc = d;
+            self.redo = checkpoint.redo;
+            self.dirty = checkpoint.dirty;
+            if let Some(evicted) = checkpoint.evicted {
+                self.undo.insert(0, evicted);
+            }
+            // Revisions stay monotonic: a cancelled drag may already have been
+            // drawn, and recovery/rendering must observe the restored document.
+            self.rebuild();
+        }
+    }
+
+    /// The document as it was at the last snapshot.
+    pub fn before(&self) -> Option<&Document> {
+        self.undo.last()
+    }
+
+    pub fn rebuild(&mut self) {
+        self.built = self.doc.rebuild();
+        self.rev += 1;
+        self.edits += 1;
+    }
+
+    /// Applies a change as one undo step; an error leaves the document as it was.
+    pub fn edit<T>(&mut self, f: impl FnOnce(&mut Document) -> Result<T, String>) -> Result<T, String> {
+        self.snapshot();
+        match f(&mut self.doc) {
+            Ok(v) => {
+                self.rebuild();
+                Ok(v)
+            }
+            Err(e) => {
+                self.abort();
+                Err(e)
+            }
+        }
+    }
+
+    /// Like [`Session::edit`], but also undoes the change if the feature `id` fails to build.
+    pub fn edit_feature<T>(&mut self, f: impl FnOnce(&mut Document) -> Result<(Id, T), String>) -> Result<T, String> {
+        let (id, v) = self.edit(f)?;
+        if let Some(e) = self.built.errors.get(&id).cloned() {
+            self.abort();
+            return Err(e);
+        }
+        Ok(v)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn undo(&mut self) -> bool {
+        self.checkpoint = None;
+        let Some(d) = self.undo.pop() else { return false };
+        self.redo.push(std::mem::replace(&mut self.doc, d));
+        self.dirty = true;
+        self.rebuild();
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        self.checkpoint = None;
+        let Some(d) = self.redo.pop() else { return false };
+        self.undo.push(std::mem::replace(&mut self.doc, d));
+        self.dirty = true;
+        self.rebuild();
+        true
+    }
+
+    pub fn save(&mut self, path: &Path) -> Result<(), String> {
+        crate::io::save(&self.doc, path)?;
+        self.checkpoint = None;
+        self.path = Some(path.to_owned());
+        self.dirty = false;
+        Ok(())
+    }
+
+    pub fn open(path: &Path) -> Result<Session, String> {
+        let mut s = Session::new(crate::io::load(path)?);
+        s.path = Some(path.to_owned());
+        Ok(s)
+    }
+
+    /// Bodies that are not hidden.
+    pub fn visible_bodies(&self) -> impl Iterator<Item = &Body> {
+        self.built.bodies.iter().filter(|b| !self.doc.hidden_bodies.contains(&b.id))
+    }
+}

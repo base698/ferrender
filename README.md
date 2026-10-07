@@ -1,0 +1,548 @@
+<h1 align="center">Ferrender</h1>
+
+<p align="center">
+  <b>A parametric 3D CAD program in the manner of Fusion, written in Rust.</b><br>
+  Constrained sketches, exact solids, a timeline you can go back and edit, real screw threads,<br>
+  and every operation a JSON command that Claude can drive.
+</p>
+
+<p align="center">
+  <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-b7410e?style=flat-square&logo=rust">
+  <img alt="macOS native; Linux untested" src="https://img.shields.io/badge/macOS-native-2f7bf5?style=flat-square">
+  <img alt="Exact solids from OpenCascade" src="https://img.shields.io/badge/solids-OpenCascade-3a3a3a?style=flat-square">
+  <img alt="Drivable over MCP" src="https://img.shields.io/badge/AI-MCP%20%C2%B7%20Claude-6b4fbb?style=flat-square">
+  <img alt="Status: early" src="https://img.shields.io/badge/status-early-d69e2e?style=flat-square">
+</p>
+
+<br>
+
+<p align="center">
+  <img src="docs/images/hero.jpg" alt="Ferrender showing a bearing block with four counterbored holes, a filleted boss and a threaded M12 bore, beside a hex bolt with a modeled thread; the timeline along the bottom lists the twelve features that built them" width="100%">
+  <br>
+  <sub>A block with a tapped M12 bore and the bolt that goes in it. Twelve features, all still editable in the timeline along the bottom.</sub>
+</p>
+
+<p align="center">
+  <a href="#sketch-with-intent">Sketching</a> ·
+  <a href="#from-sketch-to-solid">Solids</a> ·
+  <a href="#holes-and-threads-from-a-catalog">Holes &amp; threads</a> ·
+  <a href="#look-inside-and-measure">Inspect</a> ·
+  <a href="#built-to-be-driven">AI</a> ·
+  <a href="#get-started">Get started</a> ·
+  <a href="#reference">Reference</a>
+</p>
+
+<br>
+
+<table>
+  <tr>
+    <td width="25%" valign="top">
+      <h3>Parametric</h3>
+      Sizes are expressions. Name one <code>w</code>, use <code>w / 2</code> somewhere else, change it later and everything built on it follows.
+    </td>
+    <td width="25%" valign="top">
+      <h3>Exact solids</h3>
+      Bodies are true planes, cylinders and blends from the OpenCascade kernel, so they fillet, shell and export to STEP. Triangles are only for the screen and for STL.
+    </td>
+    <td width="25%" valign="top">
+      <h3>Made for printing</h3>
+      Holes sized for a screw from a thread catalog, and threads modeled for real, on a hole or on a rod, ready for the slicer.
+    </td>
+    <td width="25%" valign="top">
+      <h3>AI native</h3>
+      The buttons, the MCP server and the built-in assistant all run the same JSON commands. Claude builds in the window you are looking at.
+    </td>
+  </tr>
+</table>
+
+<br>
+
+Every screenshot here is the real app, driven and rendered offscreen by the test harness in
+[`demo.rs`](crates/ferrender/src/demo.rs). The part is built from scratch each time the pictures are made.
+
+## Sketch with intent
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/sketch.jpg" alt="A top-down sketch of a 60 by 40 rectangle with a circle in the middle; dimensions read fx: 60, fx: 40, fx: 30, fx: 20 and a 26 diameter, the Parameters window lists w, d, t and boss, and the status bar says Fully constrained" width="100%">
+      <br>
+      <sub>The one sketch behind the block. Every <code>fx:</code> is a formula: the circle sits at <code>w / 2</code>, <code>d / 2</code>.</sub>
+      <h3>Dimensions that are formulas</h3>
+      Draw roughly, then say what you mean: horizontal, tangent, equal, 30 from that edge. The status bar counts the freedom left, and the sketch turns black when nothing can move. Twelve kinds of constraint, and a conflicting one is refused.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/typed.jpg" alt="A rectangle being drawn from the origin with two small boxes above it, Width holding w = 48 with a lock and Height being typed as 0.75 in" width="100%">
+      <br>
+      <sub>Mid-rectangle: the width is held at a new parameter, the height is being typed in inches.</sub>
+      <h3>Type sizes as you draw</h3>
+      After the first click, boxes appear for the width and height, the diameter or the length. Type a size and it holds while the pointer picks the direction; Tab goes to the next box. <code>w = 48</code> names a parameter on the spot, and any unit works in any document.
+    </td>
+  </tr>
+</table>
+
+## From sketch to solid
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/extrude.jpg" alt="The Extrude dialog with distance $t, shown as 8 mm, and an arrow standing on the selected sketch profile" width="100%">
+      <br>
+      <sub>Extrude by <code>$t</code>. The arrow can be dragged instead; it lands on round numbers.</sub>
+      <h3>Pull it up</h3>
+      Extrude and Revolve work on the closed regions of a sketch or straight on a flat face. Make a new body, or join, cut or intersect the ones it meets. Go a distance, through everything, or up to a face you click.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/fillet.jpg" alt="The Fillet dialog with a 3 mm radius and a preview of the rounded edge where the round boss meets the plate" width="100%">
+      <br>
+      <sub>Click an edge, type a radius, and the preview is the real result.</sub>
+      <h3>Round it off</h3>
+      Fillet, chamfer and shell work on the exact solid, so a blend is a true surface. A size that cannot fit is refused in the preview, before you press OK.
+    </td>
+  </tr>
+</table>
+
+Every feature lands in the timeline at the bottom. Double-click one to change it, or drag the marker back to see the
+part as it was and slot a new feature in at that point.
+
+## Holes and threads from a catalog
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/hole.jpg" alt="The Hole dialog set to Counterbore, clearance normal, thread M4x0.7, with four holes previewed on the plate and the note Drilled 4.5 mm, counterbore 8 mm by 4.4 mm deep" width="100%">
+      <br>
+      <sub>Four clicks, four holes. The sizes come from the M4 row of the catalog.</sub>
+      <h3>Holes that know their screw</h3>
+      Pick the screw, not the drill: a clearance hole in three fits, or a tapped hole, plain, counterbored for a socket cap or countersunk for a flat head. The catalog covers ISO metric coarse and fine from M1.6 to M12 and unified inch from #4-40 to 1/2-20.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/thread.jpg" alt="The Thread dialog reading On: 12 mm rod, thread M12x1.75, for 22 mm from the end, an allowance of 0.2 mm, with the thread previewed on the bolt" width="100%">
+      <br>
+      <sub>Click the side of a rod. It is recognised as 12 mm and offered M12.</sub>
+      <h3>Thread anything round</h3>
+      Thread goes on the outside of a rod or the inside of a hole, for all of it or a length from the end, right or left handed. A hole of the wrong size is remade to suit the thread you choose.
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <img src="docs/images/threads.jpg" alt="A close view of the threaded M12 bore in the boss and the matching thread on the bolt beside it" width="100%">
+      <br>
+      <sub>The finished threads, close up. These are the triangles the slicer gets.</sub>
+    </td>
+  </tr>
+</table>
+
+## Look inside and measure
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/section.jpg" alt="The block and bolt cut open along a plane, with the cut faces hatched orange; the internal thread of the bore and the thread of the bolt are visible in profile" width="100%">
+      <br>
+      <sub>Section Analysis through the middle. It changes the view, not the model.</sub>
+      <h3>Cut the view open</h3>
+      Slide a plane through the model to check wall thickness, hole depths and how a thread actually meets its bore.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/measure.jpg" alt="The Measure dialog showing two flat faces outlined in blue, Apart 14 mm, closest points 14.316 mm, angle 0, and the X, Y and Z parts" width="100%">
+      <br>
+      <sub>Two clicks: the top of the boss and the top of the plate.</sub>
+      <h3>Measure between any two things</h3>
+      Corners, edges and faces, in any pairing. You get the shortest distance with its X, Y and Z parts, the angle, and for parallel things the square-on gap a drawing would show.
+    </td>
+  </tr>
+</table>
+
+## Built to be driven
+
+Everything above is also a command. These are some of the commands behind the bearing block, as Claude would send
+them over MCP:
+
+```json
+{"op": "set_parameter", "name": "w", "expr": "60 mm"}
+{"op": "create_sketch", "plane": "XY"}
+{"op": "add_geometry", "sketch": "$last_sketch", "items": [
+    {"type": "rect", "from": [0, 0], "to": [55, 35]},
+    {"type": "circle", "center": [25, 15], "radius": 11}]}
+{"op": "add_constraint", "sketch": "$last_sketch", "kind": "distance", "refs": [4], "value": "$w"}
+{"op": "extrude", "sketch": "$last_sketch", "distance": "$t", "profiles": "all"}
+{"op": "fillet_edges", "body": 2, "edges": [[0, 0, 4], [60, 0, 4]], "radius": 6}
+{"op": "hole", "body": 2, "at": [[8, 8, 8], [52, 8, 8]], "thread": "M4", "type": "counterbore", "through": true}
+{"op": "hole", "body": 2, "at": [30, 20, 22], "thread": "M12", "fit": "tapped", "modeled": true, "through": true}
+```
+
+`ferrender mcp` is an MCP server. If a Ferrender window is open it drives that window, so you watch the part appear;
+otherwise it works headless and writes files. Claude can ask for a rendered view to check its own work, and each
+command is one step of undo.
+
+```sh
+claude mcp add ferrender -- /path/to/ferrender mcp
+```
+
+The Assistant panel inside the app runs the same commands through the Claude API with your own key. It has not yet
+been tried against the live API.
+
+## Everything in the box
+
+| | |
+|---|---|
+| **Sketch** | Line, rectangle, circle, arc, point, polygon; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
+| **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; length, distance, radius, diameter and angle dimensions |
+| **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
+| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, join / cut / intersect, fillet, chamfer, shell |
+| **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
+| **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
+| **Inspect** | Measure, Section Analysis, degrees of freedom while sketching |
+| **Timeline** | Edit, rename, suppress, delete, roll back; undo and redo |
+| **Files** | `.ferr` documents; STL in and out; STEP out; recovery of unsaved work after a crash |
+| **AI** | MCP server, local command socket, built-in assistant |
+
+It is early, and smaller than what it imitates: no assemblies or joints, no loft or sweep, no drawings, and the
+[limits](#limits) below are real. `TODO.md` has the list.
+
+## Get started
+
+You need a [Rust toolchain](https://rustup.rs) and a C++ compiler (Xcode's clang, or g++).
+
+```sh
+cargo run --release -p ferrender                # empty design
+cargo run --release -p ferrender -- part.ferr   # or an .stl to import
+./scripts/bundle-macos.sh                       # dist/Ferrender.app
+```
+
+The solid kernel is OpenCascade. There is no cmake step: the `cadrum` binding's build script downloads prebuilt
+OpenCascade 8 static libraries the first time (about 33 MB, from that project's GitHub releases, not checksummed).
+
+**Linux** needs the usual winit and wgpu system packages (X11 or Wayland development libraries and a Vulkan or GL
+driver). It has not been built or run on Linux yet.
+
+## Under the hood
+
+- **`crates/fr-core`**: the engine, with no GUI dependency. Expressions and units, sketches, the constraint solver,
+  profile detection, exact solids (`exact.rs`, OpenCascade through cadrum) with a mesh fallback, the thread catalog
+  and generator, STL and STEP, the document and its undo history, the command API, and a software renderer for
+  windowless screenshots.
+- **`crates/ferrender`**: the app, built on [egui](https://github.com/emilk/egui) and eframe and drawn with wgpu,
+  plus the MCP server and the assistant.
+
+```sh
+cargo test          # engine tests, plus UI tests that drive the real app offscreen and write frames to target/uitest/
+```
+
+The README screenshots come from the same harness:
+
+```sh
+./scripts/readme-images.sh    # runs the ignored readme_ tests and writes docs/images/
+```
+
+## Reference
+
+### Sketch
+
+New Sketch, pick a plane (or click a flat face of a body). Line
+(L), Rectangle (R), Circle (C), Arc (A), Point (P). Clicks snap to existing
+points and onto lines and curves; a nearly horizontal or vertical line becomes
+exactly so. Drag anything with Select (S); it moves as far as its constraints
+allow. X toggles construction geometry.
+
+### Rework
+
+Polygon draws a regular polygon (set the sides in the Sketch
+Palette). Project copies the outline of a body's face into the sketch, fixed
+in place and drawn purple; round outlines come in as true circles. Trim (T)
+removes the stretch you click, back to where other geometry crosses it. Offset
+(O) makes parallel copies of the selected lines or circles at a distance that
+stays a dimension. Mirror copies the selection across the line selected last
+and keeps the two sides symmetric. Fillet and Chamfer round or cut the
+selected corner (a point, or the two lines that meet there).
+
+### Constrain
+
+Select geometry, then click a constraint: coincident,
+collinear, concentric, midpoint, fix, equal, parallel, perpendicular,
+horizontal, vertical, tangent, symmetric. A constraint that conflicts with the
+others is refused. The status bar shows the degrees of freedom left; the
+sketch turns black when it is fully constrained.
+
+### Dimension (D)
+
+Click a line for its length, a circle or arc for its
+diameter or radius, two points or two parallel lines for a distance, two other
+lines for an angle. Double-click a dimension to change it.
+
+### Values
+
+Every size box takes an expression:
+
+| You type | Meaning |
+|---|---|
+| `10` | 10 of the document's units |
+| `10 mm`, `2.5 cm`, `1 in`, `1"` | a length in those units, whatever the document's are |
+| `$w / 2 + 1 mm` | arithmetic with parameters (`w / 2` works too) |
+| `w = 60 mm` | defines the parameter `w` and uses it here |
+| `90 deg`, `1.57 rad` | angles |
+
+Parameters are also listed and edited under Parameters. Changing one rebuilds
+everything that uses it. Bare numbers are stored with the units they were
+typed in, so switching the document between mm, cm and in changes how sizes
+are shown, not how big anything is.
+
+### Model
+
+Extrude (E) and Revolve work on closed sketch profiles; click
+profiles in the viewport to add or remove them. A profile nested in another is
+a hole in it. Each can make a new body, or join, cut or intersect the bodies
+it touches. Double-click a feature in the timeline to edit it. Extrude can
+be set by dragging the arrow that stands on the profile or face (it lands
+on round numbers; pull it back through the plane to go the other way). It can
+also go Through All bodies, reach To Face (click a face and the distance is
+measured for you), and lean its walls with a Taper angle. New Sketch takes an
+Offset, for a sketch on a plane above or below the one you pick.
+
+### Exact and mesh bodies
+
+A body made from sketches is an exact solid: true
+planes, cylinders and blends, turned into triangles only for display and STL.
+An imported STL, a tapered extrude, and anything combined with one of those is
+a mesh body. Both kinds work with extrude, revolve, cut, join, move and
+pattern. Only exact bodies can be filleted, chamfered, shelled or written to
+STEP. The status bar says which kind the selected body is.
+
+### Fillet, Chamfer, Shell
+
+Fillet and Chamfer round or bevel the edges of a
+body: click edges to add or remove them (with a face selected first, its edges
+start selected). Shell hollows a body to a wall thickness, open at the faces
+you click. A size that cannot fit is refused in the preview.
+
+### Timeline
+
+Features sit in the order they were made. Double-click one to
+edit it; right-click for rename, suppress and delete. Drag the marker at the
+end of the timeline to the left to roll the model back in time: features after
+it are not built, and new features go in where the marker is. "Roll to End"
+brings everything back.
+
+### Pattern
+
+Repeats an extrude, revolve or imported mesh: around a world axis,
+in a row, or mirrored through an origin plane. A patterned cut cuts again at
+each position; a patterned body makes more bodies. Dots in the viewport show
+where each copy will land. A cut copy that lands clear of every body is
+skipped; if they all miss, try another axis or a negative spacing.
+
+### Hole
+
+Click a flat face to put holes on it (a visible sketch point under
+the cursor places one exactly). A hole is simple, counterbored or countersunk,
+and sized either by a diameter or for a screw from the thread catalog: a
+clearance hole (close, normal or loose fit) or a tapped hole. Counterbores fit
+a socket cap screw and countersinks a flat head screw of that size unless you
+type your own. A tapped hole is left at the tap drill size, to be tapped or
+for a screw to cut its own thread; tick "Model it" to have the real thread,
+for printing. "Allowance" widens every diameter, the modeled thread's
+included; ticking "Model it" fills in 0.2 mm.
+
+### Thread
+
+Click the side of a rod or the inside of a hole to put a real
+thread on it. It suggests the size the cylinder was made for, so a 6.6 mm M6
+clearance hole is offered M6. A hole of any size is remade to suit the thread
+you choose (filled in and re-drilled if it is too wide), and a rod wider than
+the thread is turned down to it; a rod thinner than the thread is refused.
+It can run the whole cylinder or a length measured from its outer end, right
+or left handed.
+
+At a free end, the first turn tapers from the root to the crest so the screw
+can start in its mating hole. If the rod was chamfered before threading,
+Ferrender also trims that end chamfer below the thread root. This avoids
+leaving an oversized, unthreaded collar that blocks the screw from entering.
+An offset or partial thread leaves ends outside its span untouched.
+
+**Allowance** is the room a thread needs to turn. A hole's thread is made
+that much wider across and a rod's that much thinner. The dialog starts at
+0.2 mm, so a printed screw and a printed hole have 0.4 mm of diametral
+clearance (0.2 mm radially), and a metal screw has 0.2 mm of diametral
+clearance in a printed hole. Clear the box for the exact size:
+two printed threads at exact sizes will not go together. Printers differ, so
+treat 0.2 mm as a starting point. Threads finer than about M4 are at the edge
+of what a 0.4 mm nozzle can form; for those a tapped hole left unmodeled, for
+a metal screw to cut its own thread, is usually the better choice.
+
+The catalog (`fr-core/src/threads.rs`) holds ISO metric coarse and fine from
+M1.6 to M12 and unified inch from #4-40 to 1/2-20, each with its pitch, tap
+drill, clearance holes, counterbore and countersink. `list_threads` returns it.
+
+### Sizes while drawing
+
+Once the first point of a rectangle, circle or line
+is down, boxes appear for its width and height, diameter, or length. Type a
+size and it holds whatever the pointer does (the pointer still picks the side
+or direction); Tab moves to the next box; Enter or a click places the shape.
+Each size typed becomes a dimension on it, and `w = 20` defines a parameter
+as it does anywhere else. Enter with nothing typed ends a line as before.
+
+### Measure (I)
+
+Click two things: corners and sketch points, edges and sketch
+lines, or faces. It gives the distance between them with its X, Y and Z
+parts, the angle between straight or flat ones, and for parallel ones how far
+apart they are square to each other, which is the figure a drawing would
+show. Clicking a hole or a rod's side shows its diameter. The `measure`
+command does the same for Claude.
+
+### Section Analysis
+
+Cuts the view open along a plane you can slide, with the
+cut faces hatched, to check walls and holes. It changes the view only.
+
+### Faces
+
+Clicking a body selects the face under the pointer (the patch the
+viewport outlines); the whole body is selected from the browser. With a flat
+face selected, Extrude pulls it out, or pushes it in and cuts with a negative
+distance, and New Sketch starts a sketch on it. You can also click a face
+inside the Extrude dialog.
+
+### Move
+
+Move, rotate and scale act on the selected body, or on the body a
+selected face belongs to. Type distances, or drag the body to slide it across
+the screen (from the Top view that is X and Y). Enter confirms.
+
+### Copy and paste
+
+In a sketch, ⌘C / ⌘X / ⌘V (Ctrl on Linux) copy the
+selected points and entities with the constraints and dimensions between them.
+Paste lands under the pointer. The clipboard holds plain JSON, so it also
+works between Ferrender windows.
+
+### Meshes
+
+Import STL (binary or ASCII) brings a mesh in as a body. Bodies
+can be moved, rotated and scaled, combined with each other, sketched on and
+cut. Export STL asks whether to write millimetres, centimetres or inches;
+slicers read STL as millimetres. Export STEP writes the exact bodies as true
+surfaces for other CAD programs; mesh bodies are left out.
+
+### View
+
+In the model, drag to orbit and Shift-drag to pan. In a sketch the
+left button belongs to the tools, so orbit with a right-drag (or Alt-drag) and
+pan with a middle-drag or Space-drag; those work in the model too. The wheel
+zooms. On a trackpad, two fingers pan (with Shift, orbit) and pinch zooms. F
+fits everything.
+
+### AI
+
+`ferrender mcp` is an MCP server on stdin/stdout in the shape of the Blender MCP:
+
+| Tool | |
+|---|---|
+| `get_reference` | the full command list with arguments |
+| `get_scene_info` | units, parameters, the feature timeline with any errors, bodies |
+| `get_object_info` | one sketch (points, entities, constraints, profiles), feature or body |
+| `get_viewport_screenshot` | a rendered image from a named view or the app's camera |
+| `execute_ferrender_commands` | a list of JSON commands, each one an undo step |
+
+On macOS and Linux it drives the running Ferrender window over a private
+Unix socket, so you watch the model change. The socket lives in a mode-0700
+`bridge` directory beside the settings and accepts clients running as your
+OS user; there is no TCP listener. Those clients can modify the document and
+write files with your permissions. Disable this access in the Assistant panel
+or with `[bridge] enabled = false`, then restart the app.
+
+If no window is available when the first command runs, or with `--headless`,
+MCP selects a separate document and writes files with `save` and `export_stl`.
+That backend stays selected for the entire MCP session. Losing a connection
+returns an error rather than changing documents or replaying a command, and
+a restarted app has a new identity: restart the MCP client to select it.
+`--port N` is retained as the socket channel selector (default 47821), not a
+network port. Other platforms currently support only explicit `--headless`.
+For Claude Code:
+
+```sh
+claude mcp add ferrender -- /path/to/ferrender mcp
+```
+
+The commands are documented in `crates/fr-core/src/api.rs` (`REFERENCE`),
+which is also what the tools tell the client.
+
+The Assistant panel in the app does the same from inside, using the Claude
+API. It needs `ANTHROPIC_API_KEY` in the environment, or a key pasted into the
+panel, which is saved to the config file.
+
+### Files
+
+The native format is `.ferr`: one JSON file holding the units, parameters and
+the feature timeline, with every sketch's points, entities, constraints and
+dimension expressions. Bodies are not stored; they are rebuilt from the
+features on open. Imported meshes are stored inside it.
+
+Unsaved changes are copied, about a second after each one, to a `recovery`
+folder beside the settings. The copy is removed when you save and when the app
+closes normally. If the app crashed or was killed, the next start lists what
+was left and offers to recover or delete it; **File › Recover Unsaved…** shows
+the list again. Recovery never writes over your own `.ferr` file: a recovered
+design opens unsaved, under its old name, until you save it.
+
+Settings live in `~/.config/ferrender/config.toml` (`$XDG_CONFIG_HOME` and
+`FERRENDER_CONFIG_DIR` are honoured), written with mode 0600:
+
+```toml
+[ai]
+api_key = ""   # Anthropic key; ANTHROPIC_API_KEY wins
+model = ""     # empty = claude-opus-5-5
+
+[bridge]
+enabled = true # allow same-user MCP clients; restart the app after changing
+port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
+```
+
+## Limits
+
+- Fillets, chamfers and shells find their edges and faces again by position
+  each time the model rebuilds (where they were, or the same place within the
+  body's bounds). They survive a body changing size, but an earlier feature
+  that reshapes that area can lose them; the feature then fails with a message.
+- The kernel binding is young: `cadrum` 0.8, one maintainer, pinned to an
+  exact version. OpenCascade can return a wrong shape without an error, so
+  every operation is checked against what it must do to the volume or bounds;
+  a failed check is reported as an error, not shown.
+- OpenCascade is LGPL-2.1 with an exception and is linked statically. A
+  closed-source distribution would have to let recipients relink it.
+- A modeled thread is a closed shell of its own that overlaps the body by
+  0.05 mm, not a cut into it. OpenCascade took seconds per thread, failed on
+  long ones and sometimes returned an empty solid, so the thread is generated
+  directly as triangles. Slicers join overlapping shells; a mesh checker may
+  report them as intersecting. The body stays exact, so it can still be
+  filleted; STEP shows a plain hole or rod; a later cut through the thread
+  does not cut the thread; and a body's reported volume leaves threads out.
+- Thread sizes follow the basic ISO and unified profile. The allowance moves
+  the whole profile in or out; there are no tolerance classes such as 6g and
+  6H, and the 0.2 mm default comes from general printing practice, not from
+  measured prints. The catalog's tap drill and clearance sizes were entered from
+  memory of the standard tables and have not been checked against them.
+- Holes start on flat faces and stay where they were put; they do not follow
+  the face if an earlier feature moves it. A thread that runs through a hole
+  ends square at the depth where the hole's axis leaves the body.
+- Mesh bodies (imported STL, tapered extrudes) use the old BSP booleans: fine
+  for parts, slow on dense meshes, refused above 400,000 triangles, and no
+  fillets or Thread (Hole works on them).
+- Sketch regions are found from shapes that share points. Two shapes that
+  merely cross are not split where they cross.
+- A sketch on a body's face, a projected outline and an extruded face record
+  where the face was; they do not follow it if an earlier feature moves it.
+- Offset does not handle arcs. Pattern axes and mirror planes are the model's
+  own, through the origin. Section view needs the GPU viewport and does not
+  affect picking.
+- Not built yet: general helix and sweep, loft, sphere and spline items,
+  draft, copying a whole body, horizontal and vertical position dimensions.
+  See `TODO.md`.
+
+## Credits
+
+Solids come from [OpenCascade](https://dev.opencascade.org/) through the [cadrum](https://crates.io/crates/cadrum)
+binding. Ferrender is an independent project. It is not affiliated with or endorsed by Autodesk, and "Fusion" is
+their trademark.

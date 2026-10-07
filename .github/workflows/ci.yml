@@ -1,0 +1,62 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Install Linux build and offscreen rendering prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config libx11-dev libxi-dev libxrandr-dev \
+            libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libvulkan1 mesa-vulkan-drivers \
+            xvfb xauth
+      # cadrum's build script downloads its pinned OpenCascade prebuilt archive.
+      # macOS supplies its C++ compiler through the runner's Xcode installation.
+      - name: Build all workspace targets
+        run: cargo build --locked --workspace --all-targets
+      - name: Test engine and non-rendering app boundaries
+        run: |
+          cargo test --locked --workspace --all-targets -- --skip uitest:: --skip demo::
+      - name: Test macOS UI state without a GPU
+        if: runner.os == 'macOS'
+        run: |
+          cargo test --locked -p ferrender automation_
+          cargo test --locked -p ferrender editing_extrusions_preserves_taper_and_through_all
+          cargo test --locked -p ferrender malformed_and_oversized_clipboard_geometry_is_refused
+      # Hosted macOS VMs may not expose Metal. Linux's Mesa software Vulkan
+      # driver exercises the complete offscreen rendering/input suite instead.
+      - name: Test full suite with Linux software rendering
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/ferrender-runtime
+        run: |
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          xvfb-run -a cargo test --locked --workspace --all-targets
