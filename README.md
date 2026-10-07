@@ -243,6 +243,8 @@ The README screenshots come from the same harness:
 ./scripts/readme-images.sh    # runs the ignored readme_ tests and writes docs/images/
 ```
 
+Use **Help → About Ferrender** to see the version, full source commit, whether local changes were included, and the build/platform. **Copy build info** copies those details for a test report. The same information is available with `ferrender --version`; it is embedded in the executable at build time. Source archives without Git history report the commit as unavailable.
+
 ## Reference
 
 ### Sketch

@@ -101,6 +101,9 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             ui.checkbox(&mut app.opts.constraints, "Constraints");
             ui.checkbox(&mut app.opts.dimensions, "Dimensions");
         });
+        ui.menu_button("Help", |ui| {
+            item(app, ui, "About Ferrender", "", Action::About);
+        });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui.add(egui::Button::new(format!("{} Assistant", icon::SPARKLE)).selected(app.ai.open)).clicked() {
                 let ctx = ui.ctx().clone();
@@ -1325,6 +1328,32 @@ fn file_error(app: &mut App, ctx: &Context) {
     });
 }
 
+fn about(app: &mut App, ctx: &Context) {
+    if !app.show_about { return; }
+    use crate::build_info as build;
+    egui::Modal::new("about_ferrender".into()).show(ctx, |ui| {
+        ui.set_width(410.0);
+        ui.heading("About Ferrender");
+        ui.label(format!("Version {}", build::VERSION));
+        ui.separator();
+        ui.label("Commit");
+        ui.monospace(build::COMMIT);
+        ui.label(format!("Source: {}", build::source_status()));
+        ui.add_space(6.0);
+        ui.label(format!("Build: {}", build::PROFILE));
+        ui.label(format!("Platform: {}", build::TARGET));
+        if build::COMMIT != "unavailable" {
+            ui.hyperlink_to("View commit on GitHub", format!("https://github.com/base698/ferrender/commit/{}", build::COMMIT));
+        }
+        ui.separator();
+        ui.label("Copy these details when reporting test results.");
+        ui.horizontal(|ui| {
+            if ui.button("Copy build info").clicked() { ctx.copy_text(build::summary()); }
+            if ui.button("Close").clicked() { app.show_about = false; }
+        });
+    });
+}
+
 pub fn windows(app: &mut App, ctx: &Context) {
     view_buttons(app, ctx);
     dialogs(app, ctx);
@@ -1334,5 +1363,6 @@ pub fn windows(app: &mut App, ctx: &Context) {
     assistant(app, ctx);
     rename(app, ctx);
     recover(app, ctx);
+    about(app, ctx);
     file_error(app, ctx);
 }

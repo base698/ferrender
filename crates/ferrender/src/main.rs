@@ -1,6 +1,7 @@
 mod ai;
 mod app;
 mod bridge;
+mod build_info;
 mod config;
 mod gpu;
 mod mcp;
@@ -17,6 +18,7 @@ use std::path::PathBuf;
 
 const HELP: &str = "usage: ferrender [FILE]
        ferrender mcp [--headless] [--port N]
+       ferrender --version
 
 Opens a design (.ferr) or imports a mesh (.stl).
 
@@ -28,6 +30,10 @@ selects a private local socket channel; no TCP port is opened.";
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{}", build_info::summary());
+        return Ok(());
+    }
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{HELP}");
         return Ok(());

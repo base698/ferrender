@@ -526,6 +526,7 @@ pub enum Action {
     Combine,
     Parameters,
     Assistant,
+    About,
     View(&'static str),
     Fit,
     Tool(Tool),
@@ -589,6 +590,7 @@ pub struct App {
     pub toast: Option<(String, f64)>,
     pub file_error: Option<FileError>,
     pub now: f64,
+    pub show_about: bool,
     pub show_params: bool,
     pub show_section: bool,
     pub section: Section,
@@ -657,6 +659,7 @@ impl App {
             toast: None,
             file_error: None,
             now: 0.0,
+            show_about: false,
             show_params: false,
             show_section: false,
             section: Section { on: false, axis: 1, offset: 0.0, flip: false },
@@ -1583,6 +1586,7 @@ impl App {
             }
             Action::Parameters => self.show_params = !self.show_params,
             Action::Assistant => self.ai.open = !self.ai.open,
+            Action::About => self.show_about = true,
             Action::View(name) => {
                 if let Some((yaw, pitch)) = Camera::named(name) {
                     (self.cam.yaw, self.cam.pitch) = (yaw, pitch);
@@ -1756,6 +1760,10 @@ impl App {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape) || i.consume_key(Modifiers::NONE, Key::Enter)) {
                 self.file_error = None;
             }
+            return;
+        }
+        if self.show_about {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape) || i.consume_key(Modifiers::NONE, Key::Enter)) { self.show_about = false; }
             return;
         }
         // The clipboard keys arrive as events, not key presses.
