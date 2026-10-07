@@ -4,7 +4,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-cargo build --release -p ferrender
+cargo build --locked --release -p ferrender
 
 app=dist/Ferrender.app
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/ferrender/Cargo.toml | head -1)
