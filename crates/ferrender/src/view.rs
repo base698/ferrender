@@ -352,6 +352,7 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
         app.scene.key = Some(key);
     }
     if app.scene.verts.is_empty() {
+        app.timeline.software_done();
         return;
     }
     let ppp = ui.ctx().pixels_per_point();
@@ -362,7 +363,7 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
         let reach = app.scene.bounds.map_or(100.0, |(lo, hi)| (0..8).map(|i| DVec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z }).distance(app.cam.target)).fold(0.0, f64::max)) * 1.05 + 1.0;
         painter.add(eframe::egui_wgpu::Callback::new_paint_callback(
             rect,
-            gpu::Frame { rev: app.scene.rev, verts: app.scene.verts.clone(), cam: app.cam, origin: [(rect.min.x * ppp).round(), (rect.min.y * ppp).round()], size, selected: app.sel_body, pixels_per_point: ppp, reach, section: section_plane(app) },
+            gpu::Frame { frozen: app.timeline.preview.is_some(), painted: app.timeline.paint_signal(), rev: app.scene.rev, verts: app.scene.verts.clone(), cam: app.cam, origin: [(rect.min.x * ppp).round(), (rect.min.y * ppp).round()], size, selected: app.sel_body, pixels_per_point: ppp, reach, section: section_plane(app) },
         ));
         return;
     }
@@ -377,6 +378,7 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
     if let Some((_, tex)) = &app.scene.cpu {
         painter.image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }
+    app.timeline.software_done();
 }
 
 /// Paints the small symbol for a constraint inside `r`.
@@ -1463,7 +1465,9 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         app.fit_pending = false;
         app.fit();
     }
-    navigate(app, ui, &resp);
+    if app.timeline.preview.is_none() {
+        navigate(app, ui, &resp);
+    }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, BG_VIEW);
     draw_grid(app, &painter);

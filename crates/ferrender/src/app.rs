@@ -571,6 +571,8 @@ pub struct App {
     pub pattern_at: Option<((u64, Id), DVec3)>,
     /// Where the timeline's chips were drawn last frame, for dragging the roll-back marker.
     pub chips: Vec<Rect>,
+    pub timeline: crate::timeline::Timeline,
+    render_queue: Option<eframe::egui_wgpu::wgpu::Queue>,
     pub dialog: Dialog,
     /// The dialog's result, built on a copy of the document: (dialog it was built for, bodies, error).
     pub preview: Option<(Dialog, Built, Option<String>)>,
@@ -645,6 +647,8 @@ impl App {
             drag_value: 0.0,
             pattern_at: None,
             chips: Vec::new(),
+            timeline: crate::timeline::Timeline::default(),
+            render_queue: cc.wgpu_render_state.as_ref().map(|rs| rs.queue.clone()),
             dialog: Dialog::None,
             preview: None,
             text_base: None,
@@ -1375,6 +1379,7 @@ impl App {
         self.rename = None;
         self.pattern_at = None;
         self.scene.invalidate();
+        self.timeline = crate::timeline::Timeline::default();
         self.file_error = None;
         self.section.on = false;
         self.dialog = Dialog::None;
@@ -1738,6 +1743,9 @@ impl App {
                 }
             }
             Action::Cancel => {
+                if self.timeline.preview.take().is_some() {
+                    return;
+                }
                 if self.value_edit.is_some() {
                     self.value_edit = None;
                 } else if self.dialog != Dialog::None {
@@ -1882,6 +1890,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
             self.title = title;
         }
+        self.timeline.poll(&ctx, self.session.rev, self.render_queue.as_ref());
         self.update_preview();
         if let Some(r) = &mut self.recovery
             && let Some(wait) = r.tick(&self.session, self.now)

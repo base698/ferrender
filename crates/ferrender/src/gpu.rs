@@ -4,7 +4,7 @@
 //! normal, plane and body. A second pass, inside egui's own render pass,
 //! shades that and outlines the edges where faces turn, step or change body.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use eframe::egui_wgpu::{self, wgpu};
 use fr_core::Body;
@@ -301,6 +301,9 @@ pub fn vertices<'a>(bodies: impl IntoIterator<Item = &'a Body>, face: Option<(u3
 
 /// One frame of the viewport, handed to egui as a paint callback.
 pub struct Frame {
+    /// Reuse the last geometry image while previewing a timeline position.
+    pub frozen: bool,
+    pub painted: Option<Arc<AtomicBool>>,
     /// Changes when `verts` does.
     pub rev: u64,
     pub verts: Arc<Vec<f32>>,
@@ -357,6 +360,9 @@ impl egui_wgpu::CallbackTrait for Frame {
         if self.size[0] == 0 || self.size[1] == 0 {
             return Vec::new();
         }
+        if self.frozen && gpu.rev == self.rev && gpu.targets.as_ref().is_some_and(|t| t.size == self.size) {
+            return Vec::new();
+        }
         gpu.resize(device, self.size);
         if gpu.rev != self.rev {
             gpu.rev = self.rev;
@@ -396,5 +402,8 @@ impl egui_wgpu::CallbackTrait for Frame {
         pass.set_pipeline(&gpu.show);
         pass.set_bind_group(0, &t.show_bind, &[]);
         pass.draw(0..3, 0..1);
+        if let Some(painted) = &self.painted {
+            painted.store(true, Ordering::Release);
+        }
     }
 }

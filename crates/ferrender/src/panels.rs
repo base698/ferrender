@@ -391,24 +391,46 @@ fn feature_menu(app: &mut App, ui: &mut Ui, id: Id, suppressed: bool) {
     }
 }
 
-/// The roll-back marker: drag it along the timeline to see the model as it was.
+/// Moving the marker is only a preview. Rebuild once, on a primary-button drop.
 fn marker(app: &mut App, ui: &mut Ui) {
-    let (rect, resp) = ui.allocate_exact_size(vec2(12.0, 24.0), Sense::drag());
-    let hot = resp.hovered() || resp.dragged();
-    let color = if hot { ACCENT } else { Color32::from_rgb(70, 74, 84) };
-    ui.painter().line_segment([rect.center_top(), rect.center_bottom()], Stroke::new(if hot { 3.0 } else { 2.0 }, color));
-    ui.painter().add(egui::Shape::convex_polygon(vec![rect.center_top() + vec2(-6.0, 0.0), rect.center_top() + vec2(6.0, 0.0), rect.center_top() + vec2(0.0, 8.0)], color, Stroke::NONE));
+    let (rect, _) = ui.allocate_exact_size(vec2(12.0, 24.0), Sense::hover());
+    // Keep the interaction ID stable even when the marker changes its timeline slot.
+    let sense = if app.timeline.busy() { Sense::hover() } else { Sense::drag() };
+    let resp = ui.interact(rect, ui.make_persistent_id("rollback-marker"), sense);
+    if resp.drag_started_by(egui::PointerButton::Primary) && !app.timeline.busy() {
+        app.timeline.preview = Some((app.doc().active(), app.session.rev));
+    }
+    if let Some((count, _)) = &mut app.timeline.preview {
+        if let Some(p) = resp.interact_pointer_pos() {
+            // Chip positions stay fixed during the gesture, so crossing a boundary
+            // cannot move that same boundary back underneath the pointer.
+            *count = app.chips.iter().filter(|c| c.center().x < p.x).count();
+        }
+        if resp.drag_stopped_by(egui::PointerButton::Primary) {
+            let count = *count;
+            app.timeline.preview = None;
+            if count != app.doc().active() {
+                app.timeline.begin_update();
+                app.roll_to(count);
+                ui.ctx().request_repaint();
+            }
+        } else if !ui.input(|i| i.pointer.primary_down()) {
+            app.timeline.preview = None;
+        }
+    }
+    let hot = !app.timeline.busy() && (resp.hovered() || app.timeline.preview.is_some());
+    let color = if app.timeline.busy() { DIM } else if hot { ACCENT } else { Color32::from_rgb(70, 74, 84) };
+    let x = app.timeline.preview.map_or(rect.center().x, |(count, _)| {
+        if count == 0 { app.chips.first().map_or(rect.center().x, |c| c.left() - 4.0) }
+        else { app.chips.get(count - 1).map_or(rect.center().x, |c| c.right() + 4.0) }
+    });
+    let top = egui::pos2(x, rect.top());
+    ui.painter().line_segment([top, egui::pos2(x, rect.bottom())], Stroke::new(if hot { 3.0 } else { 2.0 }, color));
+    ui.painter().add(egui::Shape::convex_polygon(vec![top + vec2(-6.0, 0.0), top + vec2(6.0, 0.0), top + vec2(0.0, 8.0)], color, Stroke::NONE));
     if hot {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
-    if resp.dragged()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
-        // The marker sits after every chip whose middle is left of the pointer.
-        let count = app.chips.iter().filter(|c| c.center().x < p.x).count();
-        app.roll_to(count);
-    }
-    resp.on_hover_text("Drag to roll the model back in time. New features go in where the marker is.");
+    resp.on_hover_text(if app.timeline.busy() { "Updating the model. Dragging will be available when the view catches up." } else { "Drag to choose a history position; release to update the model. Escape cancels. New features go where the marker is." });
 }
 
 pub fn timeline(app: &mut App, ui: &mut Ui) {
@@ -443,7 +465,7 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
                     app.sel_body = app.session.built.body(id).map(|b| b.id);
                 }
                 resp.context_menu(|ui| {
-                    if ui.button("Roll Back to Here").clicked() {
+                    if ui.add_enabled(!app.timeline.busy(), egui::Button::new("Roll Back to Here")).clicked() {
                         app.roll_to(i + 1);
                         ui.close();
                     }
@@ -452,8 +474,12 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
             }
             if total > 0 && active == total {
                 marker(app, ui);
-            } else if total > 0 && ui.small_button("Roll to End").clicked() {
+            } else if total > 0 && ui.add_enabled(!app.timeline.busy(), egui::Button::new("Roll to End").small()).clicked() {
                 app.roll_to(total);
+            }
+            if app.timeline.busy() {
+                ui.spinner();
+                ui.label(RichText::new("Updating model…").color(DIM));
             }
             app.chips = chips;
         });

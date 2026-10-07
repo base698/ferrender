@@ -663,6 +663,114 @@ fn fillet_shell_and_timeline_rollback() {
     assert!(exact(&h) < 4500.0);
 }
 
+/// The marker centre at a given boundary, after layout has caught up.
+fn timeline_at(h: &H, count: usize) -> Pos2 {
+    let chips = &h.state().chips;
+    if count == 0 { egui::pos2(chips[0].left() - 12.0, chips[0].center().y) }
+    else if count == chips.len() { egui::pos2(chips[count - 1].right() + 12.0, chips[0].center().y) }
+    else { egui::pos2((chips[count - 1].right() + chips[count].left()) / 2.0, chips[0].center().y) }
+}
+
+#[test]
+fn timeline_drag_builds_once_on_drop_and_waits_for_the_gpu() {
+    let mut h = harness();
+    plate(&mut h);
+    for _ in 0..2 {
+        h.state_mut().execute(&json!({"op": "transform", "body": 2, "translate": [1, 0, 0]})).unwrap();
+    }
+    h.run_steps(2);
+    h.render().unwrap();
+    let (rev, edits, dirty) = (h.state().session.rev, h.state().session.edits, h.state().session.dirty);
+    let from = timeline_at(&h, 4);
+    h.hover_at(from);
+    h.step();
+    button(&h, from, true);
+    h.step();
+    for count in [0, 2, 1, 3, 2] {
+        let to = timeline_at(&h, count);
+        h.hover_at(to);
+        h.step();
+        assert_eq!(h.state().timeline.preview, Some((count, rev)));
+        assert_eq!(h.state().doc().active(), 4, "holding the marker never changes the model");
+        assert_eq!((h.state().session.rev, h.state().session.edits, h.state().session.dirty), (rev, edits, dirty));
+        h.render().unwrap();
+    }
+    let to = timeline_at(&h, 2);
+    button(&h, to, false);
+    h.step();
+    assert_eq!(h.state().doc().active(), 2);
+    assert_eq!(h.state().session.rev, rev + 1, "exactly one rebuild for the whole gesture");
+    assert!(h.state().timeline.busy(), "cannot re-grab before rendering the new model");
+    h.step();
+    assert!(h.state().timeline.busy(), "UI frames alone do not acknowledge a GPU render");
+
+    // A premature press must not become a drag as soon as the GPU catches up.
+    let from = timeline_at(&h, 2);
+    h.hover_at(from);
+    button(&h, from, true);
+    h.step();
+    h.render().unwrap();
+    h.step(); // registers the fence after the new frame has been submitted
+    h.render().unwrap(); // polls the GPU queue
+    h.run_steps(2);
+    assert!(h.state().timeline.busy(), "keep a press made while busy locked until release");
+    assert!(h.state().timeline.preview.is_none());
+    let to = timeline_at(&h, 0);
+    h.hover_at(to);
+    h.step();
+    button(&h, to, false);
+    h.step();
+    assert!(!h.state().timeline.busy());
+    assert_eq!(h.state().doc().active(), 2);
+    assert_eq!(h.state().session.rev, rev + 1);
+
+    // A fresh drag works; rolling to an empty scene must not wait for a body draw.
+    let from = timeline_at(&h, 2);
+    let to = timeline_at(&h, 0);
+    drag(&mut h, &[from, to]);
+    assert_eq!(h.state().doc().active(), 0);
+    h.step();
+    assert!(!h.state().timeline.busy());
+    run(&mut h, Action::Undo);
+    assert_eq!(h.state().doc().active(), 2);
+    run(&mut h, Action::Undo);
+    assert_eq!(h.state().doc().active(), 4, "intermediate drag positions created no undo steps");
+}
+
+#[test]
+fn timeline_cancel_noop_and_document_replacement_leave_no_pending_drag() {
+    let mut h = state_harness();
+    plate(&mut h);
+    let rev = h.state().session.rev;
+    let from = timeline_at(&h, 2);
+    let to = timeline_at(&h, 0);
+    drag(&mut h, &[from, to, from]);
+    assert_eq!(h.state().session.rev, rev, "dropping at the original boundary is a no-op");
+    assert!(!h.state().timeline.busy());
+
+    h.hover_at(from);
+    h.step();
+    button(&h, from, true);
+    h.step();
+    h.hover_at(to);
+    h.step();
+    assert!(h.state().timeline.preview.is_some());
+    key(&mut h, Key::Escape);
+    button(&h, to, false);
+    h.step();
+    assert_eq!(h.state().session.rev, rev);
+    assert_eq!(h.state().doc().active(), 2);
+    assert!(h.state().timeline.preview.is_none());
+
+    drag(&mut h, &[from, to]);
+    assert_eq!(h.state().doc().active(), 0);
+    h.step();
+    assert!(!h.state().timeline.busy(), "software/empty view unlocks too");
+    h.state_mut().timeline.begin_update();
+    h.state_mut().execute(&json!({"op": "new", "discard_unsaved": true})).unwrap();
+    assert!(!h.state().timeline.busy(), "replacing the document discards the old render fence");
+}
+
 #[test]
 fn corners_are_not_clipped_when_the_view_is_centred_off_the_body() {
     let mut h = harness();

@@ -331,7 +331,9 @@ Features sit in the order they were made. Double-click one to
 edit it; right-click for rename, suppress and delete. Drag the marker at the
 end of the timeline to the left to roll the model back in time: features after
 it are not built, and new features go in where the marker is. "Roll to End"
-brings everything back.
+brings everything back. While dragging, only the marker moves; the model stays
+at its current history position. Release to rebuild once, or press Escape to
+cancel. Dragging is disabled until the updated view finishes drawing.
 
 ### Pattern
 
