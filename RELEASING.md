@@ -14,4 +14,6 @@ For each release:
 
 To package locally after committing a clean checkout, run `sh scripts/bundle-macos.sh` on a Mac or `cargo build --locked --release -p ferrender` on Linux. Then run `python3 scripts/package-release.py --platform macos-arm64` (or `macos-x86_64` / `linux-x86_64`). Output goes into ignored `dist/`. The packager refuses mismatched versions, commits, dirty builds or platforms, checks the packaged executable, and includes the tutorial and dependency notices.
 
+For an existing tag, the Native release workflow can also be dispatched from main with its `tag` input. This uses the current workflow definition while checking out the exact tagged source, so packaging automation can be repaired without moving a release tag.
+
 A failed publish may leave a draft release. Rerunning the same tagged workflow can finish that draft. It refuses to overwrite an already published release. Do not upload local settings, recovery files, private designs, or private branches.

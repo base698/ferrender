@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v[0-9]*.[0-9]*.[0-9]*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -26,11 +31,12 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
       - name: Validate release tag
         run: |
@@ -53,7 +59,8 @@ jobs:
             libegl1-mesa-dev libgl1-mesa-dev libvulkan1 mesa-vulkan-drivers \
             xvfb xauth
       - name: Test engine and non-rendering app boundaries
-        run: cargo test --locked --workspace --all-targets -- --skip uitest:: --skip demo::
+        run: |
+          cargo test --locked --workspace --all-targets -- --skip uitest:: --skip demo::
       - name: Test full Linux UI suite
         if: runner.os == 'Linux'
         env:
@@ -90,12 +97,13 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: dist/release
