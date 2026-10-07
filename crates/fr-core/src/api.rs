@@ -9,7 +9,7 @@ use base64::Engine;
 use glam::{DVec2, DVec3};
 use serde_json::{Value as J, json};
 
-use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, Op, Pattern, PatternKind, Revolve, Session, Shell, Thread, Transform};
+use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, Op, Pattern, PatternKind, Revolve, Session, Shell, Text, Thread, Transform};
 use crate::measure::{self, Item};
 use crate::threads;
 use crate::exact;
@@ -74,6 +74,12 @@ SKETCHES
 {"op":"fillet","sketch":ID,"point":ID,"radius":V}   rounds a corner where two lines meet; {"op":"chamfer",...,"distance":V} cuts it straight
 
 FEATURES
+{"op":"text","text":"CAD","height":"6 mm","depth":"1 mm","operation":"new","plane":"XY"}
+   Creates parametric solid lettering. plane: XY | XZ | YZ, with optional origin:[x,y,z] in document units. height defaults to 6 mm, depth to 1 mm. spacing, x, y default to 0; angle defaults to 0 degrees. align: left | center | right (default left). x/y shift the lettering within its plane; angle rotates it there. Numeric fields accept units and parameter expressions.
+{"op":"text","text":"CAD","operation":"join","body":BODY,"face":[x,y,z],"height":"6 mm","depth":"1 mm"}
+   join embosses outward and cut engraves inward on the selected exact body's flat face; only that body changes. face must be a point on the face, in document units, and anchors the text plane there. Attached text cannot also specify plane/origin. Use operation:new without body/face for free-standing lettering. Unsupported characters and failed placement are rejected without changing the document.
+   edit_feature can change text, height, depth, spacing, x, y, angle, align, or operation. To attach previously free-standing text, also supply body and face; changing attached text to new detaches it while keeping its placement. New text can also change plane/origin.
+   When editing body/face, coordinates refer to the base body immediately before the text feature. If later timeline features changed that body's geometry, first rollback to immediately before or after the text feature, choose its base face again, edit it, then rollback to "end". Face edits reject ambiguous downstream coordinates and cannot attach to the text's own raised faces. Text and dimension edits do not require rolling back.
 {"op":"extrude","sketch":ID,"distance":V,"operation":"new","symmetric":false,"profiles":[indices]}
    operation: new | join | cut | intersect. Negative distance goes the other way. With "symmetric":true the distance is the total thickness, half each side. A shape drawn inside another in the SAME sketch becomes a hole; shapes in different sketches never do. "profiles" are indices from get_object_info on the sketch; when omitted, every outer region is used and regions nested inside become holes; "all" fills them in.
 {"op":"revolve","sketch":ID,"axis":"x","angle":360,"operation":"new","profiles":[...]}
@@ -374,6 +380,18 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["axis"] = axis(r.axis);
             o["operation"] = json!(r.op.name());
         }
+        FeatureKind::Text(t) => {
+            o["text"] = json!(t.text);
+            for (key, v) in [("height", &t.height), ("depth", &t.depth), ("spacing", &t.spacing), ("x", &t.x), ("y", &t.y)] {
+                o[key] = json!({"expr": v.expr, "value": len_out(doc, v.v)});
+            }
+            o["angle"] = json!({"expr": t.angle.expr, "value": t.angle.v});
+            o["align"] = json!(match t.align { crate::text::Align::Left => "left", crate::text::Align::Center => "center", crate::text::Align::Right => "right" });
+            o["operation"] = json!(t.op.name());
+            o["plane"] = json!({"origin": (t.plane.origin / doc.units.mm()).to_array(), "x": t.plane.x.to_array(), "y": t.plane.y.to_array(), "normal": t.plane.normal().to_array()});
+            if let Some(body) = t.body { o["body"] = json!(body); }
+            if let Some(face) = t.face { o["face"] = json!((face / doc.units.mm()).to_array()); }
+        }
         FeatureKind::Import(m) => o["triangles"] = json!(m.tris.len()),
         FeatureKind::Transform(t) => {
             o["body"] = json!(t.body);
@@ -578,6 +596,93 @@ fn op_of(c: &J, default: Op) -> R<Op> {
     }
 }
 
+fn text_fields(s: &Session, c: &J, t: &mut Text) -> R<()> {
+    if let Some(value) = c.get("text") { t.text = value.as_str().ok_or("\"text\" should be a string")?.to_owned(); }
+    for (key, value, kind) in [("height", &mut t.height, Kind::Length), ("depth", &mut t.depth, Kind::Length), ("spacing", &mut t.spacing, Kind::Length), ("x", &mut t.x, Kind::Length), ("y", &mut t.y, Kind::Length), ("angle", &mut t.angle, Kind::Angle)] {
+        if let Some(input) = c.get(key) { *value = s.doc.value(&text_of(input).map_err(|e| format!("\"{key}\": {e}"))?, kind)?; }
+    }
+    if let Some(value) = c.get("align") {
+        t.align = match value.as_str() {
+            Some("left") => crate::text::Align::Left,
+            Some("center") => crate::text::Align::Center,
+            Some("right") => crate::text::Align::Right,
+            _ => return Err("\"align\" should be left, center or right".into()),
+        };
+    }
+    if let Some(value) = c.get("operation") {
+        t.op = match value.as_str().and_then(Op::parse) {
+            Some(op @ (Op::New | Op::Join | Op::Cut)) => op,
+            _ => return Err("text \"operation\" should be new, join or cut".into()),
+        };
+    }
+    // Unlike numeric zero, an explicitly wrong type must not silently use a
+    // default or leave the previous value in place.
+    if c.get("name").is_some_and(|v| !v.is_string()) { return Err("\"name\" should be a string".into()); }
+    if c.get("suppressed").is_some_and(|v| !v.is_boolean()) { return Err("\"suppressed\" should be true or false".into()); }
+    if t.op == Op::New {
+        if c.get("body").is_some() || c.get("face").is_some() { return Err("new text uses plane/origin; use join or cut with body/face to attach it".into()); }
+        if let Some(value) = c.get("plane") {
+            let origin = t.plane.origin;
+            t.plane = match value.as_str().map(str::to_ascii_uppercase).as_deref() {
+                Some("XY") => Plane::XY,
+                Some("XZ") => Plane::XZ,
+                Some("YZ") => Plane::YZ,
+                _ => return Err("text \"plane\" should be XY, XZ or YZ".into()),
+            };
+            t.plane.origin = origin;
+        }
+        if let Some(value) = c.get("origin") { t.plane.origin = xyz(value).map_err(|e| format!("\"origin\": {e}"))? * s.doc.units.mm(); }
+        (t.body, t.face, t.frame) = (None, None, None);
+    } else {
+        if c.get("plane").is_some() || c.get("origin").is_some() { return Err("attached text uses its face; omit plane/origin".into()); }
+        if t.body.is_none() || c.get("body").is_some() || c.get("face").is_some() {
+            let id = c["body"].as_u64().and_then(|n| Id::try_from(n).ok()).ok_or("attached text needs a \"body\" id")?;
+            let body = s.built.body(id).ok_or(format!("there is no body {id}"))?;
+            if !body.is_exact() { return Err("attached text needs an exact body with a flat face".into()); }
+            let point = xyz(&c["face"]).map_err(|e| format!("attached text needs \"face\": [x, y, z]: {e}"))? * s.doc.units.mm();
+            if !point.is_finite() { return Err("the text face point must be finite".into()); }
+            let face = Face::near(body, point).ok_or("the body has no faces")?;
+            let mut plane = face.plane.ok_or("text can only attach to a flat face")?;
+            let surface = Item::Surface(face.tris.iter().map(|i| body.mesh.tris[*i]).collect());
+            if measure::between(&Item::Point(point), &surface).distance > 1e-5 { return Err("the text face point must lie on the body's flat face".into()); }
+            plane.origin = point - plane.normal() * (point - plane.origin).dot(plane.normal());
+            t.plane = plane;
+            t.body = Some(id);
+            t.face = Some(plane.origin);
+            t.frame = s.built.frame(id);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve an edited face against the feature's input body, never its own
+/// raised letters or geometry produced farther down the timeline. The caller
+/// keeps the real session/history untouched until the edit has been validated.
+fn text_face_edit_context(s: &Session, feature: Id, c: &J) -> R<Option<Session>> {
+    if c.get("body").is_none() && c.get("face").is_none() { return Ok(None); }
+    let body = c["body"].as_u64().and_then(|n| Id::try_from(n).ok()).ok_or("attached text needs a \"body\" id")?;
+    let index = s.doc.features.iter().position(|f| f.id == feature).ok_or("the text feature no longer exists")?;
+    let mut doc = s.doc.clone();
+    doc.roll_to(index + 1);
+    let mut context = Session::new(doc);
+    if s.doc.active() != index && s.doc.active() != index + 1 {
+        // The text itself may have changed the body, which is expected. Compare
+        // just after this text with the currently displayed result to detect
+        // later changes. Ignore kernel face IDs, which change on each rebuild.
+        let same = context.built.body(body).zip(s.built.body(body)).is_some_and(|(before, now)| {
+            before.mesh.tris.len() == now.mesh.tris.len()
+                && before.mesh.tris.iter().flatten().zip(now.mesh.tris.iter().flatten()).all(|(a, b)| a.distance_squared(*b) <= 1e-14)
+        });
+        if !same {
+            return Err(format!("face coordinates for text feature {feature} are ambiguous because other timeline features changed the selected body; rollback to immediately before or after this text feature, select its base face again, then restore the timeline to end"));
+        }
+    }
+    context.doc.roll_to(index);
+    context.rebuild();
+    if context.built.body(body).is_none() { return Err("the selected text body must exist before the text feature".into()); }
+    Ok(Some(context))
+}
+
 fn axis_of(doc: &Document, sid: Id, v: &J) -> R<Axis> {
     match v {
         J::Null => Ok(Axis::Y),
@@ -752,6 +857,24 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             Ok(json!({"path": path, "solids": solids.len(), "bytes": bytes.len(), "skipped_mesh_bodies": skipped}))
         }
         "get_reference" => Ok(json!(REFERENCE)),
+        "text" => {
+            let content = c["text"].as_str().ok_or("text needs a \"text\" string")?.to_owned();
+            let mut text = Text {
+                text: content, plane: Plane::XY,
+                height: s.doc.value("6 mm", Kind::Length)?, depth: s.doc.value("1 mm", Kind::Length)?,
+                spacing: zero(&s.doc, Kind::Length), angle: zero(&s.doc, Kind::Angle), x: zero(&s.doc, Kind::Length), y: zero(&s.doc, Kind::Length),
+                align: crate::text::Align::Left, op: Op::New, body: None, face: None, frame: None,
+            };
+            text_fields(s, c, &mut text)?;
+            let id = s.edit_feature(|doc| {
+                let id = doc.add_feature(FeatureKind::Text(text));
+                if let Some(name) = c["name"].as_str() { doc.feature_mut(id).unwrap().name = name.to_owned(); }
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            Ok(out)
+        }
         "rollback" => {
             // After a feature id, or to the "start" or "end" of the timeline.
             let count = match &c["to"] {
@@ -1220,6 +1343,27 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         "edit_feature" => {
             let id = id_of(c, "feature")?;
             let c = c.clone();
+            let text_update = match s.doc.feature(id).map(|f| &f.kind) {
+                Some(FeatureKind::Text(t)) => {
+                    let mut t = t.clone();
+                    let context = text_face_edit_context(s, id, &c)?;
+                    text_fields(context.as_ref().unwrap_or(s), &c, &mut t)?;
+                    let index = s.doc.features.iter().position(|f| f.id == id).unwrap();
+                    if s.doc.active() <= index {
+                        // A rolled-back feature is not built by edit_feature.
+                        // Validate it in a temporary prefix before accepting the
+                        // change, keeping the user's actual timeline untouched.
+                        let mut preview = s.doc.clone();
+                        let feature = preview.feature_mut(id).unwrap();
+                        feature.kind = FeatureKind::Text(t.clone());
+                        feature.suppressed = false;
+                        preview.roll_to(index + 1);
+                        if let Some(error) = preview.rebuild().errors.get(&id) { return Err(error.clone()); }
+                    }
+                    Some(t)
+                }
+                _ => None,
+            };
             s.edit_feature(|d| {
                 let probe = d.clone();
                 let f = d.feature_mut(id).ok_or(format!("there is no feature {id}"))?;
@@ -1230,6 +1374,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                     f.suppressed = v;
                 }
                 match &mut f.kind {
+                    FeatureKind::Text(t) => { *t = text_update.expect("text feature update was prepared"); }
                     FeatureKind::Extrude(e) => {
                         if !c["distance"].is_null() {
                             e.distance = probe.value(&text_of(&c["distance"])?, Kind::Length)?;

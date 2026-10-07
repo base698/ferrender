@@ -1080,3 +1080,267 @@ fn malformed_and_oversized_clipboard_geometry_is_refused() {
     assert_eq!(h.state().doc(), &original);
     assert!(h.state().toast.as_ref().unwrap().0.contains("4 MiB"));
 }
+
+#[test]
+fn failed_file_open_and_import_remain_visible_and_keep_the_design() {
+    let mut h = state_harness();
+    h.state_mut().execute(&json!({"op":"set_parameter", "name":"keep", "expr":"5 mm"})).unwrap();
+    let original = h.state().doc().clone();
+    let revision = h.state().session.rev;
+    let dir = std::env::temp_dir().join(format!("ferrender-file-errors-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let broken = dir.join("broken.ferr");
+    std::fs::write(&broken, "not a Ferrender design").unwrap();
+    // Native file pickers block inside a frame; the next frame can arrive long
+    // after the notification deadline calculated from that frame's old time.
+    h.state_mut().now = 0.0;
+    h.state_mut().open_path(&broken);
+    h.input_mut().time = Some(60.0);
+    h.run_steps(3);
+    assert_eq!(h.state().doc(), &original);
+    assert_eq!(h.state().session.rev, revision);
+    assert!(h.state().session.dirty);
+    assert_eq!(h.state().file_error.as_ref().unwrap().path, broken);
+    h.get_by_label("Could not open design");
+    h.get_by_label("Your current design has been kept.");
+    h.get_by_label("Dismiss").click();
+    h.run_steps(2);
+    assert!(h.state().file_error.is_none());
+
+    let broken_stl = dir.join("broken.stl");
+    std::fs::write(&broken_stl, "not an STL mesh").unwrap();
+    h.state_mut().import_stl(&broken_stl, fr_core::Unit::Mm);
+    h.input_mut().time = Some(180.0);
+    h.run_steps(3);
+    assert_eq!(h.state().doc(), &original);
+    assert_eq!(h.state().session.rev, revision);
+    h.get_by_label("Could not import STL");
+    assert!(h.state().file_error.as_ref().is_some_and(|e| !e.message.is_empty()));
+    key(&mut h, Key::Escape);
+    assert!(h.state().file_error.is_none());
+    // An existing save path avoids the native picker while exercising its real
+    // failure handler. A directory cannot be replaced with a design file.
+    h.state_mut().session.path = Some(dir.clone());
+    run(&mut h, Action::Save);
+    h.input_mut().time = Some(240.0);
+    h.run_steps(3);
+    h.get_by_label("Could not save design");
+    assert!(h.state().session.dirty);
+    assert_eq!(h.state().doc(), &original);
+    key(&mut h, Key::Escape);
+    h.state_mut().export_stl_path(&dir, fr_core::Unit::Mm);
+    h.input_mut().time = Some(300.0);
+    h.run_steps(3);
+    h.get_by_label("Could not export STL");
+    assert_eq!(h.state().doc(), &original);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn text_dialog_preview_planes_and_timeline_edit_round_trip() {
+    let mut h = state_harness();
+    for plane in [Plane::XY, Plane::XZ, Plane::YZ] {
+        run(&mut h, Action::Text);
+        let Dialog::Text(mut t) = h.state().dialog.clone() else { panic!("Text dialog should open") };
+        t.text = "AB".into();
+        t.plane = plane;
+        t.height = "4 mm".into();
+        t.depth = "0.8 mm".into();
+        t.spacing = "0.3 mm".into();
+        t.angle = "17 deg".into();
+        t.x = "2 mm".into();
+        t.y = "3 mm".into();
+        t.align = fr_core::text::Align::Right;
+        h.state_mut().dialog = Dialog::Text(t);
+        h.state_mut().update_preview();
+        let (_, built, error) = h.state().preview.as_ref().unwrap();
+        assert!(error.is_none(), "{error:?}");
+        assert!(!built.bodies.is_empty());
+        assert!(h.state().doc().features.is_empty(), "preview must not commit the text");
+        h.state_mut().apply_dialog();
+        assert_eq!(h.state().dialog, Dialog::None);
+        let original = h.state().doc().clone();
+        let feature = original.features.last().unwrap();
+        h.state_mut().edit_feature(feature.id);
+        let Dialog::Text(t) = &h.state().dialog else { panic!("timeline should reopen the Text dialog") };
+        assert_eq!(t.text, "AB");
+        assert_eq!(t.plane, plane);
+        assert_eq!(t.editing, Some(feature.id));
+        assert_eq!(t.align, fr_core::text::Align::Right);
+        assert_eq!([t.height.as_str(), t.depth.as_str(), t.spacing.as_str(), t.angle.as_str(), t.x.as_str(), t.y.as_str()], ["4 mm", "0.8 mm", "0.3 mm", "17 deg", "2 mm", "3 mm"]);
+        h.state_mut().apply_dialog();
+        assert_eq!(h.state().doc(), &original, "editing without changes must preserve all text settings");
+        let path = std::env::temp_dir().join(format!("ferrender-text-roundtrip-{}.ferr", std::process::id()));
+        h.state_mut().session.save(&path).unwrap();
+        h.state_mut().open_path(&path);
+        assert!(h.state().file_error.is_none());
+        h.state_mut().edit_feature(feature.id);
+        h.state_mut().apply_dialog();
+        assert_eq!(h.state().doc(), &original, "native reopening must keep text editable");
+        std::fs::remove_file(path).unwrap();
+        run(&mut h, Action::Pattern);
+        assert!(matches!(&h.state().dialog, Dialog::Pattern(p) if p.source == Some(feature.id)), "standalone text can be selected for a pattern");
+        h.state_mut().execute(&json!({"op":"new", "discard_unsaved":true})).unwrap();
+    }
+}
+
+#[test]
+fn text_face_click_raises_and_timeline_edit_engraves() {
+    let mut h = state_harness();
+    plate(&mut h);
+    let original_volume = volume(&h);
+    run(&mut h, Action::View("top"));
+    run(&mut h, Action::Fit);
+    run(&mut h, Action::Text);
+    let Dialog::Text(mut t) = h.state().dialog.clone() else { panic!() };
+    t.text = "A".into();
+    t.height = "4 mm".into();
+    h.state_mut().dialog = Dialog::Text(t);
+    let anchor = DVec3::new(8.0, 7.0, 10.0);
+    let pos = crate::view::to_screen(h.state(), anchor);
+    click(&mut h, pos);
+    let Dialog::Text(t) = &h.state().dialog else { panic!() };
+    assert_eq!(t.op, fr_core::Op::Join);
+    assert!((t.plane.origin - anchor).length() < 1e-4, "use the actual click, not the triangle center");
+    assert_eq!(t.face, Some(t.plane.origin));
+    assert!(t.body.is_some() && t.frame.is_some());
+    h.state_mut().update_preview();
+    assert!(h.state().preview.as_ref().unwrap().2.is_none(), "{:?}", h.state().preview.as_ref().unwrap().2);
+    h.state_mut().apply_dialog();
+    assert!(volume(&h) > original_volume);
+    let id = h.state().doc().features.last().unwrap().id;
+    let original = h.state().doc().feature(id).unwrap().clone();
+    h.state_mut().edit_feature(id);
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().doc().feature(id).unwrap(), &original, "attached text edit preserves face and frame");
+    h.state_mut().edit_feature(id);
+    let Dialog::Text(mut t) = h.state().dialog.clone() else { panic!() };
+    t.op = fr_core::Op::Cut;
+    h.state_mut().dialog = Dialog::Text(t);
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().dialog, Dialog::None);
+    assert!(volume(&h) < original_volume, "editing Raised to Engraved removes material");
+}
+
+#[test]
+fn text_rejects_curved_and_mesh_faces_without_changing_placement() {
+    let mut h = state_harness();
+    for cmd in [
+        json!({"op":"create_sketch", "plane":"XY"}),
+        json!({"op":"add_geometry", "items":[{"type":"circle", "center":[0,0], "radius":10}]}),
+        json!({"op":"extrude", "distance":10}),
+    ] { h.state_mut().execute(&cmd).unwrap(); }
+    run(&mut h, Action::Text);
+    let original = h.state().dialog.clone();
+    let body = &h.state().session.built.bodies[0];
+    let curved = fr_core::face::Face::near(body, DVec3::new(10.0, 0.0, 5.0)).unwrap();
+    assert!(curved.plane.is_none());
+    assert!(h.state_mut().text_on_face(curved).unwrap_err().contains("curved"));
+    assert_eq!(h.state().dialog, original);
+    let body = &h.state().session.built.bodies[0];
+    let mesh = body.mesh.clone();
+    let mut flat = fr_core::face::Face::near(body, DVec3::new(0.0, 0.0, 10.0)).unwrap();
+    let id = h.state_mut().session.edit(|d| Ok(d.add_feature(fr_core::FeatureKind::Import(mesh)))).unwrap();
+    flat.body = id;
+    assert!(h.state_mut().text_on_face(flat).unwrap_err().contains("mesh"));
+    assert_eq!(h.state().dialog, original);
+}
+
+/// Optional visual check of the text editor and its live solid preview.
+#[test]
+#[ignore = "writes a GPU screenshot for visual review"]
+fn text_emboss_dialog_screenshot() {
+    let mut h = harness();
+    plate(&mut h);
+    run(&mut h, Action::Text);
+    let body = &h.state().session.built.bodies[0];
+    let mut face = fr_core::face::Face::near(body, DVec3::new(5.0, 7.0, 10.0)).unwrap();
+    face.at = DVec3::new(5.0, 7.0, 10.0);
+    h.state_mut().text_on_face(face).unwrap();
+    let Dialog::Text(mut t) = h.state().dialog.clone() else { panic!() };
+    t.text = "FERR".into();
+    t.height = "5 mm".into();
+    h.state_mut().dialog = Dialog::Text(t);
+    h.run_steps(3);
+    assert!(h.state().preview.as_ref().unwrap().2.is_none(), "{:?}", h.state().preview.as_ref().unwrap().2);
+    save(&mut h, "text-emboss-preview.png");
+    h.state_mut().open_path(&out_dir().join("missing-design.ferr"));
+    save(&mut h, "file-error-dialog.png");
+}
+
+#[test]
+fn text_editing_uses_its_place_in_the_timeline_and_resolves_the_baseline() {
+    let mut h = state_harness();
+    plate(&mut h);
+    let body_id = h.state().session.built.bodies[0].id;
+    run(&mut h, Action::Text);
+    let body = h.state().session.built.body(body_id).unwrap();
+    let mut face = fr_core::face::Face::near(body, DVec3::new(8.0, 7.0, 10.0)).unwrap();
+    face.at = DVec3::new(8.0, 7.0, 10.0);
+    h.state_mut().text_on_face(face).unwrap();
+    let Dialog::Text(mut t) = h.state().dialog.clone() else { panic!() };
+    t.text = "A".into();
+    t.height = "4 mm".into();
+    h.state_mut().dialog = Dialog::Text(t);
+    h.state_mut().apply_dialog();
+    let text_id = h.state().doc().features.last().unwrap().id;
+    h.state_mut().execute(&json!({"op":"transform", "body":body_id, "translate":[2,0,0]})).unwrap();
+    let original = h.state().doc().clone();
+    assert!((h.state().session.built.body(body_id).unwrap().mesh.bbox().unwrap().1.x - 42.0).abs() < 1e-5);
+    run(&mut h, Action::View("top"));
+    run(&mut h, Action::Fit);
+    h.state_mut().edit_feature(text_id);
+    h.run_steps(2);
+    assert_eq!(h.state().doc(), &original, "preview must not roll the real timeline back");
+    let source = h.state().text_source().body(body_id).unwrap();
+    assert!((source.mesh.bbox().unwrap().1 - DVec3::new(40.0, 20.0, 10.0)).length() < 1e-5, "picking must exclude this text and later Move");
+    assert!((h.state().shown().body(body_id).unwrap().mesh.bbox().unwrap().1.x - 40.0).abs() < 1e-5, "preview must exclude the later Move too");
+    let anchor = DVec3::new(20.0, 7.0, 10.0);
+    let pos = crate::view::to_screen(h.state(), anchor);
+    click(&mut h, pos);
+    let Dialog::Text(mut t) = h.state().dialog.clone() else { panic!() };
+    assert!((t.face.unwrap() - anchor).length() < 1e-4);
+    assert!((t.frame.unwrap()[1] - DVec3::new(40.0, 20.0, 10.0)).length() < 1e-5);
+    t.x = "3 mm".into();
+    t.y = "2 mm".into();
+    t.angle = "45 deg".into();
+    h.state_mut().dialog = Dialog::Text(t);
+    h.state_mut().update_preview();
+    assert!((h.state().text_baseline().unwrap() - DVec3::new(23.0, 9.0, 10.0)).length() < 1e-4, "marker includes X/Y offsets before angle rotation");
+    assert!(h.state().preview.as_ref().unwrap().2.is_none());
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().dialog, Dialog::None);
+    assert_eq!(h.state().doc().active(), original.active(), "later features return after applying");
+    assert!((h.state().session.built.body(body_id).unwrap().mesh.bbox().unwrap().1.x - 42.0).abs() < 1e-5);
+    h.state_mut().execute(&json!({"op":"transform", "body":body_id, "translate":[1000,0,0]})).unwrap();
+    run(&mut h, Action::Fit);
+    assert!(h.state().cam.target.x > 1000.0);
+    h.state_mut().edit_feature(text_id);
+    h.run_steps(2);
+    assert!(h.state().cam.target.x < 40.0, "editing must fit the earlier geometry, even after a distant move");
+    run(&mut h, Action::Cancel);
+    h.run_steps(2);
+    assert!(h.state().cam.target.x > 1000.0, "Cancel returns to the completed geometry");
+}
+
+#[test]
+fn file_error_modal_blocks_viewport_and_shortcuts_until_dismissed() {
+    let mut h = state_harness();
+    plate(&mut h);
+    run(&mut h, Action::View("top"));
+    run(&mut h, Action::Fit);
+    let pos = crate::view::to_screen(h.state(), DVec3::new(2.0, 2.0, 10.0));
+    h.state_mut().open_path(&out_dir().join("missing-modal-blocking-design.ferr"));
+    h.run_steps(3);
+    assert!(h.state().file_error.is_some());
+    click(&mut h, pos);
+    assert!(h.state().sel_face.is_none(), "modal backdrop must block picking faces");
+    key(&mut h, Key::E);
+    assert_eq!(h.state().dialog, Dialog::None, "modal must block model keyboard shortcuts");
+    assert!(h.state().file_error.is_some(), "clicking outside does not discard an error");
+    h.get_by_label("Dismiss").click();
+    h.run_steps(3);
+    assert!(h.state().file_error.is_none());
+    click(&mut h, pos);
+    assert!(h.state().sel_face.is_some(), "picking must work again after Dismiss");
+}

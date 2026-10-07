@@ -8,7 +8,7 @@
 
 <p align="center">
   <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-b7410e?style=flat-square&logo=rust">
-  <img alt="macOS native; Linux untested" src="https://img.shields.io/badge/macOS-native-2f7bf5?style=flat-square">
+  <img alt="macOS native; Linux CI tested" src="https://img.shields.io/badge/macOS-native-2f7bf5?style=flat-square">
   <img alt="Exact solids from OpenCascade" src="https://img.shields.io/badge/solids-OpenCascade-3a3a3a?style=flat-square">
   <img alt="Drivable over MCP" src="https://img.shields.io/badge/AI-MCP%20%C2%B7%20Claude-6b4fbb?style=flat-square">
   <img alt="Status: early" src="https://img.shields.io/badge/status-early-d69e2e?style=flat-square">
@@ -133,6 +133,12 @@ part as it was and slot a new feature in at that point.
   </tr>
 </table>
 
+## Text and embossing
+
+Choose **Model → Text / Emboss** to make editable 3D lettering. Start on XY, XZ or YZ for a new body, or click a flat face on an exact body to raise or engrave a label. The clicked point is the baseline origin; X/Y offsets, angle and left/center/right alignment place the lettering. Height is the font's capital height, depth is the raised height or engraving depth, and spacing adds a gap between characters. These dimensions accept parameters and units, and the text remains editable in the timeline.
+
+The bundled [Noto Sans Bold font](crates/fr-core/assets/fonts/PROVENANCE.txt), distributed under the [SIL Open Font License](crates/fr-core/assets/fonts/OFL.txt), makes saved designs independent of installed fonts. This first version supports one line of up to 128 characters; unsupported characters and combining marks produce a readable error. Letter counters and separate accents are preserved. Curved faces and mesh bodies are not yet supported for embossing. Lettering must fit entirely over material on the selected face. Designs containing text require this version of Ferrender; older designs remain readable.
+
 ## Look inside and measure
 
 <table>
@@ -191,6 +197,7 @@ been tried against the live API.
 | **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
 | **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, join / cut / intersect, fillet, chamfer, shell |
+| **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
 | **Inspect** | Measure, Section Analysis, degrees of freedom while sketching |
@@ -215,7 +222,7 @@ The solid kernel is OpenCascade. There is no cmake step: the `cadrum` binding's 
 OpenCascade 8 static libraries the first time (about 33 MB, from that project's GitHub releases, not checksummed).
 
 **Linux** needs the usual winit and wgpu system packages (X11 or Wayland development libraries and a Vulkan or GL
-driver). It has not been built or run on Linux yet.
+driver). CI builds and tests on Ubuntu 24.04 with software Vulkan; a native Linux desktop session has not been manually checked.
 
 ## Under the hood
 

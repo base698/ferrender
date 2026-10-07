@@ -12,7 +12,7 @@ use crate::units::Unit;
 
 /// Written into every native file so other tools can recognise it.
 pub const FORMAT: &str = "ferrender";
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STL_BYTES: usize = 128 * 1024 * 1024;
 
@@ -20,7 +20,9 @@ pub fn to_json(doc: &Document) -> String {
     let mut v = serde_json::to_value(doc).expect("documents always serialize");
     let o = v.as_object_mut().unwrap();
     o.insert("format".into(), FORMAT.into());
-    o.insert("version".into(), FORMAT_VERSION.into());
+    // Keep ordinary designs readable by version-1 apps; text needs the new schema.
+    let version = if doc.features.iter().any(|f| matches!(f.kind, crate::doc::FeatureKind::Text(_))) { 2 } else { 1 };
+    o.insert("version".into(), version.into());
     serde_json::to_string_pretty(&v).unwrap()
 }
 

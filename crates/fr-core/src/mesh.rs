@@ -438,11 +438,22 @@ pub fn extrude_tapered(profiles: &[&Profile], plane: &Plane, z0: f64, z1: f64, t
             return Err("the taper closes the profile up before the end".into());
         }
         let at = |q: DVec2, z: f64| plane.to_world(q) + n * z;
-        for (a, b) in std::iter::once((&lo.outer, &hi.outer)).chain(lo.holes.iter().zip(&hi.holes)) {
-            for i in 0..a.len() {
-                let j = (i + 1) % a.len();
-                quad(&mut m, at(a[i], z0), at(a[j], z0), at(b[j], z1), at(b[i], z1));
+        let walls = |m: &mut Mesh, lower: &Profile, upper: &Profile, from: f64, to: f64| {
+            for (a, b) in std::iter::once((&lower.outer, &upper.outer)).chain(lower.holes.iter().zip(&upper.holes)) {
+                for i in 0..a.len() {
+                    let j = (i + 1) % a.len();
+                    quad(m, at(a[i], from), at(a[j], from), at(b[j], to), at(b[i], to));
+                }
             }
+        };
+        if z0 < 0.0 && z1 > 0.0 {
+            // Offset is proportional to |z|, so its slope changes at the sketch
+            // plane. Keep that original ring: joining equal-size end rings
+            // directly would erase the taper of a symmetric extrusion.
+            walls(&mut m, &lo, p, z0, 0.0);
+            walls(&mut m, p, &hi, 0.0, z1);
+        } else {
+            walls(&mut m, &lo, &hi, z0, z1);
         }
         for t in triangulate(&hi) {
             m.tris.push([at(t[0], z1), at(t[1], z1), at(t[2], z1)]);

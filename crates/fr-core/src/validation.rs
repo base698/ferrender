@@ -104,6 +104,7 @@ pub fn document(d: &Document) -> Result<(), String> {
         match &f.kind {
             FeatureKind::Sketch(s) => s.validate().map_err(|e|format!("sketch {}: {e}",f.id))?,
             FeatureKind::Import(m) => m.validate()?,
+            FeatureKind::Text(t) => text(t)?,
             _ => {}
         }
     }
@@ -112,4 +113,22 @@ pub fn document(d: &Document) -> Result<(), String> {
         return Err("the document id range is exhausted".into());
     }
     Ok(())
+}
+
+/// Bounds for text before the font parser or solid kernel is entered.
+pub fn text(t: &crate::doc::Text) -> Result<(), String> {
+    if t.text.chars().count() > 128 { return Err("text is limited to 128 characters".into()); }
+    Sketch::new(t.plane).validate().map_err(|_| "the text plane needs finite, perpendicular unit axes")?;
+    for v in [&t.height, &t.depth, &t.spacing, &t.angle, &t.x, &t.y] {
+        expression(&v.expr)?;
+        if !v.v.is_finite() || !(v.v as f32).is_finite() { return Err("text dimensions must be finite and representable".into()); }
+    }
+    if t.face.is_some_and(|p| !p.is_finite()) || t.frame.is_some_and(|f| f.iter().any(|p| !p.is_finite()) || f[0].cmpgt(f[1]).any()) {
+        return Err("text face references must be finite and have valid bounds".into());
+    }
+    match t.op {
+        crate::doc::Op::New if t.body.is_none() && t.face.is_none() && t.frame.is_none() => Ok(()),
+        crate::doc::Op::Join | crate::doc::Op::Cut if t.body.is_some() && t.face.is_some() => Ok(()),
+        _ => Err("text needs either New Body with a plane, or Raise/Engrave with a body and flat face".into()),
+    }
 }

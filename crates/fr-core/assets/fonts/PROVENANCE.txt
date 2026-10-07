@@ -1,0 +1,16 @@
+Bundled font: Noto Sans Bold, unmodified upstream TrueType binary.
+Source repository: https://github.com/notofonts/noto-fonts
+Upstream commit: ffebf8c1ee449e544955a7e813c54f9b73848eac
+Retrieved: 2026-10-07
+
+Font source:
+https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSans/NotoSans-Bold.ttf
+SHA-256: c976e4b1b99edc88775377fcc21692ca4bfa46b6d6ca6522bfda505b28ff9d6a
+
+License source:
+https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE
+SHA-256: 0dab92d0544f7b233403f14b84a663bdbfa746982eda629e7f4f9ffe1b036feb
+
+The accompanying OFL.txt is the upstream SIL Open Font License 1.1 and
+copyright notice. Keep it with redistributed copies of this font.
+The font is embedded into Ferrender; documents never load a font path.

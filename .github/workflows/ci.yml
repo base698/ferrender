@@ -48,6 +48,9 @@ jobs:
           cargo test --locked -p ferrender automation_
           cargo test --locked -p ferrender editing_extrusions_preserves_taper_and_through_all
           cargo test --locked -p ferrender malformed_and_oversized_clipboard_geometry_is_refused
+          cargo test --locked -p ferrender text_
+          cargo test --locked -p ferrender failed_file_open_and_import_remain_visible_and_keep_the_design
+          cargo test --locked -p ferrender file_error_modal
       # Hosted macOS VMs may not expose Metal. Linux's Mesa software Vulkan
       # driver exercises the complete offscreen rendering/input suite instead.
       - name: Test full suite with Linux software rendering

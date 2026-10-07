@@ -76,6 +76,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
         ui.menu_button("Model", |ui| {
             item(app, ui, "Extrude", "E", Action::Extrude);
             item(app, ui, "Revolve", "", Action::Revolve);
+            item(app, ui, "Text / Emboss", "", Action::Text);
             ui.separator();
             item(app, ui, "Move / Rotate / Scale", "", Action::Transform);
             item(app, ui, "Combine", "", Action::Combine);
@@ -239,6 +240,9 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 if big(ui, icon::ARROWS_CLOCKWISE, "Revolve", rev, "Turn a sketch profile around an axis, like a lathe").clicked() {
                     app.run(&ctx, Action::Revolve);
                 }
+                if big(ui, icon::TEXT_T, "Text", matches!(app.dialog, Dialog::Text(_)), "Create solid text, or raise or engrave it on a flat face").clicked() {
+                    app.run(&ctx, Action::Text);
+                }
             });
             group(ui, "MODIFY", |ui| {
                 if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_)), "Move, rotate or scale the selected body").clicked() {
@@ -359,6 +363,7 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Shell(_) => icon::CUBE_TRANSPARENT,
         FeatureKind::Hole(_) => icon::CIRCLE_DASHED,
         FeatureKind::Thread(_) => icon::SPIRAL,
+        FeatureKind::Text(_) => icon::TEXT_T,
     }
 }
 
@@ -699,7 +704,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
         }
         Dialog::Pattern(mut p) => {
             dialog_window(app, "Pattern").show(ctx, |ui| {
-                let sources: Vec<(Id, String)> = app.doc().features.iter().filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_))).map(|f| (f.id, f.name.clone())).collect();
+                let sources: Vec<(Id, String)> = app.doc().features.iter().filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New)).map(|f| (f.id, f.name.clone())).collect();
                 let shown = sources.iter().find(|s| Some(s.0) == p.source).map_or("choose".to_owned(), |s| s.1.clone());
                 egui::Grid::new("pattern").num_columns(3).show(ui, |ui| {
                     ui.label("Repeat");
@@ -861,6 +866,61 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     ui.label(RichText::new(format!("{bore}{head}")).color(DIM));
                 }
                 app.dialog = Dialog::Hole(h);
+                confirm(app, ui, "OK");
+            });
+        }
+        Dialog::Text(mut t) => {
+            dialog_window(app, if t.editing.is_some() { "Edit Text / Emboss" } else { "Text / Emboss" }).show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                if t.editing.is_some() {
+                    ui.label(RichText::new("Later features are hidden while editing this text.").small().color(DIM));
+                }
+                ui.label("Text");
+                ui.add(egui::TextEdit::singleline(&mut t.text).desired_width(340.0).char_limit(128).hint_text("Enter text"));
+                ui.label(RichText::new("Sans Bold · up to 128 characters").small().color(DIM));
+                ui.separator();
+                egui::Grid::new("text_placement").num_columns(2).show(ui, |ui| {
+                    ui.label("Place on");
+                    ui.horizontal(|ui| {
+                        for (label, plane) in [("XY", Plane::XY), ("XZ", Plane::XZ), ("YZ", Plane::YZ)] {
+                            if ui.selectable_label(t.body.is_none() && t.plane == plane, label).clicked() {
+                                (t.plane, t.body, t.face, t.frame, t.op) = (plane, None, None, None, Op::New);
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Face");
+                    ui.label(match t.body {
+                        Some(id) => RichText::new(app.doc().feature(id).map_or("Selected flat face", |f| f.name.as_str())),
+                        None => RichText::new("click a flat face in the viewport").color(ACCENT),
+                    });
+                    ui.end_row();
+                    ui.label("Operation");
+                    ui.horizontal(|ui| {
+                        for (label, op) in [("New body", Op::New), ("Raised", Op::Join), ("Engraved", Op::Cut)] {
+                            ui.selectable_value(&mut t.op, op, label);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Alignment");
+                    ui.horizontal(|ui| {
+                        for (label, align) in [("Left", fr_core::text::Align::Left), ("Center", fr_core::text::Align::Center), ("Right", fr_core::text::Align::Right)] {
+                            ui.selectable_value(&mut t.align, align, label);
+                        }
+                    });
+                    ui.end_row();
+                });
+                ui.separator();
+                egui::Grid::new("text_sizes").num_columns(3).show(ui, |ui| {
+                    value_row(app, ui, "Letter height", &mut t.height, Kind::Length);
+                    value_row(app, ui, "Depth", &mut t.depth, Kind::Length);
+                    value_row(app, ui, "Extra spacing", &mut t.spacing, Kind::Length);
+                    value_row(app, ui, "X offset", &mut t.x, Kind::Length);
+                    value_row(app, ui, "Y offset", &mut t.y, Kind::Length);
+                    value_row(app, ui, "Angle", &mut t.angle, Kind::Angle);
+                });
+                ui.label(RichText::new("Offsets and alignment use the baseline at the origin or clicked point. Flat solid faces only; curved wrapping is not available.").small().color(DIM));
+                app.dialog = Dialog::Text(t);
                 confirm(app, ui, "OK");
             });
         }
@@ -1245,6 +1305,26 @@ fn recover(app: &mut App, ctx: &Context) {
     }
 }
 
+/// Unlike notifications, a failed open/import must survive a slow native picker.
+fn file_error(app: &mut App, ctx: &Context) {
+    let Some(error) = app.file_error.clone() else { return };
+    egui::Modal::new("file_error".into()).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading(&error.title);
+        ui.label(RichText::new(error.path.display().to_string()).color(DIM));
+        ui.separator();
+        egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| { ui.label(&error.message); });
+        ui.add_space(6.0);
+        ui.label(error.guidance);
+        ui.horizontal(|ui| {
+            if ui.button("Dismiss").clicked() { app.file_error = None; }
+            if ui.button("Copy details").clicked() {
+                ctx.copy_text(format!("{}\n{}\n{}", error.title, error.path.display(), error.message));
+            }
+        });
+    });
+}
+
 pub fn windows(app: &mut App, ctx: &Context) {
     view_buttons(app, ctx);
     dialogs(app, ctx);
@@ -1254,4 +1334,5 @@ pub fn windows(app: &mut App, ctx: &Context) {
     assistant(app, ctx);
     rename(app, ctx);
     recover(app, ctx);
+    file_error(app, ctx);
 }

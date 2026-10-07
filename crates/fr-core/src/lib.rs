@@ -17,6 +17,7 @@ pub mod render;
 pub mod sketch;
 pub mod solver;
 pub mod threads;
+pub mod text;
 pub mod units;
 pub mod validation;
 

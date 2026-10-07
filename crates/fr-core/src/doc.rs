@@ -13,7 +13,7 @@ use crate::exact::{self, Lumps, Place};
 use crate::expr::{self, Kind, Quantity, Value};
 use crate::mesh::{self, Mesh};
 use crate::profile::{self, Profile};
-use crate::sketch::{Geom, Id, Sketch};
+use crate::sketch::{Geom, Id, Plane, Sketch};
 use crate::solver;
 use crate::threads;
 use crate::units::{Unit, fmt_len, trim_num};
@@ -351,6 +351,72 @@ pub struct Thread {
     pub extra: Option<Value>,
 }
 
+/// Editable lettering, either a standalone solid or raised/recessed on an exact flat face.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Text {
+    pub text: String,
+    pub plane: Plane,
+    pub height: Value,
+    pub depth: Value,
+    pub spacing: Value,
+    pub angle: Value,
+    pub x: Value,
+    pub y: Value,
+    pub align: crate::text::Align,
+    pub op: Op,
+    pub body: Option<Id>,
+    pub face: Option<DVec3>,
+    pub frame: Option<[DVec3; 2]>,
+}
+
+impl Text {
+    /// Resolve an attached face before applying local offsets and rotation. Like
+    /// other face features, this uses the original and bounds-mapped anchor; reject
+    /// candidates off a flat face or facing a different direction.
+    pub fn placement(&self, body: Option<&Body>) -> Result<Plane, String> {
+        let mut plane = self.plane;
+        if let Some(body) = body {
+            if !body.is_exact() { return Err("text on a surface needs an exact body with a flat face".into()); }
+            let anchor = self.face.ok_or("select a flat face for the text")?;
+            let mut found = None;
+            let [original, mapped] = exact::candidates(&body.solids, &[anchor], self.frame)[0];
+            let mut candidates = vec![mapped, original];
+            // An earlier emboss can extend the bounds beyond this face. When
+            // the base grows, proportional mapping need not land on the face;
+            // also try the change in the outward extent along its normal.
+            if let (Some([lo, hi]), Some((now_lo, now_hi))) = (self.frame, body.mesh.bbox()) {
+                let n = plane.normal();
+                let extent = |lo: DVec3, hi: DVec3| n.dot(DVec3::new(if n.x >= 0.0 { hi.x } else { lo.x }, if n.y >= 0.0 { hi.y } else { lo.y }, if n.z >= 0.0 { hi.z } else { lo.z }));
+                candidates.push(anchor + n * (extent(now_lo, now_hi) - extent(lo, hi)));
+            }
+            for point in candidates {
+                let Some(face) = crate::face::Face::near(body, point) else { continue };
+                let Some(surface) = face.plane else { continue };
+                let normal = surface.normal();
+                if normal.dot(plane.normal()) < 1.0 - 1e-6 || (point - surface.origin).dot(normal).abs() > 1e-5 { continue; }
+                let local = surface.to_local(point);
+                if face.loops.iter().filter(|ring| profile::inside(ring, local)).count() % 2 == 0 { continue; }
+                // Keep the user-chosen baseline and orientation on the resolved face.
+                plane.origin += point - anchor;
+                plane.origin -= normal * (plane.origin - surface.origin).dot(normal);
+                found = Some(plane);
+                break;
+            }
+            plane = found.ok_or("the text's flat face is no longer there; select the face again")?;
+        }
+        plane.origin += plane.x * self.x.v + plane.y * self.y.v;
+        let (sin, cos) = self.angle.v.to_radians().sin_cos();
+        (plane.x, plane.y) = (plane.x * cos + plane.y * sin, plane.y * cos - plane.x * sin);
+        Ok(plane)
+    }
+
+    fn outlines(&self) -> Result<Vec<Profile>, String> {
+        crate::validation::text(self)?;
+        if self.depth.v < 0.001 || self.depth.v > 10000.0 { return Err("text depth must be between 0.001 and 10000 mm".into()); }
+        crate::text::profiles(&self.text, self.height.v, self.spacing.v, self.align)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Combine {
     pub target: Id,
@@ -375,6 +441,7 @@ pub enum FeatureKind {
     Shell(Shell),
     Hole(Hole),
     Thread(Thread),
+    Text(Text),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -401,6 +468,7 @@ impl Feature {
             FeatureKind::Shell(_) => "shell",
             FeatureKind::Hole(_) => "hole",
             FeatureKind::Thread(_) => "thread",
+            FeatureKind::Text(_) => "text",
         }
     }
 }
@@ -793,6 +861,11 @@ impl Document {
                 };
                 Ok(Some((Shape::Exact(exact::revolve(&Self::pick(&all, &r.profiles)?, &s.plane, a, b, r.angle.v)?), r.op)))
             }
+            FeatureKind::Text(t) if t.op == Op::New => {
+                let profiles = t.outlines()?;
+                let plane = t.placement(None)?;
+                Ok(Some((Shape::Exact(exact::extrude(&profiles.iter().collect::<Vec<_>>(), &plane, 0.0, t.depth.v)?), Op::New)))
+            }
             FeatureKind::Import(m) => Ok(Some((Shape::Mesh(m.clone()), Op::New))),
             _ => Ok(None),
         }
@@ -859,6 +932,10 @@ impl Document {
                         set(v, Kind::Length);
                     }
                 }
+                FeatureKind::Text(t) => {
+                    for v in [&mut t.height, &mut t.depth, &mut t.spacing, &mut t.x, &mut t.y] { set(v, Kind::Length); }
+                    set(&mut t.angle, Kind::Angle);
+                }
                 FeatureKind::Import(_) | FeatureKind::Combine(_) => {}
             }
             if let Some(e) = err {
@@ -895,6 +972,32 @@ impl Document {
         let find = |bodies: &[Body], id: Id| bodies.iter().position(|b| b.id == id).ok_or("a body it used no longer exists".to_owned());
         const MESH_ONLY: &str = "this body is a mesh (imported, tapered, or combined with one), and only exact bodies made from sketches can do that";
         match &f.kind {
+            FeatureKind::Text(t) if t.op != Op::New => {
+                let profiles = t.outlines()?;
+                let i = find(bodies, t.body.ok_or("select a body and flat face for the text")?)?;
+                let plane = t.placement(Some(&bodies[i]))?;
+                let refs: Vec<_> = profiles.iter().collect();
+                // All lettering must sit on material. This also catches overhangs,
+                // holes through letters, and disconnected punctuation over an edge.
+                let overlap = (t.depth.v * 0.01).min(0.01);
+                let footprint = exact::extrude(&refs, &plane, -overlap, 0.0)?;
+                let supported = exact::boolean(&footprint, &bodies[i].solids, Bool::Intersect)?;
+                let expected: f64 = footprint.iter().map(|s| s.volume()).sum();
+                let actual: f64 = supported.iter().map(|s| s.volume()).sum();
+                if expected <= 1e-10 || actual < expected * (1.0 - 1e-5) {
+                    return Err("the text extends beyond the flat face or over a hole; move it, reduce its height, or choose another face".into());
+                }
+                let (z0, z1, operation) = match t.op {
+                    Op::Join => (-overlap, t.depth.v, Bool::Union),
+                    Op::Cut => (-t.depth.v, overlap, Bool::Subtract),
+                    _ => return Err("text supports New Body, Raise, or Engrave".into()),
+                };
+                let tool = exact::extrude(&refs, &plane, z0, z1)?;
+                let made = exact::boolean(&bodies[i].solids, &tool, operation)?;
+                bodies[i].set_exact(made)?;
+                bodies.retain(|b| !b.mesh.tris.is_empty());
+                Ok(())
+            }
             FeatureKind::Transform(t) => {
                 let i = find(bodies, t.body)?;
                 if t.scale.v.abs() < 1e-9 {
@@ -1084,7 +1187,7 @@ impl Document {
             }
             FeatureKind::Pattern(p) => {
                 let source = self.feature(p.source).filter(|s| !s.suppressed).ok_or("the feature it repeats is missing or suppressed")?;
-                let (tool, op) = self.tool(source, bodies)?.ok_or("only extrudes, revolves and imports can be patterned")?;
+                let (tool, op) = self.tool(source, bodies)?.ok_or("only extrudes, revolves, imports and standalone text can be patterned")?;
                 let mut landed = 0;
                 for (k, place) in p.placements()?.iter().enumerate() {
                     let copy = tool.placed(place);

@@ -1112,8 +1112,9 @@ fn pick_body(app: &App, built: &fr_core::Built, pos: Pos2) -> Option<(Id, DVec3,
 
 /// The face of a body under a screen position, in the document as it stands (not a dialog's preview).
 fn pick_face(app: &App, pos: Pos2) -> Option<Face> {
-    let (id, at, tri) = pick_body(app, &app.session.built, pos)?;
-    let mut face = Face::pick(app.session.built.body(id)?, tri);
+    let built = if matches!(app.dialog, Dialog::Text(_)) { app.text_source() } else { &app.session.built };
+    let (id, at, tri) = pick_body(app, built, pos)?;
+    let mut face = Face::pick(built.body(id)?, tri);
     face.at = at;
     Some(face)
 }
@@ -1356,6 +1357,19 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
                 app.dialog = Dialog::Measure(m);
             }
         }
+        Dialog::Text(_) => {
+            if let Some(origin) = app.text_baseline() {
+                let at = to_screen(app, origin);
+                painter.line_segment([at - vec2(6.0, 0.0), at + vec2(6.0, 0.0)], Stroke::new(2.0, SELECTED));
+                painter.line_segment([at - vec2(0.0, 6.0), at + vec2(0.0, 6.0)], Stroke::new(2.0, SELECTED));
+            }
+            if let Some(face) = hover.and_then(|pos| pick_face(app, pos)) {
+                for ring in &face.outline {
+                    painter.add(Shape::closed_line(ring.iter().map(|q| to_screen(app, *q)).collect(), Stroke::new(2.0, ACCENT)));
+                }
+                if clicked.is_some() && let Err(e) = app.text_on_face(face) { app.toast(e); }
+            }
+        }
         Dialog::Thread(mut t) => {
             if let Some(at) = t.face {
                 painter.circle_stroke(to_screen(app, at), 5.0, Stroke::new(2.0, SELECTED));
@@ -1469,6 +1483,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Shell(_), _) => "Click the faces to leave open.",
         (Dialog::Hole(_), _) => "Click a flat face to put a hole there; click a hole to take it away. Sketch points snap.",
         (Dialog::Thread(_), _) => "Click the round side of a rod, or the inside of a hole.",
+        (Dialog::Text(_), _) => "Click a flat face to place text, or choose XY, XZ or YZ. The cross marks its baseline origin.",
         (Dialog::Measure(_), _) => "Click two things to measure between: corners and sketch points, edges and sketch lines, or faces.",
         (Dialog::Transform(_), _) => "Drag the body to slide it across the screen, or type distances. Click another body to move that one.",
         (Dialog::Combine(c), _) if c.target.is_none() => "Click the body to keep.",

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Color32, Context, Key, Modifiers, Pos2, Rect, ViewportCommand};
-use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Pattern, PatternKind, Revolve, Shell, Thread, Transform};
+use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Pattern, PatternKind, Revolve, Shell, Text, Thread, Transform};
 pub use fr_core::face::Face;
 use fr_core::render::Camera;
 use fr_core::sketch::Clip;
@@ -221,6 +221,52 @@ pub struct ThreadDlg {
     pub frame: Option<[DVec3; 2]>,
 }
 
+/// Editable text placement and extrusion, with lengths kept as parameter expressions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextDlg {
+    pub editing: Option<Id>,
+    pub text: String,
+    pub plane: Plane,
+    pub height: String,
+    pub depth: String,
+    pub spacing: String,
+    pub angle: String,
+    pub x: String,
+    pub y: String,
+    pub align: fr_core::text::Align,
+    pub op: Op,
+    pub body: Option<Id>,
+    pub face: Option<DVec3>,
+    pub frame: Option<[DVec3; 2]>,
+}
+
+impl TextDlg {
+    pub fn feature(&self, d: &mut Document) -> Result<Text, String> {
+        if self.op != Op::New && self.body.zip(self.face).is_none() {
+            return Err("Click a flat face to raise or engrave text.".into());
+        }
+        Ok(Text {
+            text: self.text.clone(), plane: self.plane,
+            height: d.enter(&self.height, Kind::Length)?, depth: d.enter(&self.depth, Kind::Length)?,
+            spacing: d.enter(&self.spacing, Kind::Length)?, angle: d.enter(&self.angle, Kind::Angle)?,
+            x: d.enter(&self.x, Kind::Length)?, y: d.enter(&self.y, Kind::Length)?,
+            align: self.align, op: self.op,
+            body: if self.op == Op::New { None } else { self.body },
+            face: if self.op == Op::New { None } else { self.face },
+            frame: if self.op == Op::New { None } else { self.frame },
+        })
+    }
+}
+
+/// File errors stay visible until dismissed, including after a blocking native file picker.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileError {
+    pub title: String,
+    pub path: PathBuf,
+    pub message: String,
+    pub guidance: &'static str,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatternDlg {
     pub source: Option<Id>,
@@ -261,6 +307,7 @@ pub enum Dialog {
     Shell(ShellDlg),
     Hole(HoleDlg),
     Thread(ThreadDlg),
+    Text(TextDlg),
     Measure(MeasureDlg),
     Export(Unit),
     Import(PathBuf, Unit),
@@ -368,6 +415,16 @@ impl Dialog {
                 hole.sizes()?;
                 Ok(d.add_feature(FeatureKind::Hole(hole)))
             }
+            Dialog::Text(t) => {
+                let kind = FeatureKind::Text(t.feature(d)?);
+                match t.editing {
+                    Some(id) => {
+                        d.feature_mut(id).ok_or("That text feature no longer exists.")?.kind = kind;
+                        Ok(id)
+                    }
+                    None => Ok(d.add_feature(kind)),
+                }
+            }
             Dialog::Thread(t) => {
                 let (body, face) = t.body.zip(t.face).ok_or("Click the rod or the hole to thread.")?;
                 let (offset, length) = if t.full { (None, None) } else { (Some(d.enter(&t.offset, Kind::Length)?), Some(d.enter(&t.length, Kind::Length)?)) };
@@ -379,7 +436,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_))
+        matches!(self, Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
     }
 }
 
@@ -485,6 +542,7 @@ pub enum Action {
     Shell,
     Hole,
     Thread,
+    Text,
     Measure,
     ExportStep,
     Cancel,
@@ -515,6 +573,8 @@ pub struct App {
     pub dialog: Dialog,
     /// The dialog's result, built on a copy of the document: (dialog it was built for, bodies, error).
     pub preview: Option<(Dialog, Built, Option<String>)>,
+    /// Geometry immediately before an edited Text feature, keyed by document revision and feature.
+    text_base: Option<(u64, Id, Built)>,
     pub value_edit: Option<ValueEdit>,
     pub typed: Option<Typed>,
     pub clipboard: Option<Clip>,
@@ -527,6 +587,7 @@ pub struct App {
     pub labels: Vec<(Rect, Id)>,
     pub report: solver::Report,
     pub toast: Option<(String, f64)>,
+    pub file_error: Option<FileError>,
     pub now: f64,
     pub show_params: bool,
     pub show_section: bool,
@@ -584,6 +645,7 @@ impl App {
             chips: Vec::new(),
             dialog: Dialog::None,
             preview: None,
+            text_base: None,
             value_edit: None,
             typed: None,
             clipboard: None,
@@ -593,6 +655,7 @@ impl App {
             labels: Vec::new(),
             report: solver::Report::default(),
             toast: None,
+            file_error: None,
             now: 0.0,
             show_params: false,
             show_section: false,
@@ -655,6 +718,13 @@ impl App {
         self.toast = Some((msg.into(), self.now + 4.0));
     }
 
+    fn file_error(&mut self, title: &str, path: &Path, message: String, guidance: &'static str) {
+        self.file_error = Some(FileError { title: title.into(), path: path.to_owned(), message, guidance });
+        // A native picker may block longer than a toast's entire lifetime. This is
+        // independent of frame time and requests a fresh frame when the picker returns.
+        self.ctx.request_repaint();
+    }
+
     pub fn doc(&self) -> &Document {
         &self.session.doc
     }
@@ -698,7 +768,11 @@ impl App {
         if self.sel_feature.is_some_and(|f| self.session.doc.feature(f).is_none()) {
             self.sel_feature = None;
         }
+        if matches!(&self.preview, Some((Dialog::Text(t), _, _)) if t.editing.is_some()) && !matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) {
+            self.fit_pending = true;
+        }
         self.preview = None;
+        self.text_base = None;
     }
 
     /// Changes the active sketch as one undo step, rejecting changes its constraints cannot hold.
@@ -1100,6 +1174,16 @@ impl App {
                 self.finish_sketch();
                 self.dialog = Dialog::Feature(FeatureDlg { revolve: true, editing: Some(id), sketch: Some(r.sketch), profiles: r.profiles.clone(), text: shown(&r.angle), symmetric: false, op: r.op, axis: r.axis, pick_axis: false, face: None, taper: String::new(), through_all: false, pick_to: false });
             }
+            FeatureKind::Text(t) => {
+                self.finish_sketch();
+                self.dialog = Dialog::Text(TextDlg {
+                    editing: Some(id), text: t.text.clone(), plane: t.plane,
+                    height: shown(&t.height), depth: shown(&t.depth), spacing: shown(&t.spacing),
+                    angle: shown(&t.angle), x: shown(&t.x), y: shown(&t.y), align: t.align,
+                    op: t.op, body: t.body, face: t.face, frame: t.frame,
+                });
+                self.fit_pending = true;
+            }
             _ => self.toast("This feature has no settings to edit; delete it and add it again to change it."),
         }
     }
@@ -1131,6 +1215,62 @@ impl App {
         self.dialog = Dialog::Feature(FeatureDlg { revolve, editing: None, sketch: picked.0, profiles: picked.1, text, symmetric: false, op, axis: Axis::Y, pick_axis: false, face, taper: String::new(), through_all: false, pick_to: false });
     }
 
+    fn prepare_text_source(&mut self) {
+        let Dialog::Text(t) = &self.dialog else { self.text_base = None; return };
+        let Some(id) = t.editing else { self.text_base = None; return };
+        if self.text_base.as_ref().is_some_and(|(rev, feature, _)| *rev == self.session.rev && *feature == id) { return; }
+        let Some(index) = self.doc().features.iter().position(|f| f.id == id) else { self.text_base = None; return };
+        let mut before = self.doc().clone();
+        before.roll_to(index);
+        self.text_base = Some((self.session.rev, id, before.rebuild()));
+    }
+
+    /// Face picking while editing uses the same geometry that the feature will see
+    /// during rebuild, before this text and any later moves, holes or lettering.
+    pub fn text_source(&self) -> &Built {
+        match (&self.dialog, &self.text_base) {
+            (Dialog::Text(t), Some((rev, id, built))) if t.editing == Some(*id) && *rev == self.session.rev => built,
+            _ => &self.session.built,
+        }
+    }
+
+    pub fn text_baseline(&self) -> Option<DVec3> {
+        let Dialog::Text(t) = &self.dialog else { return None };
+        let feature = t.feature(&mut self.doc().clone()).ok()?;
+        let body = if feature.op == Op::New { None } else { Some(self.text_source().body(feature.body?)?) };
+        feature.placement(body).ok().map(|p| p.origin)
+    }
+
+    /// Uses the actual clicked point as the baseline origin, keeping offsets editable.
+    pub fn text_on_face(&mut self, face: Face) -> Result<(), String> {
+        self.prepare_text_source();
+        let mut plane = face.plane.ok_or("Text / Emboss supports flat faces only; curved wrapping is not available.")?;
+        let body = self.text_source().body(face.body).ok_or("Choose a face that exists before this text feature in the timeline.")?;
+        if !body.is_exact() {
+            return Err("Text / Emboss needs a flat face of a solid; imported mesh faces are not supported.".into());
+        }
+        let frame = self.text_source().frame(face.body);
+        let Dialog::Text(t) = &mut self.dialog else { return Err("Open Text / Emboss first.".into()) };
+        let n = plane.normal();
+        plane.origin = face.at - n * (face.at - plane.origin).dot(n);
+        (t.plane, t.body, t.face, t.frame) = (plane, Some(face.body), Some(plane.origin), frame);
+        if t.op == Op::New { t.op = Op::Join; }
+        self.preview = None;
+        Ok(())
+    }
+
+    fn open_text_dialog(&mut self) {
+        let face = self.sel_face.clone();
+        self.finish_sketch();
+        self.dialog = Dialog::Text(TextDlg {
+            editing: None, text: "Text".into(), plane: Plane::XY,
+            height: "5 mm".into(), depth: "1 mm".into(), spacing: "0 mm".into(),
+            angle: "0 deg".into(), x: "0 mm".into(), y: "0 mm".into(),
+            align: fr_core::text::Align::Left, op: Op::New, body: None, face: None, frame: None,
+        });
+        if let Some(face) = face && let Err(e) = self.text_on_face(face) { self.toast(e); }
+    }
+
     /// Confirms the open dialog.
     pub fn apply_dialog(&mut self) {
         let dlg = self.dialog.clone();
@@ -1146,6 +1286,10 @@ impl App {
 
     /// Keeps the dialog's preview current.
     pub fn update_preview(&mut self) {
+        if matches!(&self.preview, Some((Dialog::Text(t), _, _)) if t.editing.is_some()) && !matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) {
+            self.fit_pending = true;
+        }
+        self.prepare_text_source();
         if !self.dialog.has_preview() {
             self.preview = None;
             return;
@@ -1156,11 +1300,16 @@ impl App {
         let mut doc = self.session.doc.clone();
         let (built, error) = match self.dialog.apply(&mut doc) {
             Ok(id) => {
+                // Editing sees the feature in its original place in the timeline.
+                // Later transforms must not make a clicked face move a second time.
+                if matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some())
+                    && let Some(index) = doc.features.iter().position(|f| f.id == id)
+                { doc.roll_to(index + 1); }
                 let built = doc.rebuild();
                 let e = built.errors.get(&id).cloned();
-                (if e.is_some() { self.session.built.clone() } else { built }, e)
+                (if e.is_some() { self.text_source().clone() } else { built }, e)
             }
-            Err(e) => (self.session.built.clone(), Some(e)),
+            Err(e) => (self.text_source().clone(), Some(e)),
         };
         self.preview = Some((self.dialog.clone(), built, error));
     }
@@ -1180,7 +1329,9 @@ impl App {
     }
 
     pub fn fit(&mut self) {
-        let mut bounds = fr_core::render::scene_bounds(&self.session);
+        let mut bounds = if matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) {
+            self.shown().bodies.iter().filter(|b| !self.doc().hidden_bodies.contains(&b.id)).filter_map(|b| b.mesh.bbox()).reduce(|(lo, hi), (l, h)| (lo.min(l), hi.max(h)))
+        } else { fr_core::render::scene_bounds(&self.session) };
         if let Some((_, sk)) = self.sketch()
             && let Some((lo, hi)) = sk.bbox()
         {
@@ -1221,6 +1372,7 @@ impl App {
         self.rename = None;
         self.pattern_at = None;
         self.scene.invalidate();
+        self.file_error = None;
         self.section.on = false;
         self.dialog = Dialog::None;
         self.sel_body = None;
@@ -1237,7 +1389,7 @@ impl App {
         }
         match Session::open(path) {
             Ok(s) => self.replace_session(s),
-            Err(e) => self.toast(e),
+            Err(e) => self.file_error("Could not open design", path, e, "Your current design has been kept."),
         }
     }
 
@@ -1249,8 +1401,11 @@ impl App {
         };
         if let Some(p) = path {
             match self.session.save(&p) {
-                Ok(()) => self.toast(format!("Saved {}", p.display())),
-                Err(e) => self.toast(e),
+                Ok(()) => {
+                    self.file_error = None;
+                    self.toast(format!("Saved {}", p.display()));
+                }
+                Err(e) => self.file_error("Could not save design", &p, e, "Your changes are still in memory. Save again to keep them."),
             }
         }
     }
@@ -1279,11 +1434,12 @@ impl App {
         });
         match r {
             Ok((id, tris)) => {
+                self.file_error = None;
                 self.sel_body = Some(id);
                 self.fit_pending = true;
                 self.toast(format!("Imported {tris} triangles."));
             }
-            Err(e) => self.toast(e),
+            Err(e) => self.file_error("Could not import STL", path, e, "Your current design has been kept."),
         }
         self.refresh();
     }
@@ -1294,9 +1450,16 @@ impl App {
             return;
         }
         let Some(path) = rfd::FileDialog::new().add_filter("STL mesh", &["stl"]).set_file_name(format!("{}.stl", self.doc_name())).save_file() else { return };
-        match io::write_stl(self.session.visible_bodies(), unit, &path) {
-            Ok(n) => self.toast(format!("Exported {n} triangles in {} to {}", unit.name(), path.display())),
-            Err(e) => self.toast(e),
+        self.export_stl_path(&path, unit);
+    }
+
+    pub fn export_stl_path(&mut self, path: &Path, unit: Unit) {
+        match io::write_stl(self.session.visible_bodies(), unit, path) {
+            Ok(n) => {
+                self.file_error = None;
+                self.toast(format!("Exported {n} triangles in {} to {}", unit.name(), path.display()));
+            }
+            Err(e) => self.file_error("Could not export STL", path, e, "Your design is still open. The export did not complete."),
         }
     }
 
@@ -1399,6 +1562,7 @@ impl App {
             Action::FinishSketch => self.finish_sketch(),
             Action::Extrude => self.open_feature_dialog(false),
             Action::Revolve => self.open_feature_dialog(true),
+            Action::Text => self.open_text_dialog(),
             Action::Transform => {
                 self.finish_sketch();
                 match self.target_body().or(self.session.built.bodies.first().map(|b| b.id).filter(|_| self.session.built.bodies.len() == 1)) {
@@ -1487,12 +1651,12 @@ impl App {
             }
             Action::Pattern => {
                 self.finish_sketch();
-                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_));
+                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
                 let chosen = self.sel_feature.filter(|f| self.doc().feature(*f).is_some_and(|f| ok(&f.kind)));
                 let source = chosen.or(self.doc().features.iter().rfind(|f| ok(&f.kind)).map(|f| f.id));
                 match source {
                     Some(_) => self.dialog = Dialog::Pattern(PatternDlg { source, kind: 0, axis: 2, count: 4, text: "360 deg".into() }),
-                    None => self.toast("There is no extrude, revolve or imported mesh to repeat yet."),
+                    None => self.toast("There is no extrude, revolve, standalone text or imported mesh to repeat yet."),
                 }
             }
             Action::Section => self.show_section = !self.show_section,
@@ -1566,7 +1730,7 @@ impl App {
                 match bytes.and_then(|b| std::fs::write(&path, b).map_err(|e| format!("Could not write {}: {e}", path.display()))) {
                     Ok(()) if skipped > 0 => self.toast(format!("Exported to {}. {skipped} mesh bod{} left out.", path.display(), if skipped == 1 { "y was" } else { "ies were" })),
                     Ok(()) => self.toast(format!("Exported to {}", path.display())),
-                    Err(e) => self.toast(e),
+                    Err(e) => self.file_error("Could not export STEP", &path, e, "Your design is still open. The export did not complete."),
                 }
             }
             Action::Cancel => {
@@ -1588,6 +1752,12 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &Context) {
+        if self.file_error.is_some() {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape) || i.consume_key(Modifiers::NONE, Key::Enter)) {
+                self.file_error = None;
+            }
+            return;
+        }
         // The clipboard keys arrive as events, not key presses.
         let typing = ctx.egui_wants_keyboard_input();
         for e in ctx.input(|i| i.events.clone()) {
