@@ -33,6 +33,26 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
         ui.menu_button("File", |ui| {
             item(app, ui, "New", &cmd("N"), Action::New);
             item(app, ui, "Open\u{2026}", &cmd("O"), Action::Open);
+            ui.menu_button("Open Recent", |ui| {
+                ui.set_max_width(520.0);
+                if app.recent.files().is_empty() {
+                    ui.label("No recent designs");
+                }
+                for path in app.recent.files() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let parent = path.parent().unwrap_or(std::path::Path::new(""));
+                    let label = format!("{name} — {}", parent.display());
+                    if ui.add(egui::Button::new(label).truncate()).on_hover_text(path.display().to_string()).clicked() {
+                        app.open_requests.push(Ok(path.clone()));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.add_enabled(!app.recent.files().is_empty(), egui::Button::new("Clear Recent")).on_hover_text("Clears this list; does not delete any designs.").clicked() {
+                    if let Err(error) = app.recent.clear() { app.toast(error); }
+                    ui.close();
+                }
+            });
             ui.separator();
             item(app, ui, "Save", &cmd("S"), Action::Save);
             item(app, ui, "Save As\u{2026}", &cmd("\u{21e7}S"), Action::SaveAs);

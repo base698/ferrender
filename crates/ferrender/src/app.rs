@@ -717,6 +717,7 @@ pub struct App {
     pub recover: Vec<Found>,
     pub ai: Assistant,
     pub config: Config,
+    pub recent: crate::recent::RecentFiles,
     native_theme: crate::native_theme::NativeTheme,
     pub ctx: Context,
     title: String,
@@ -730,6 +731,7 @@ pub const PRINT_ALLOWANCE: f64 = 0.2;
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> App {
         let (config, config_error) = if cfg!(test) { (Config::default(), None) } else { Config::load() };
+        let (recent, recent_error) = if cfg!(test) { (crate::recent::RecentFiles::default(), None) } else { crate::recent::RecentFiles::load(Config::path().with_file_name("recent.json")) };
         setup_style(&cc.egui_ctx, config.appearance);
         let native_theme = crate::native_theme::NativeTheme::new(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, config.appearance, native_theme.current());
@@ -801,6 +803,7 @@ impl App {
             recover: Vec::new(),
             ai: Assistant::default(),
             config,
+            recent,
             native_theme,
             ctx: cc.egui_ctx.clone(),
             title: String::new(),
@@ -808,6 +811,7 @@ impl App {
         if let Some(e) = config_error {
             app.toast(format!("Couldn't read the settings file, using defaults. {e}"));
         }
+        if let Some(e) = recent_error { app.toast(e); }
         if let Some(f) = file {
             app.open_path(&f);
         }
@@ -1756,7 +1760,10 @@ impl App {
             return;
         }
         match Session::open(path) {
-            Ok(s) => self.replace_session(s),
+            Ok(s) => {
+                self.replace_session(s);
+                self.remember_document();
+            },
             Err(e) => self.file_error("Could not open design", path, e, "Your current design has been kept."),
         }
     }
@@ -1767,14 +1774,23 @@ impl App {
             (Some(p), false) => Some(p.clone()),
             _ => rfd::FileDialog::new().add_filter("Ferrender design", &["ferr"]).set_file_name(format!("{}.ferr", self.doc_name())).save_file(),
         };
-        if let Some(p) = path {
-            match self.session.save(&p) {
-                Ok(()) => {
-                    self.file_error = None;
-                    self.toast(format!("Saved {}", p.display()));
-                }
-                Err(e) => self.file_error("Could not save design", &p, e, "Your changes are still in memory. Save again to keep them."),
+        if let Some(p) = path { self.save_path(&p); }
+    }
+
+    pub(crate) fn save_path(&mut self, path: &Path) {
+        match self.session.save(path) {
+            Ok(()) => {
+                self.file_error = None;
+                self.toast(format!("Saved {}", path.display()));
+                self.remember_document();
             }
+            Err(e) => self.file_error("Could not save design", path, e, "Your changes are still in memory. Save again to keep them."),
+        }
+    }
+
+    fn remember_document(&mut self) {
+        if let Some(path) = &self.session.path && let Err(error) = self.recent.remember(path) {
+            self.toast(error);
         }
     }
 
@@ -1858,6 +1874,9 @@ impl App {
         let r = api::execute(&mut self.session, cmd, Some(cam));
         if replacing && r.is_ok() {
             self.reset_document_ui();
+        }
+        if r.is_ok() && matches!(cmd["op"].as_str(), Some("open" | "save")) {
+            self.remember_document();
         }
         self.refresh();
         r

@@ -85,7 +85,7 @@ impl Config {
 
 /// Create a new, private temporary file before writing any secret. `create_new`
 /// refuses existing files and symlinks; rename only replaces the final entry.
-fn atomic_private_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_private_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().ok_or_else(|| std::io::Error::other("settings path has no parent"))?;
     std::fs::create_dir_all(parent)?;

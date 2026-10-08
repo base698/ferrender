@@ -570,6 +570,14 @@ was left and offers to recover or delete it; **File › Recover Unsaved…** sho
 the list again. Recovery never writes over your own `.ferr` file: a recovered
 design opens unsaved, under its old name, until you save it.
 
+**File → Open Recent** remembers the last 12 successfully opened or saved designs,
+newest first, across app restarts. Folder labels distinguish identical filenames;
+hover an entry for its full path. Opening a recent design uses the normal
+unsaved-work prompt. Missing or unreadable designs show an error and keep the
+current document. **Clear Recent** empties the list without deleting files.
+History is stored privately in `recent.json` beside the settings; imports,
+exports, failed operations, and separate headless automation do not populate it.
+
 Settings live in `~/.config/ferrender/config.toml` (`$XDG_CONFIG_HOME` and
 `FERRENDER_CONFIG_DIR` are honoured), written with mode 0600:
 

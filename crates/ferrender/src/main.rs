@@ -20,6 +20,7 @@ mod open_requests;
 mod macos_open;
 mod panels;
 mod recovery;
+mod recent;
 mod reference;
 mod reference_drag;
 mod theme;

@@ -52,6 +52,7 @@ jobs:
           cargo test --locked -p ferrender failed_file_open_and_import_remain_visible_and_keep_the_design
           cargo test --locked -p ferrender file_error_modal
           cargo test --locked -p ferrender desktop_open
+          cargo test --locked -p ferrender recent
           cargo test --locked -p ferrender appearance_follows_live_system_events_and_manual_overrides
           cargo test --locked -p ferrender appearance_menu_changes_theme_without_editing_or_rebuilding_the_design
       # Hosted macOS VMs may not expose Metal. Linux's Mesa software Vulkan

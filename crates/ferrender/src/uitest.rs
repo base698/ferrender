@@ -4,6 +4,7 @@
 
 mod dimensions_v022;
 mod desktop_open;
+mod recent_files;
 mod v030;
 mod gizmo;
 mod sketch_capture;
