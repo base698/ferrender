@@ -614,6 +614,7 @@ pub struct App {
     /// Clickable dimension labels and constraint badges from the last frame.
     pub labels: Vec<(Rect, Id)>,
     pub gap_cache: Option<(u64, Id, Vec<Id>)>,
+    pub open_requests: crate::open_requests::OpenRequests,
     pub reference_editor: crate::reference::Editor,
     pub reference_texture: crate::reference::TextureCache,
     pub reference_drag: crate::reference_drag::State,
@@ -692,6 +693,7 @@ impl App {
             vp: Rect::NOTHING,
             labels: Vec::new(),
             gap_cache: None,
+            open_requests: Default::default(),
             reference_editor: Default::default(),
             reference_texture: Default::default(),
             reference_drag: Default::default(),
@@ -1582,6 +1584,18 @@ impl App {
         self.refresh();
     }
 
+    /// Desktop requests use the same unsaved-work guard as File > Open. A pending
+    /// error stays visible until dismissed; further requests wait their turn.
+    pub fn process_open_request(&mut self, confirm: impl FnOnce(&Self) -> bool) {
+        if self.file_error.is_some() { return; }
+        let Some(request) = self.open_requests.pop() else { return; };
+        match request {
+            Ok(path) if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) || confirm(self) => self.open_path(&path),
+            Ok(_) => {},
+            Err(error) => self.toast(error),
+        }
+    }
+
     pub fn open_path(&mut self, path: &Path) {
         if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) {
             self.dialog = Dialog::Import(path.to_owned(), Unit::Mm);
@@ -2094,6 +2108,7 @@ impl eframe::App for App {
         self.ai = ai;
 
         self.shortcuts(&ctx);
+        self.process_open_request(Self::confirm_discard);
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             if let Some(p) = Some(f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()) {
                 if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) || self.confirm_discard() {

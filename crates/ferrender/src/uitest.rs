@@ -3,6 +3,7 @@
 //! for eyeballing.
 
 mod dimensions_v022;
+mod desktop_open;
 
 use std::path::PathBuf;
 

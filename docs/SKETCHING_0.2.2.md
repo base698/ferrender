@@ -55,6 +55,17 @@ Allow about 30–40 minutes. Use fresh XY sketches for the independent geometry 
 9. **Image persistence and visibility.** Save the moved/scaled image in a `.ferr` file, rename or move the original image file, and reopen the design. Expect the image and placement to survive. Hide it using Visible: it should stop intercepting Select. Show it again; the placement should be unchanged. Finish Sketch and export a solid: the reference should not appear in STL or STEP.
 10. **Short regression checks.** In a fresh sketch draw three sides of a rectangle: expect two open-end rings, then zero when you close the fourth side. In a value box enter `1e1 mm`, then try `1 / 0`: expect 10 mm for the first and a visible error without geometry changes for the second. Check View → Appearance in Light and Dark: handles, angle feedback, labels, and geometry should remain readable. Reopen one existing bishop, rook, or pawn and confirm its shape and dimensions remain unchanged.
 
+## Follow-up: macOS Open With
+
+The source update after the original 0.2.2 release adds Finder document-open handling. Check the commit in About: the original `c46e848` build does not include this fix. These checks apply to the updated build.
+
+1. Save a test design containing a reference image. Quit Ferrender, then use Finder **Open With → Ferrender** on that `.ferr` file. Expect the saved design and image to load without an error. If several Ferrender copies are listed, choose **Other…** and select the updated Desktop app.
+2. Leave Ferrender running and use Finder to open a different saved design, then the image design again. Each should replace the current saved document. Try a filename with spaces and `%` too.
+3. Make an unsaved change. Open another design from Finder and choose **Cancel** when asked to discard changes. The current work must remain. Repeat and choose **Discard** only on this throwaway test: the requested file should open.
+4. Open a deliberately invalid `.ferr` file from Finder. Expect a persistent error; the current design must remain intact. Dismiss it and use **File → Open** on a valid design to confirm the normal path still works.
+
+Finder requests to open several documents together are refused with a message to open one at a time. STL files use the existing import dialog.
+
 ## Reporting
 
 Send results such as “1–3 pass; 4 fails after reopening.” Include copied build info, exact inputs, a screenshot for visual problems, and the smallest saved `.ferr` file that reproduces the issue. The already-passing open-end and invalid-input tests only need the short regression checks here; the rest of the original 0.2 test plan remains available when you are ready to continue.

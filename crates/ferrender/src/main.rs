@@ -6,6 +6,9 @@ mod config;
 mod gpu;
 mod mcp;
 mod native_theme;
+mod open_requests;
+#[cfg(target_os = "macos")]
+mod macos_open;
 mod panels;
 mod recovery;
 mod reference;
@@ -57,9 +60,17 @@ fn main() -> eframe::Result {
         recovery::flush();
         eprintln!("Ferrender crashed. Unsaved work is offered for recovery the next time it starts.");
     }));
+    let requests = open_requests::OpenRequests::default();
+    #[cfg(target_os = "macos")]
+    let _document_events = macos_open::install(requests.clone());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("Ferrender").with_inner_size([1440.0, 900.0]).with_min_inner_size([900.0, 560.0]).with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("Ferrender", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, file)))))
+    eframe::run_native("Ferrender", options, Box::new(move |cc| {
+        let mut app = app::App::new(cc, file);
+        requests.attach(&cc.egui_ctx);
+        app.open_requests = requests;
+        Ok(Box::new(app))
+    }))
 }
