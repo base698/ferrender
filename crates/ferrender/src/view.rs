@@ -1404,6 +1404,10 @@ fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
     draw_sketch(app, painter, &sk, true, if matches!(app.tool, Tool::Select | Tool::Dimension | Tool::Trim) { hover } else { Hit::None }, &mut labels);
     app.labels = labels;
 
+    // Search owns input even on its opening and dismissal frames. Keep the
+    // sketch visible without forwarding keys or clicks to an active tool.
+    if app.command_search.block_input { return; }
+
     if app.reference_editor.sketch_id() == Some(sid) {
         let cursor = resp.hover_pos().and_then(|p| sketch_pos(app, &sk, p));
         app.reference_editor.paint_calibration(painter, sk.plane, app.cam, app.vp, cursor);
@@ -1576,6 +1580,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
         draw_sketch(app, painter, sk, false, Hit::None, &mut Vec::new());
     }
     app.labels.clear();
+    if app.command_search.block_input { return; }
     let hover = if consumed {None} else {resp.hover_pos()};
     let clicked = (!consumed && resp.clicked_by(PointerButton::Primary)).then(|| resp.interact_pointer_pos()).flatten();
     match app.dialog.clone() {
@@ -1657,9 +1662,10 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                     }
                 } else if !f.revolve
                     && f.editing.is_none()
-                    && let Some(face) = pick_face(app, pos)
+                    && let Some(mut face) = pick_face(app, pos)
                 {
                     if face.plane.is_some() {
+                        if let Some(body) = app.session.built.body(face.body) { face.prepare_exact(body); }
                         f.profiles.clear();
                         f.sketch = None;
                         f.face_owner = app.session.built.body(face.body).map_or(0, |b| b.component);
@@ -1909,15 +1915,16 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     let rect = ui.available_rect_before_wrap();
     let resp = ui.interact(rect, ui.id().with("viewport"), Sense::click_and_drag());
     app.vp = rect;
-    let reference_consumed = update_reference_drag(app, ui);
+    let blocked = app.command_search.block_input;
+    let reference_consumed = !blocked && update_reference_drag(app, ui);
     if app.fit_pending {
         app.fit_pending = false;
         app.fit();
     }
-    let graphical_consumed = if app.mode==Mode::Model && app.timeline.preview.is_none() {
+    let graphical_consumed = if !blocked && app.mode==Mode::Model && app.timeline.preview.is_none() {
         crate::primitives::interact(app,ui,&resp) || crate::model_drag::interact(app,ui,&resp) || crate::gizmo::interact(app,ui,&resp)
     } else {false};
-    if app.timeline.preview.is_none() && !app.reference_drag.is_dragging() && !reference_consumed && !graphical_consumed {
+    if !blocked && app.timeline.preview.is_none() && !app.reference_drag.is_dragging() && !reference_consumed && !graphical_consumed {
         navigate(app, ui, &resp);
     }
     let painter = ui.painter_at(rect);
@@ -1929,14 +1936,15 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     }
     draw_grid(app, &painter);
     draw_bodies(app, ui, &painter);
-    crate::construction_view::draw(app, &painter, resp.hover_pos());
+    let hover = if blocked { None } else { resp.hover_pos() };
+    crate::construction_view::draw(app, &painter, hover);
     match app.mode {
         Mode::Sketch(sid) => sketch_mode(app, ui, &resp, &painter, sid, reference_consumed),
         Mode::Model => {
             model_mode(app, &resp, &painter, graphical_consumed);
-            crate::model_drag::draw(app,&painter,resp.hover_pos());
-            crate::primitives::draw(app,&painter,resp.hover_pos());
-            crate::gizmo::draw(app,&painter,resp.hover_pos());
+            crate::model_drag::draw(app,&painter,hover);
+            crate::primitives::draw(app,&painter,hover);
+            crate::gizmo::draw(app,&painter,hover);
         },
     }
     let hint = match (&app.dialog, app.mode) {

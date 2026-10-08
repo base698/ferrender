@@ -12,6 +12,9 @@ mod model_drag;
 mod primitives;
 mod primitive_place;
 mod body_ops;
+mod command_search;
+mod components_followup;
+mod face_extrusion_followup;
 
 use std::path::PathBuf;
 

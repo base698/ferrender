@@ -1,5 +1,6 @@
 mod ai;
 mod app;
+mod command_search;
 mod bridge;
 mod build_info;
 mod config;

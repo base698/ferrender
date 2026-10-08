@@ -1,5 +1,7 @@
 # Sketching in Ferrender 0.2
 
+For the 0.3.0 test candidate, Select uses **V**; **S** opens command search. Other steps below retain their documented 0.2.2 behavior.
+
 This guide covers Ferrender **0.2.2** and includes a manual acceptance plan. For a shorter retest of the 0.2.2 changes, see [Sketching fixes in 0.2.2](SKETCHING_0.2.2.md). A test listed below is a check to perform, not a claim that someone has already performed it. See the release notes for completed validation.
 
 The new tools help you place a profile accurately, trace a photograph, and find open ends before making a solid. The [30 mm bishop tutorial](../BISHOP_TUTORIAL.md) uses direct coordinates and three-point arcs from a blank document. The [older tutorial](tutorials/BISHOP_0.1.md) remains available for 0.1 builds.

@@ -135,7 +135,7 @@ part as it was and slot a new feature in at that point.
 
 ## Text and embossing
 
-Choose **Model → Text / Emboss** to make editable 3D lettering. Start on XY, XZ or YZ for a new body, or click a flat face on an exact body to raise or engrave a label. The clicked point is the baseline origin; X/Y offsets, angle and left/center/right alignment place the lettering. Height is the font's capital height, depth is the raised height or engraving depth, and spacing adds a gap between characters. These dimensions accept parameters and units, and the text remains editable in the timeline.
+Choose **Model → Text / Emboss**, or press **S** and search for `text` or `emboss`, to make editable 3D lettering. Opening it from a sketch finishes sketch editing. Start on XY, XZ or YZ for a new body, or click a flat face on an exact body to raise or engrave a label. The clicked point is the baseline origin; X/Y offsets, angle and left/center/right alignment place the lettering. Height is the font's capital height, depth is the raised height or engraving depth, and spacing adds a gap between characters. These dimensions accept parameters and units, and the text remains editable in the timeline.
 
 The bundled [Noto Sans Bold font](crates/fr-core/assets/fonts/PROVENANCE.txt), distributed under the [SIL Open Font License](crates/fr-core/assets/fonts/OFL.txt), makes saved designs independent of installed fonts. This first version supports one line of up to 128 characters; unsupported characters and combining marks produce a readable error. Letter counters and separate accents are preserved. Curved faces and mesh bodies are not yet supported for embossing. Lettering must fit entirely over material on the selected face. Designs containing text require this version of Ferrender; older designs remain readable.
 
@@ -263,6 +263,10 @@ Use **Help → About Ferrender** to see the version, full source commit, whether
 
 ## Reference
 
+### Command search and Move
+
+Press **S** to search available commands, type a name such as `torus` or `text`, then use the arrow keys and **Enter** to run it. **Escape** closes search. **M** opens Move for the selected body or component. These letter shortcuts do not fire while typing into an input.
+
 ### Sketch
 
 New Sketch, pick a plane (or click a flat face of a body). Line
@@ -272,7 +276,7 @@ exactly so. **3-Point Arc** uses start, end, then through/bulge points; **Tangen
 continues from a line or arc endpoint. **Spline** passes through four editable
 fit points. **Point Coordinates…** creates a point or edits a selected one
 with signed X/Y expressions; double-click a point to reopen it. Position
-dimensions keep the coordinates attached to parameters. Drag with Select (S);
+dimensions keep the coordinates attached to parameters. Drag with Select (V);
 geometry moves as far as its constraints allow. While drawing a line, **Shift**
 freezes its current direction; for a tangent arc it freezes the current sweep.
 Hold Shift through placement to keep that angle as an editable constraint.

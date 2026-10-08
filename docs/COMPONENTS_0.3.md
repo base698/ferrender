@@ -247,4 +247,4 @@ Construction planes touch the same rebuild loop and the New Sketch picker. Build
 
 ## Not in 0.3.0
 
-Joints and joint limits, grounding (placement is always explicit), component instances and external components, STEP assembly structure, per-component colours or appearances, dragging to reparent in the browser, and drag-moving a component in the viewport (the dialog is the only way to move one in 0.3.0).
+Joints and joint limits, grounding (placement is always explicit), component instances and external components, STEP assembly structure, per-component colours or appearances, dragging to reparent in the browser, and free dragging of component geometry outside Move. The Move dialog includes graphical translation arrows and rotation handles for whole components.

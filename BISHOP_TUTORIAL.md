@@ -4,7 +4,7 @@ This tutorial recreates the photo-based bishop using Ferrender's desktop tools: 
 
 The silhouette matches the supplied bishop model closely. Its proportions were estimated from one photograph; only the 30 mm total height was specified. The red annotation on the photograph is not part of the piece.
 
-This tutorial targets **Ferrender 0.2.2**, whose three-point arc tool uses **start → end → bulge**. Builds 0.2.0 and 0.2.1 used start → bulge → end; use the [0.2.0 tutorial](https://github.com/base698/ferrender/blob/v0.2.0/BISHOP_TUTORIAL.md) with those builds. Check **Help → About Ferrender** for the version and source commit before testing. The geometric recipe was verified for 0.2.0 using the point-coordinate and three-point-arc commands: 45 positioned outline/through points, 25 outline edges, a fully constrained closed profile, and one exact 30 mm solid. Resizing to 36 mm and exporting STL/STEP also passed. Automated offscreen tests exercise the new controls, but the complete human mouse-and-keyboard walkthrough remains a manual acceptance check. The [0.1.0 instructions](docs/tutorials/BISHOP_0.1.md) are preserved for older builds.
+The same steps work in the 0.3.0 test candidate; **S** now opens command search and **V** chooses Select. This tutorial targets **Ferrender 0.2.2**, whose three-point arc tool uses **start → end → bulge**. Builds 0.2.0 and 0.2.1 used start → bulge → end; use the [0.2.0 tutorial](https://github.com/base698/ferrender/blob/v0.2.0/BISHOP_TUTORIAL.md) with those builds. Check **Help → About Ferrender** for the version and source commit before testing. The geometric recipe was verified for 0.2.0 using the point-coordinate and three-point-arc commands: 45 positioned outline/through points, 25 outline edges, a fully constrained closed profile, and one exact 30 mm solid. Resizing to 36 mm and exporting STL/STEP also passed. Automated offscreen tests exercise the new controls, but the complete human mouse-and-keyboard walkthrough remains a manual acceptance check. The [0.1.0 instructions](docs/tutorials/BISHOP_0.1.md) are preserved for older builds.
 
 ![Profile and finished silhouette with dimensions](docs/images/bishop-profile-guide.png)
 
@@ -41,7 +41,7 @@ On this sketch, horizontal is world **X** and vertical is world **Z**. In the ta
 
 ## 3. Enter the outline points directly
 
-Choose **Select** (`S`) and click empty sketch space to clear the selection. Choose **Sketch → Point Coordinates…** to create a point. Enter its **X** and **Y** coordinates and click **Place Point**. The dialog remains open so you can enter the next point without reopening it. These are **sketch** coordinates: in this XZ sketch, the dialog's **Y** is the table's **Z height**.
+Choose **Select** (`V` in 0.3.0; `S` in 0.2.2) and click empty sketch space to clear the selection. Choose **Sketch → Point Coordinates…** to create a point. Enter its **X** and **Y** coordinates and click **Place Point**. The dialog remains open so you can enter the next point without reopening it. These are **sketch** coordinates: in this XZ sketch, the dialog's **Y** is the table's **Z height**.
 
 Start with **P1**: enter **X = `6.2 mm`**, **Y = `0 mm`**, then click **Place Point**. The signs matter; negative coordinates go left or below the origin. The fields accept length expressions as well as literal millimeters. The coordinates are held by position dimensions, so changing a parameter in an expression moves the point and its attached outline.
 

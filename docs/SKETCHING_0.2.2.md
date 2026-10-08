@@ -1,5 +1,7 @@
 # Sketching fixes in Ferrender 0.2.2
 
+For the 0.3.0 test candidate, Select uses **V**; **S** opens command search. Other steps below retain their documented 0.2.2 behavior.
+
 Version 0.2.2 addresses feedback from the 0.2 manual tests: choose an arc's endpoints before its bulge, set dimensions on existing geometry, keep deliberate angle locks, and move or scale an imported reference directly in the sketch.
 
 Check **Help → About Ferrender → Copy build info** before testing. It should identify **0.2.2**; include its source commit with any report. The [full sketching guide](SKETCHING_0.2.md) still covers point coordinates, tangent arcs, splines, reference calibration, open-end highlighting, and expressions. The [bishop tutorial](../BISHOP_TUTORIAL.md) uses the revised arc click order.

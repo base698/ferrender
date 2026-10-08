@@ -43,6 +43,8 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Export STEP\u{2026}", "", Action::ExportStep);
         });
         ui.menu_button("Edit", |ui| {
+            ui.add_enabled_ui(crate::command_search::can_open(app), |ui| item(app, ui, "Search Commands", "S", Action::CommandSearch));
+            ui.separator();
             item(app, ui, "Undo", &cmd("Z"), Action::Undo);
             item(app, ui, "Redo", &cmd("\u{21e7}Z"), Action::Redo);
             ui.separator();
@@ -58,11 +60,14 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "New Sketch", "", Action::NewSketch);
             item(app, ui, "Finish Sketch", "", Action::FinishSketch);
             ui.separator();
-            for (label, key, tool) in [("Select", "S", Tool::Select), ("Line", "L", Tool::Line), ("Rectangle", "R", Tool::Rect), ("Circle", "C", Tool::Circle), ("Arc", "A", Tool::Arc), ("3-Point Arc", "", Tool::Arc3), ("Tangent Arc", "", Tool::TangentArc), ("Spline", "", Tool::Spline), ("Point", "P", Tool::Point), ("Dimension", "D", Tool::Dimension)] {
+            for (label, key, tool) in [("Select", "V", Tool::Select), ("Line", "L", Tool::Line), ("Rectangle", "R", Tool::Rect), ("Circle", "C", Tool::Circle), ("Arc", "A", Tool::Arc), ("3-Point Arc", "", Tool::Arc3), ("Tangent Arc", "", Tool::TangentArc), ("Spline", "", Tool::Spline), ("Point", "P", Tool::Point), ("Dimension", "D", Tool::Dimension)] {
                 item(app, ui, label, key, Action::Tool(tool));
             }
             item(app, ui, "Point Coordinates…", "", Action::PointCoordinates);
             item(app, ui, "Reference Image…", "", Action::ReferenceImage);
+            if ui.button("Text / Emboss…").on_hover_text("Creates solid lettering; finishes the current sketch.").clicked() {
+                let ctx = ui.ctx().clone(); app.run(&ctx, Action::Text); ui.close();
+            }
             item(app, ui, "Toggle Construction", "X", Action::Construction);
             ui.separator();
             item(app, ui, "Polygon", "", Action::Tool(Tool::Polygon));
@@ -85,7 +90,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
                 for (kind, name) in crate::primitives::NAMES.into_iter().enumerate() { item(app, ui, name, "", Action::Primitive(kind)); }
             });
             ui.separator();
-            item(app, ui, "Move / Rotate / Scale", "", Action::Transform);
+            item(app, ui, "Move / Rotate / Scale", "M", Action::Transform);
             item(app, ui, "Remove Body", "", Action::RemoveBody);
             item(app, ui, "Split Body", "", Action::SplitBody);
             item(app, ui, "Join Bodies", "", Action::JoinBodies);
@@ -245,7 +250,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "SELECT", |ui| {
-                if big(ui, icon::CURSOR, "Select", app.tool == Tool::Select, "Select and drag (S)").clicked() {
+                if big(ui, icon::CURSOR, "Select", app.tool == Tool::Select, "Select and drag (V); S searches commands").clicked() {
                     app.run(&ctx, Action::Tool(Tool::Select));
                 }
             });
@@ -282,7 +287,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "MODIFY", |ui| {
-                if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_) | Dialog::MoveComponent(_)), "Move the selected component, or move, rotate or scale a body").clicked() {
+                if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_) | Dialog::MoveComponent(_)), "Move the selected component, or move, rotate or scale a body (M)").clicked() {
                     app.run(&ctx, Action::Transform);
                 }
                 if big(ui, icon::SPLIT_HORIZONTAL, "Split", matches!(app.dialog, Dialog::Split(_)), "Split a body with a flat face or plane").clicked() { app.run(&ctx, Action::SplitBody); }

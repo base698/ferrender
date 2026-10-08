@@ -1355,7 +1355,11 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let face = match &c["face"] {
                 J::Null => None,
                 _ if !extrude => return Err("only extrude takes a \"face\"".into()),
-                f => Some(face_of(s, f)?),
+                f => {
+                    let mut face=face_of(s,f)?;
+                    if let Some(body)=s.built.body(face.body) {face.prepare_exact(body);}
+                    Some(face)
+                },
             };
             let through_all = match c["extent"].as_str() {
                 None | Some("distance") => false,

@@ -84,7 +84,16 @@ fn fuse(parts: Vec<Solid>) -> R<Lumps> {
 
 /// Merges faces that lie on the same surface, as a user expects after a join.
 fn tidy(lumps: Vec<Solid>) -> R<Lumps> {
-    Ok(lumps.into_iter().map(|s| s.clean().unwrap_or(s)).collect())
+    Ok(lumps.into_iter().map(|s| {
+        // UnifySameDomain can both corrupt a trimmed torus and change the
+        // topology passed to it. Keep an independent original for the fallback.
+        let before=s.volume();
+        let cleaned=s.clone().clean();
+        match cleaned {
+            Ok(cleaned) if cleaned.volume().is_finite() && (cleaned.volume()-before).abs()<=1e-7*before.abs().max(1.0) => cleaned,
+            _ => s,
+        }
+    }).collect())
 }
 
 /// Sweeps profiles along the plane normal from offset `z0` to `z1`.
@@ -158,6 +167,20 @@ pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> {
     if !sane || !v.is_finite() || v < -slack {
         return Err("the kernel returned a shape with the wrong volume for that operation".into());
     }
+    if !out.is_empty() {
+        // Some broken periodic trims have plausible exact mass properties but
+        // triangulate to a missing or inverted surface. Refuse those results,
+        // rather than displaying/exporting a body different from its exact one.
+        // Deflection times surface area is a conservative volume error bound;
+        // it also avoids false failures on tiny or very thin curved bodies.
+        let (mesh,_)=tessellate(&out)?;
+        let origin=mesh.tris.first().map_or(DVec3::ZERO,|t|t[0]);
+        let mesh_volume=mesh.tris.iter().map(|t|(t[0]-origin).dot((t[1]-origin).cross(t[2]-origin))).sum::<f64>()/6.0;
+        let tolerance=2.0*FINE.deflection_linear*out.iter().map(Solid::area).sum::<f64>()+slack;
+        if !mesh_volume.is_finite() || mesh_volume < -slack || (mesh_volume-v).abs()>tolerance {
+            return Err("the kernel could not make a reliable closed surface for that operation; try simplifying the intersecting faces".into());
+        }
+    }
     Ok(out)
 }
 
@@ -186,6 +209,51 @@ pub fn tessellate(lumps: &[Solid]) -> R<(Mesh, Vec<Vec<DVec3>>)> {
     }
     let edges = lumps.iter().flat_map(real_edges).map(|e| e.approximation_segments(FINE).into_iter().map(g).collect::<Vec<_>>()).filter(|e| e.len() >= 2).collect();
     Ok((mesh, edges))
+}
+
+/// A flat face's true edge curves for a frozen face sketch. The binding exposes
+/// edge samples and tangents rather than curve kinds, so only promote a sampled
+/// edge to a circle when both its samples and tangents agree at kernel precision.
+/// Sampling each kernel edge separately keeps deliberate polygon facets straight.
+pub fn face_edges(lumps: &[Solid], id: u64, plane: Plane, at: DVec3) -> Option<Vec<Seg>> {
+    let matches=|face: &&Face| {
+        let Some(surface)=face.surface() else {return false};
+        matches!(surface.kind,SurfaceKind::Plane)
+            && g(surface.axis_z).dot(plane.normal()).abs()>1.0-1e-8
+            && (g(surface.origin)-plane.origin).dot(plane.normal()).abs()<1e-6
+            && g(face.project(c(at)).0).distance(at)<1e-6
+    };
+    // A kernel history ID alone is not a unique spatial face. Also check its
+    // supporting plane and that the picked point lies within the trimmed face.
+    let face = lumps.iter().flat_map(|s|s.iter_face()).filter(matches).min_by_key(|f|f.id()!=id)?;
+    let mut out=Vec::new();
+    for edge in face.iter_edge() {
+        let points:Vec<_>=edge.approximation_segments(FINE).into_iter().map(|p|plane.to_local(g(p))).collect();
+        if points.len()<2 {continue;}
+        let (a,b)=(points[0],*points.last()?);
+        let tolerance=Edge::precision_distance().max(1e-9);
+        let closed=a.distance(b)<=tolerance;
+        let middle=points[points.len()/2];
+        let fit=if closed && points.len()>=5 { crate::sketch::arc3_center(a,points[points.len()/3],points[2*points.len()/3]) }
+            else { crate::sketch::arc3_center(a,middle,b) };
+        if let Ok(centre)=fit {
+            let radius=a.distance(centre);
+            let circular=points.iter().all(|p|(p.distance(centre)-radius).abs()<=tolerance)
+                && [a,middle,b].iter().all(|p| {
+                    let (_,tangent)=edge.project(c(plane.to_world(*p)));
+                    let t=g(tangent).normalize_or_zero();
+                    t.length_squared()>0.5 && t.dot(plane.to_world(*p)-plane.to_world(centre)).abs()<=tolerance
+                });
+            if circular {
+                out.push(if closed {Seg::Circle(centre,radius)} else {Seg::Arc(a,middle,b)});
+                continue;
+            }
+        }
+        // Non-circular curves still use their display approximation. This is
+        // intentionally not a best-fit arc, which could change the face's shape.
+        out.extend(points.windows(2).filter(|p|p[0].distance(p[1])>tolerance).map(|p|Seg::Line(p[0],p[1])));
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// The edges of a solid that separate two faces. A cylinder or sphere also

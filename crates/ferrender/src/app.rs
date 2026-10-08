@@ -584,6 +584,7 @@ pub struct Opts {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
+    CommandSearch,
     Primitive(usize),
     RemoveBody,
     SplitBody,
@@ -639,6 +640,7 @@ pub enum Action {
 }
 
 pub struct App {
+    pub command_search: crate::command_search::CommandSearch,
     pub session: Session,
     /// Scale is in points per millimetre.
     pub cam: Camera,
@@ -739,6 +741,7 @@ impl App {
             None => false,
         };
         let mut app = App {
+            command_search: Default::default(),
             session: Session::default(),
             cam: Camera::iso(),
             mode: Mode::Model,
@@ -1505,7 +1508,10 @@ impl App {
         // remain usable geometry, but must never all be extruded implicitly.
         let from = self.sketch().map(|(id, _)| id);
         let face_owner = self.sel_face.as_ref().and_then(|f| self.session.built.body(f.body)).map_or(self.doc().active_component, |b| b.component);
-        let face = self.sel_face.clone().filter(|f| !revolve && from.is_none() && f.plane.is_some()).map(|f| self.local_face(f));
+        let face = self.sel_face.clone().filter(|f| !revolve && from.is_none() && f.plane.is_some()).map(|mut f| {
+            if let Some(body) = self.session.built.body(f.body) { f.prepare_exact(body); }
+            self.local_face(f)
+        });
         self.finish_sketch();
         let doc = self.doc();
         let candidates: Vec<Id> = match from {
@@ -1708,6 +1714,8 @@ impl App {
 
     /// Session revision counters restart when opening a document, so cached UI state must too.
     fn reset_document_ui(&mut self) {
+        self.command_search.open = false;
+        self.ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("command-search-query")));
         if let Some(r) = &mut self.recovery {
             r.new_document();
         }
@@ -1860,6 +1868,7 @@ impl App {
             self.reference_drag.clear();
         }
         match a {
+            Action::CommandSearch => crate::command_search::open(self, ctx),
             Action::Plane => self.open_plane_dialog(),
             Action::NewComponent => self.new_component(self.doc().active_component),
             Action::ActivateRoot => self.activate_component(0),
@@ -2166,6 +2175,7 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &Context) {
+        if self.command_search.block_input { return; }
         if self.file_error.is_some() {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape) || i.consume_key(Modifiers::NONE, Key::Enter)) {
                 self.file_error = None;
@@ -2207,6 +2217,18 @@ impl App {
             }
             return;
         }
+        if crate::command_search::can_open(self) && ctx.input(|i| i.modifiers.is_none() && !i.pointer.any_down() && !i.pointer.any_pressed()) {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::S)) {
+                crate::command_search::consume_shortcut_text(ctx, 's');
+                self.run(ctx, Action::CommandSearch);
+                return;
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::M)) {
+                crate::command_search::consume_shortcut_text(ctx, 'm');
+                self.run(ctx, Action::Transform);
+                return;
+            }
+        }
         if ctx.input_mut(|i| i.consume_key(cmd, Key::A)) {
             self.run(ctx, Action::SelectAll);
         }
@@ -2231,7 +2253,7 @@ impl App {
             self.run(ctx, Action::Measure);
         }
         if self.sketch().is_some() {
-            for (k, a) in [(Key::L, Action::Tool(Tool::Line)), (Key::R, Action::Tool(Tool::Rect)), (Key::C, Action::Tool(Tool::Circle)), (Key::A, Action::Tool(Tool::Arc)), (Key::P, Action::Tool(Tool::Point)), (Key::D, Action::Tool(Tool::Dimension)), (Key::S, Action::Tool(Tool::Select)), (Key::X, Action::Construction), (Key::T, Action::Tool(Tool::Trim)), (Key::O, Action::Offset)] {
+            for (k, a) in [(Key::L, Action::Tool(Tool::Line)), (Key::R, Action::Tool(Tool::Rect)), (Key::C, Action::Tool(Tool::Circle)), (Key::A, Action::Tool(Tool::Arc)), (Key::P, Action::Tool(Tool::Point)), (Key::D, Action::Tool(Tool::Dimension)), (Key::V, Action::Tool(Tool::Select)), (Key::X, Action::Construction), (Key::T, Action::Tool(Tool::Trim)), (Key::O, Action::Offset)] {
                 if key(k) {
                     self.run(ctx, a);
                 }
@@ -2260,6 +2282,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.command_search.begin_frame(&ctx);
         self.now = ctx.input(|i| i.time);
         theme::apply(&ctx, self.config.appearance, self.native_theme.current());
         ui.set_style(ctx.global_style());
@@ -2278,6 +2301,8 @@ impl eframe::App for App {
         self.ai = ai;
 
         self.shortcuts(&ctx);
+        crate::command_search::show(self, &ctx);
+        if self.command_search.block_input { ui.disable(); }
         self.process_open_request(Self::confirm_discard);
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             if let Some(p) = Some(f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()) {
