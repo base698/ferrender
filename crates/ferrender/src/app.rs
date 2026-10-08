@@ -128,6 +128,8 @@ pub struct FeatureDlg {
     pub pick_axis: bool,
     /// A flat face of a body to extrude instead of sketch profiles.
     pub face: Option<Face>,
+    /// Component-local frame of the selected face.
+    pub face_owner: Id,
     /// Wall lean in degrees; empty for straight walls.
     pub taper: String,
     pub through_all: bool,
@@ -233,6 +235,7 @@ pub struct ThreadDlg {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextDlg {
     pub editing: Option<Id>,
+    pub owner: Id,
     pub text: String,
     pub plane: Plane,
     pub height: String,
@@ -313,6 +316,9 @@ pub struct PointCoordsDlg {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dialog {
     None,
+    Plane(crate::construction::PlaneDlg),
+    MoveComponent(crate::components_ui::MoveDlg),
+    DeleteComponent(Id),
     /// Waiting for a plane or a flat face to sketch on.
     PickPlane,
     PointCoordinates(PointCoordsDlg),
@@ -364,16 +370,18 @@ impl Dialog {
     /// Adds or updates the feature the dialog describes; returns its id.
     pub fn apply(&self, d: &mut Document) -> Result<Id, String> {
         match self {
+            Dialog::Plane(p) => p.apply(d),
+            Dialog::MoveComponent(c) => c.apply(d),
             Dialog::Feature(f) => {
                 if let (Some(face), false, None) = (&f.face, f.revolve, f.editing) {
                     let (sk, profiles) = face.sketch()?;
                     let distance = d.enter(&f.text, Kind::Length)?;
                     // Pushing a face inward removes material, as pulling it out adds.
                     let op = if distance.v < 0.0 && f.op == Op::Join { Op::Cut } else { f.op };
-                    let sketch = d.add_feature(FeatureKind::Sketch(sk));
+                    let sketch = d.add_feature_to(f.face_owner, FeatureKind::Sketch(sk))?;
                     d.feature_mut(sketch).unwrap().name = format!("Face{sketch}");
                     let taper = f.taper(d)?;
-                    return Ok(d.add_feature(FeatureKind::Extrude(Extrude { sketch, profiles, distance, symmetric: false, op, taper, through_all: f.through_all })));
+                    return d.add_feature_to(f.face_owner, FeatureKind::Extrude(Extrude { sketch, profiles, distance, symmetric: false, op, taper, through_all: f.through_all }));
                 }
                 let sketch = f.sketch.filter(|_| !f.profiles.is_empty()).ok_or(if f.revolve { "Click a closed sketch profile in the viewport." } else { "Click a closed sketch profile or a flat face in the viewport." })?;
                 let kind = if f.revolve {
@@ -436,10 +444,12 @@ impl Dialog {
                 let kind = FeatureKind::Text(t.feature(d)?);
                 match t.editing {
                     Some(id) => {
-                        d.feature_mut(id).ok_or("That text feature no longer exists.")?.kind = kind;
+                        let feature = d.feature_mut(id).ok_or("That text feature no longer exists.")?;
+                        if feature.owner != t.owner { return Err("An existing text feature cannot move to another component. Create new text in the target component instead.".into()); }
+                        feature.kind = kind;
                         Ok(id)
                     }
-                    None => Ok(d.add_feature(kind)),
+                    None => d.add_feature_to(t.owner, kind),
                 }
             }
             Dialog::Thread(t) => {
@@ -453,7 +463,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
+        matches!(self, Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
     }
 }
 
@@ -527,6 +537,9 @@ pub struct Opts {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
+    Plane,
+    NewComponent,
+    ActivateRoot,
     New,
     Open,
     Save,
@@ -583,6 +596,8 @@ pub struct App {
     /// Selected points, entities and constraints of the active sketch.
     pub sel: Vec<Id>,
     pub sel_body: Option<Id>,
+    pub sel_component: Option<Id>,
+    last_active_component: Id,
     /// The face last clicked in the viewport.
     pub sel_face: Option<Face>,
     pub sel_feature: Option<Id>,
@@ -603,6 +618,9 @@ pub struct App {
     pub preview: Option<(Dialog, Built, Option<String>)>,
     /// Geometry immediately before an edited Text feature, keyed by document revision and feature.
     text_base: Option<(u64, Id, Built)>,
+    pub(crate) construction_source: Option<(u64, Id, Built)>,
+    /// Local exact source geometry is shared across unchanged Text preview frames.
+    text_local: Option<((u64, Option<Id>, Id), fr_core::Body)>,
     pub value_edit: Option<ValueEdit>,
     pub typed: Option<Typed>,
     pub clipboard: Option<Clip>,
@@ -672,6 +690,8 @@ impl App {
             tool: Tool::Select,
             sel: Vec::new(),
             sel_body: None,
+            sel_component: None,
+            last_active_component: 0,
             sel_face: None,
             sel_feature: None,
             clicks: Vec::new(),
@@ -685,6 +705,8 @@ impl App {
             dialog: Dialog::None,
             preview: None,
             text_base: None,
+            construction_source: None,
+            text_local: None,
             value_edit: None,
             typed: None,
             clipboard: None,
@@ -801,6 +823,11 @@ impl App {
 
     /// Brings the interface back in line after the document changed under it.
     pub fn refresh(&mut self) {
+        if self.last_active_component != 0 && self.doc().active_component == 0 && !self.session.built.components.contains_key(&self.last_active_component) {
+            self.toast("The active component is unavailable at this history position. Root is now active.");
+        }
+        self.last_active_component = self.doc().active_component;
+        if self.sel_component.is_some_and(|id| !self.session.built.components.contains_key(&id)) { self.sel_component = None; }
         if let Mode::Sketch(id) = self.mode {
             match self.session.doc.sketch(id) {
                 Some(sk) => {
@@ -827,6 +854,8 @@ impl App {
         }
         self.preview = None;
         self.text_base = None;
+        self.text_local = None;
+        self.construction_source = None;
     }
 
     /// Changes the active sketch as one undo step, rejecting changes its constraints cannot hold.
@@ -850,11 +879,17 @@ impl App {
     }
 
     pub fn edit_sketch(&mut self, id: Id) {
+        if !self.doc().features.iter().take(self.doc().active()).any(|f| f.id == id && !f.suppressed && self.session.built.components.contains_key(&f.owner)) {
+            self.toast("This sketch or its component is suppressed or rolled back. Restore it in the timeline before editing.");
+            return;
+        }
         self.reference_editor.cancel();
         self.reference_texture.clear();
         let Some(sk) = self.session.doc.sketch_mut(id) else { return };
         sk.visible = true;
-        let (plane, bounds) = (sk.plane, sk.bbox());
+        let (bounds, local_plane) = (sk.bbox(), sk.plane);
+        let owner = self.doc().feature(id).map_or(0, |f| f.owner);
+        let plane = self.session.built.sketch_plane(&self.session.doc, id).unwrap_or_else(|| local_plane.transformed(self.session.built.component_placement(owner)));
         self.mode = Mode::Sketch(id);
         self.dialog = Dialog::None;
         self.cancel_tool();
@@ -888,6 +923,10 @@ impl App {
         if self.sketch().is_none() {
             return;
         }
+        if let Some(plane) = self.sketch().and_then(|(_, sk)| sk.on)
+            && let Some(feature) = self.session.doc.feature_mut(plane)
+            && let FeatureKind::Plane(p) = &mut feature.kind
+            && !p.visibility_pinned && p.visible { p.visible = false; self.session.dirty = true; }
         self.leave_sketch();
         self.dialog = Dialog::None;
         (self.cam.yaw, self.cam.pitch) = (Camera::iso().yaw, Camera::iso().pitch);
@@ -896,9 +935,11 @@ impl App {
     }
 
     pub fn create_sketch(&mut self, plane: Plane) {
-        let plane = match self.doc().eval(&self.plane_offset, Kind::Length) {
-            Ok(d) if !self.plane_offset.trim().is_empty() => plane.offset(d),
-            _ => plane,
+        let plane = if self.plane_offset.trim().is_empty() { plane } else {
+            match self.doc().eval(&self.plane_offset, Kind::Length) {
+                Ok(distance) => plane.offset(distance),
+                Err(error) => { self.toast(error); return; }
+            }
         };
         self.plane_offset.clear();
         match self.session.edit(|d| Ok(d.add_feature(FeatureKind::Sketch(Sketch::new(plane))))) {
@@ -1301,12 +1342,12 @@ impl App {
             self.toast(format!("Could not paste the sketch: {e}"));
             return;
         }
-        let Some((_, sk)) = self.sketch() else {
+        let Some(sk) = self.sketch().and_then(|(id, _)| self.world_sketch(id)) else {
             self.toast("Open a sketch to paste into.");
             return;
         };
         // Under the pointer if it is over the viewport, otherwise next to the original.
-        let under = self.ctx.input(|i| i.pointer.hover_pos()).filter(|p| self.vp.contains(*p)).and_then(|p| view::sketch_pos(self, sk, p));
+        let under = self.ctx.input(|i| i.pointer.hover_pos()).filter(|p| self.vp.contains(*p)).and_then(|p| view::sketch_pos(self, &sk, p));
         self.pastes += 1;
         let offset = match under {
             Some(p) => p - clip.center(),
@@ -1342,8 +1383,12 @@ impl App {
     }
 
     pub fn delete_feature(&mut self, id: Id) {
+        if self.doc().feature(id).is_some_and(|f| matches!(f.kind, FeatureKind::Component(_))) {
+            self.dialog = Dialog::DeleteComponent(id);
+            return;
+        }
         let _ = self.session.edit(|d| {
-            d.features.retain(|f| f.id != id);
+            d.delete_feature(id)?;
             Ok(())
         });
         self.refresh();
@@ -1357,19 +1402,21 @@ impl App {
         let Some(kind) = self.session.doc.feature(id).map(|f| f.kind.clone()) else { return };
         let shown = |v: &fr_core::Value| v.expr.clone();
         match &kind {
+            FeatureKind::Plane(p) => { self.finish_sketch(); self.dialog = Dialog::Plane(crate::construction::PlaneDlg::from_plane(id, p)); }
+            FeatureKind::Component(_) => self.move_component_dialog(id),
             FeatureKind::Sketch(_) => self.edit_sketch(id),
             FeatureKind::Extrude(e) => {
                 self.finish_sketch();
-                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, editing: Some(id), sketch: Some(e.sketch), profiles: e.profiles.clone(), text: shown(&e.distance), symmetric: e.symmetric, op: e.op, axis: Axis::Y, pick_axis: false, face: None, taper: e.taper.as_ref().map_or(String::new(), shown), through_all: e.through_all, pick_to: false });
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, editing: Some(id), sketch: Some(e.sketch), profiles: e.profiles.clone(), text: shown(&e.distance), symmetric: e.symmetric, op: e.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: e.taper.as_ref().map_or(String::new(), shown), through_all: e.through_all, pick_to: false });
             }
             FeatureKind::Revolve(r) => {
                 self.finish_sketch();
-                self.dialog = Dialog::Feature(FeatureDlg { revolve: true, editing: Some(id), sketch: Some(r.sketch), profiles: r.profiles.clone(), text: shown(&r.angle), symmetric: false, op: r.op, axis: r.axis, pick_axis: false, face: None, taper: String::new(), through_all: false, pick_to: false });
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: true, editing: Some(id), sketch: Some(r.sketch), profiles: r.profiles.clone(), text: shown(&r.angle), symmetric: false, op: r.op, axis: r.axis, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
             }
             FeatureKind::Text(t) => {
                 self.finish_sketch();
                 self.dialog = Dialog::Text(TextDlg {
-                    editing: Some(id), text: t.text.clone(), plane: t.plane,
+                    editing: Some(id), owner: self.doc().feature(id).map_or(0, |f| f.owner), text: t.text.clone(), plane: t.plane,
                     height: shown(&t.height), depth: shown(&t.depth), spacing: shown(&t.spacing),
                     angle: shown(&t.angle), x: shown(&t.x), y: shown(&t.y), align: t.align,
                     op: t.op, body: t.body, face: t.face, frame: t.frame,
@@ -1383,7 +1430,8 @@ impl App {
     fn open_feature_dialog(&mut self, revolve: bool) {
         // Coming straight from a sketch with one closed shape, use it.
         let from = self.sketch().map(|(id, _)| id);
-        let face = self.sel_face.clone().filter(|f| !revolve && from.is_none() && f.plane.is_some());
+        let face_owner = self.sel_face.as_ref().and_then(|f| self.session.built.body(f.body)).map_or(self.doc().active_component, |b| b.component);
+        let face = self.sel_face.clone().filter(|f| !revolve && from.is_none() && f.plane.is_some()).map(|f| self.local_face(f));
         self.finish_sketch();
         let doc = self.doc();
         let candidates: Vec<Id> = match from {
@@ -1404,7 +1452,7 @@ impl App {
         let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
         let unit = doc.units;
         let text = if revolve { "360 deg".to_owned() } else { format!("{} {}", if unit == Unit::In { "0.5" } else if unit == Unit::Cm { "1" } else { "10" }, unit.name()) };
-        self.dialog = Dialog::Feature(FeatureDlg { revolve, editing: None, sketch: picked.0, profiles: picked.1, text, symmetric: false, op, axis: Axis::Y, pick_axis: false, face, taper: String::new(), through_all: false, pick_to: false });
+        self.dialog = Dialog::Feature(FeatureDlg { revolve, editing: None, sketch: picked.0, profiles: picked.1, text, symmetric: false, op, axis: Axis::Y, pick_axis: false, face, face_owner, taper: String::new(), through_all: false, pick_to: false });
     }
 
     fn prepare_text_source(&mut self) {
@@ -1429,20 +1477,30 @@ impl App {
     pub fn text_baseline(&self) -> Option<DVec3> {
         let Dialog::Text(t) = &self.dialog else { return None };
         let feature = t.feature(&mut self.doc().clone()).ok()?;
-        let body = if feature.op == Op::New { None } else { Some(self.text_source().body(feature.body?)?) };
-        feature.placement(body).ok().map(|p| p.origin)
+        if feature.op != Op::New {
+            let body = self.text_source().body(feature.body?)?;
+            let key = (self.session.rev, t.editing, body.id);
+            let local = self.text_local.as_ref().filter(|(cached, _)| *cached == key).map(|(_, body)| body)?;
+            feature.placement(Some(local)).ok().map(|p| body.placement.transform_point3(p.origin))
+        } else {
+            let owner = t.owner;
+            feature.placement(None).ok().map(|p| self.session.built.component_placement(owner).transform_point3(p.origin))
+        }
     }
 
     /// Uses the actual clicked point as the baseline origin, keeping offsets editable.
     pub fn text_on_face(&mut self, face: Face) -> Result<(), String> {
         self.prepare_text_source();
+        let face = self.local_face(face);
         let mut plane = face.plane.ok_or("Text / Emboss supports flat faces only; curved wrapping is not available.")?;
         let body = self.text_source().body(face.body).ok_or("Choose a face that exists before this text feature in the timeline.")?;
         if !body.is_exact() {
             return Err("Text / Emboss needs a flat face of a solid; imported mesh faces are not supported.".into());
         }
-        let frame = self.text_source().frame(face.body);
+        let (frame, owner) = (self.text_source().frame(face.body), body.component);
         let Dialog::Text(t) = &mut self.dialog else { return Err("Open Text / Emboss first.".into()) };
+        if t.editing.is_some() && t.owner != owner { return Err("An existing text feature cannot move to another component. Create new text in the target component instead.".into()); }
+        t.owner = owner;
         let n = plane.normal();
         plane.origin = face.at - n * (face.at - plane.origin).dot(n);
         (t.plane, t.body, t.face, t.frame) = (plane, Some(face.body), Some(plane.origin), frame);
@@ -1455,7 +1513,7 @@ impl App {
         let face = self.sel_face.clone();
         self.finish_sketch();
         self.dialog = Dialog::Text(TextDlg {
-            editing: None, text: "Text".into(), plane: Plane::XY,
+            editing: None, owner: self.doc().active_component, text: "Text".into(), plane: Plane::XY,
             height: "5 mm".into(), depth: "1 mm".into(), spacing: "0 mm".into(),
             angle: "0 deg".into(), x: "0 mm".into(), y: "0 mm".into(),
             align: fr_core::text::Align::Left, op: Op::New, body: None, face: None, frame: None,
@@ -1466,7 +1524,7 @@ impl App {
     /// Confirms the open dialog.
     pub fn apply_dialog(&mut self) {
         let dlg = self.dialog.clone();
-        match self.session.edit_feature(|d| dlg.apply(d).map(|id| (id, id))) {
+        match self.session.edit_feature(|d| { let id = dlg.apply(d)?; fr_core::validation::document(d)?; Ok((id, id)) }) {
             Ok(id) => {
                 self.dialog = Dialog::None;
                 self.sel_feature = Some(id);
@@ -1482,6 +1540,11 @@ impl App {
             self.fit_pending = true;
         }
         self.prepare_text_source();
+        self.prepare_plane_source();
+        let text_key = match &self.dialog { Dialog::Text(t) if t.op != Op::New => t.body.map(|id| (self.session.rev, t.editing, id)), _ => None };
+        if self.text_local.as_ref().map(|(key, _)| *key) != text_key {
+            self.text_local = text_key.and_then(|key| self.text_source().body(key.2).and_then(|body| body.local_copy().ok()).map(|body| (key, body)));
+        }
         if !self.dialog.has_preview() {
             self.preview = None;
             return;
@@ -1494,14 +1557,14 @@ impl App {
             Ok(id) => {
                 // Editing sees the feature in its original place in the timeline.
                 // Later transforms must not make a clicked face move a second time.
-                if matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some())
+                if (matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) || matches!(&self.dialog, Dialog::Plane(p) if p.editing.is_some()))
                     && let Some(index) = doc.features.iter().position(|f| f.id == id)
                 { doc.roll_to(index + 1); }
                 let built = doc.rebuild();
                 let e = built.errors.get(&id).cloned();
-                (if e.is_some() { self.text_source().clone() } else { built }, e)
+                (if e.is_some() { self.modeling_source().clone() } else { built }, e)
             }
-            Err(e) => (self.text_source().clone(), Some(e)),
+            Err(e) => (self.modeling_source().clone(), Some(e)),
         };
         self.preview = Some((self.dialog.clone(), built, error));
     }
@@ -1521,21 +1584,28 @@ impl App {
     }
 
     pub fn fit(&mut self) {
-        let mut bounds = if matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) {
-            self.shown().bodies.iter().filter(|b| !self.doc().hidden_bodies.contains(&b.id)).filter_map(|b| b.mesh.bbox()).reduce(|(lo, hi), (l, h)| (lo.min(l), hi.max(h)))
+        let mut bounds = if self.dialog.has_preview() {
+            self.shown().bodies.iter().filter(|b| self.body_visible(b)).filter_map(|b| b.mesh.bbox()).reduce(|(lo, hi), (l, h)| (lo.min(l), hi.max(h)))
         } else { fr_core::render::scene_bounds(&self.session) };
-        if let Some((_, sk)) = self.sketch()
+        if let Some(sk) = self.sketch().and_then(|(id, _)| self.world_sketch(id))
             && let Some((lo, hi)) = sk.bbox()
         {
             let (a, b) = (sk.plane.to_world(lo), sk.plane.to_world(hi));
             bounds = Some(bounds.map_or((a.min(b), a.max(b)), |(l, h)| (l.min(a).min(b), h.max(a).max(b))));
         }
-        if let Some((_, sk)) = self.sketch()
+        if let Some(sk) = self.sketch().and_then(|(id, _)| self.world_sketch(id))
             && let Some(image) = self.reference_editor.calibration_image().or(sk.reference.as_ref()).filter(|i| i.visible)
         {
             for point in image.corners() {
                 let p = sk.plane.to_world(point);
                 bounds = Some(bounds.map_or((p,p), |(lo,hi)| (lo.min(p),hi.max(p))));
+            }
+        }
+        for (id, plane) in &self.shown().planes {
+            let editing = matches!(&self.dialog, Dialog::Plane(d) if d.editing == Some(*id));
+            let visible = editing || self.doc().feature(*id).is_none_or(|f| matches!(&f.kind, FeatureKind::Plane(p) if p.visible));
+            if visible && self.shown().component_visible(plane.component) {
+                for point in plane.corners { bounds = Some(bounds.map_or((point, point), |(lo, hi)| (lo.min(point), hi.max(point)))); }
             }
         }
         match bounds {
@@ -1578,6 +1648,7 @@ impl App {
         self.section.on = false;
         self.dialog = Dialog::None;
         self.sel_body = None;
+        self.sel_component = None;
         self.sel_feature = None;
         self.cam = Camera::iso();
         self.fit_pending = true;
@@ -1714,6 +1785,9 @@ impl App {
             self.reference_drag.clear();
         }
         match a {
+            Action::Plane => self.open_plane_dialog(),
+            Action::NewComponent => self.new_component(self.doc().active_component),
+            Action::ActivateRoot => self.activate_component(0),
             Action::New => {
                 if self.confirm_discard() {
                     let units = self.doc().units;
@@ -1770,11 +1844,12 @@ impl App {
                 }
             }
             Action::NewSketch => {
+                if let Some(id) = self.sel_feature.filter(|id| self.session.built.planes.contains_key(id)) { self.finish_sketch(); self.create_sketch_on(id); return; }
                 // With a flat face selected, sketch straight on it.
                 let on = self.sel_face.as_ref().filter(|_| self.sketch().is_none()).and_then(|f| f.plane);
                 self.finish_sketch();
                 match on {
-                    Some(plane) => self.create_sketch(plane),
+                    Some(plane) => self.create_sketch_world(plane),
                     None => self.dialog = Dialog::PickPlane,
                 }
             }
@@ -1783,6 +1858,7 @@ impl App {
             Action::Revolve => self.open_feature_dialog(true),
             Action::Text => self.open_text_dialog(),
             Action::Transform => {
+                if let Some(component) = self.sel_component { self.move_component_dialog(component); return; }
                 self.finish_sketch();
                 match self.target_body().or(self.session.built.bodies.first().map(|b| b.id).filter(|_| self.session.built.bodies.len() == 1)) {
                     Some(body) => {
@@ -1854,7 +1930,7 @@ impl App {
             }
             Action::Fillet | Action::Chamfer => match self.selected_corner() {
                 Some(p) => {
-                    let at = self.sketch().map(|(_, sk)| view::to_screen(self, sk.plane.to_world(sk.pos(p))));
+                    let at = self.sketch().and_then(|(id, _)| self.world_sketch(id)).map(|sk| view::to_screen(self, sk.plane.to_world(sk.pos(p))));
                     self.ask(if a == Action::Fillet { EditTarget::Fillet(p) } else { EditTarget::Chamfer(p) }, at);
                 }
                 None if self.sketch().is_some() => self.toast("Select a corner point, or the two lines that meet at it, first."),
@@ -1912,6 +1988,7 @@ impl App {
                     Some((f, b)) if b.is_exact() => (Some(b.id), b.edges.iter().map(|e| view::midpoint(e)).filter(|m| f.outline.iter().any(|ring| view::path_dist3(ring, *m) < 1e-3)).collect()),
                     _ => (None, Vec::new()),
                 };
+                let edges = edges.into_iter().map(|point| body.and_then(|id| self.session.built.body(id)).map_or(point, |b| b.to_local(point))).collect();
                 let frame = body.and_then(|b| self.session.built.frame(b));
                 self.dialog = Dialog::Blend(BlendDlg { chamfer, body, edges, text, frame });
             }
@@ -1921,12 +1998,12 @@ impl App {
                 let unit = self.doc().units;
                 let text = format!("{} {}", if unit == Unit::In { "0.08" } else if unit == Unit::Cm { "0.2" } else { "2" }, unit.name());
                 let body = face.as_ref().map(|f| f.body);
-                let faces = face.into_iter().map(|f| (view::face_point(&f), f)).collect();
+                let faces = face.into_iter().map(|f| (self.session.built.body(f.body).map_or(f.at, |b| b.to_local(f.at)), f)).collect();
                 self.dialog = Dialog::Shell(ShellDlg { body, faces, text, frame: body.and_then(|b| self.session.built.frame(b)) });
             }
             Action::Hole => {
                 // Start on the selected face, where it was clicked.
-                let face = self.sel_face.clone().filter(|f| f.plane.is_some());
+                let face = self.sel_face.clone().filter(|f| f.plane.is_some()).map(|f| self.local_face(f));
                 self.finish_sketch();
                 let unit = self.doc().units;
                 let len = |mm: f64, inch: &str| if unit == Unit::In { format!("{inch} in") } else { format!("{} {}", mm / unit.mm(), unit.name()) };
@@ -1989,6 +2066,7 @@ impl App {
                 } else {
                     self.sel.clear();
                     self.sel_body = None;
+                    self.sel_component = None;
                     self.sel_face = None;
                 }
             }

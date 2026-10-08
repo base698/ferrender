@@ -2,6 +2,9 @@
 //! command here, so the MCP server and the built-in assistant drive the
 //! same code as the user interface.
 
+mod planes_api;
+mod components_api;
+
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -48,6 +51,20 @@ RESULTS. Commands that change bodies return only "changed_bodies" (and "removed_
 
 BODIES are "exact" (made from sketches: true planes, cylinders and blends) or "mesh" (imported STL, a tapered extrude, or anything combined with a mesh). Only exact bodies can be filleted, chamfered, shelled or written to STEP.
 
+COMPONENTS (root id 0)
+{"op":"create_component","name":"Bracket","parent":0,"activate":true}   omit parent for active component; returns component id
+{"op":"activate_component","id":0}
+{"op":"move_component","id":ID,"translate":[x,y,z],"rotate":[rx,ry,rz]}   expressions; rigid placement relative to parent; omitted values unchanged
+   New sketches and solids belong to the active component. Join/Cut/Intersect and Through All affect only that component. Body-specific operations follow the target body's owner; patterns follow their source. Combine explicitly crosses components and keeps the target's owner. Sketch/origin/typed plane inputs and Transform/Pattern axes are component-local; sketch query plane axes are world-space (local_plane retains the local frame), with origin lengths in document units; face/edge/vertex picks and measurements are world coordinates. Moving a component preserves local history.
+   get_scene_info returns the component tree and active_component; every feature/body reports component. get_object_info accepts component ids. set_visible hides a subtree; suppression removes it from the build. delete_feature on a component deletes its subtree and returns removed_features. STL/STEP exports accept optional component:ID; STEP stays flat. Reparenting and moving bodies between components are deferred.
+
+CONSTRUCTION PLANES
+{"op":"create_plane","kind":"offset","base":"XY","distance":"$gap"}   base can also be {"plane":ID} or {"face":{"body":ID,"point":[x,y,z]}}
+{"op":"create_plane","kind":"midplane","faces":[{"body":ID,"point":[x,y,z]},{"body":ID,"point":[x,y,z]}],"flip":false}
+{"op":"create_plane","kind":"three_point","points":[[x,y,z],{"body":ID,"point":[x,y,z]},{"sketch":ID,"point":POINT}]}
+{"op":"create_sketch","plane":{"id":ID}}   stays attached to the construction plane; offset it with another plane feature
+   create_plane returns feature id and resolved world origin/x/y/normal. edit_feature accepts the same plane fields, including partial edits. get_object_info reports inputs, axes, visibility and errors. References must precede the plane; missing references fail visibly and never build dependent geometry on a stale plane. Three-point coordinate arrays are in the active component frame; body picks are world points in document units.
+
 SKETCHES
 {"op":"create_sketch","plane":"XY"}                XY (top) | XZ (front) | YZ (right); optional "offset" along the plane normal, or "plane":{"origin":[x,y,z],"normal":[x,y,z],"x":[x,y,z]}
    Returns the sketch id and the plane's origin, x, y and normal in space, so you know which way sketch x and y point. Plane normals: XY is +Z, XZ is -Y (so a positive offset on XZ moves toward -Y), YZ is +X.
@@ -89,9 +106,9 @@ FEATURES
    operation: new | join | cut | intersect. Negative distance goes the other way. With "symmetric":true the distance is the total thickness, half each side. A shape drawn inside another in the SAME sketch becomes a hole; shapes in different sketches never do. "profiles" are indices from get_object_info on the sketch; when omitted, every outer region is used and regions nested inside become holes; "all" fills them in.
 {"op":"revolve","sketch":ID,"axis":"x","angle":360,"operation":"new","profiles":[...]}
    axis: "x" or "y" (the sketch's axes), the id of a line in the sketch, or {"from":[x,y],"to":[x,y]}. The profile must not cross the axis.
-   extrude also takes "extent":"all" (go through every body; the sign of distance picks the side), "taper":DEGREES (walls lean outward, negative inward), and instead of a sketch, "face":{"body":BODY,"point":[x,y,z]} to pull the flat face nearest that point out (or, with a negative distance, push it in and cut).
+   extrude also takes "extent":"all" (go through bodies in its component; the sign of distance picks the side), "taper":DEGREES (walls lean outward, negative inward), and instead of a sketch, "face":{"body":BODY,"point":[x,y,z]} to pull the flat face nearest that point out (or, with a negative distance, push it in and cut).
 {"op":"create_sketch","face":{"body":BODY,"point":[x,y,z]}}   sketch on a flat face
-{"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve or import around a world axis through the origin; count includes the original
+{"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve or import around a component-local axis through its origin; count includes the original
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":4,"spacing":V}
 {"op":"pattern","feature":ID,"type":"mirror","normal":"x"}   one reflected copy through the origin plane with that normal
 {"op":"edit_feature","feature":ID, ...}            any of distance, angle, operation, symmetric, extent, taper, axis, name, suppressed
@@ -114,7 +131,7 @@ FEATURES
    "allowance":V gives the thread room to turn: a hole's thread is made that much wider across, a rod's that much thinner. Threads are exact without it, and two printed parts at exact sizes will not go together: use about 0.2 mm on each for 3D printing.
    A modeled thread is a closed shell of its own, overlapping the body: slicers join the two, the body stays exact, and STEP shows a plain hole or rod. It does not follow later cuts through it.
 {"op":"list_threads"}                              the thread catalog: sizes, pitch, tap drill, clearance, counterbore and countersink sizes
-{"op":"set_visible","id":ID,"visible":false}       a sketch or a body
+{"op":"set_visible","id":ID,"visible":false}       a sketch, body, plane or component
 
 QUERIES
 {"op":"get_scene_info"}                            units, parameters, features (with any errors) and bodies
@@ -130,11 +147,11 @@ Bodies are named by the id of the feature that created them. Check get_scene_inf
 type R<T> = Result<T, String>;
 
 fn id_of(c: &J, key: &str) -> R<Id> {
-    c[key].as_u64().map(|v| v as Id).ok_or(format!("\"{key}\" should be an id"))
+    c[key].as_u64().and_then(|v| Id::try_from(v).ok()).ok_or(format!("\"{key}\" should be an id"))
 }
 
 fn ids_of(v: &J, key: &str) -> R<Vec<Id>> {
-    v[key].as_array().ok_or(format!("\"{key}\" should be a list of ids"))?.iter().map(|x| x.as_u64().map(|v| v as Id).ok_or(format!("\"{key}\" should be a list of ids"))).collect()
+    v[key].as_array().ok_or(format!("\"{key}\" should be a list of ids"))?.iter().map(|x| x.as_u64().and_then(|v| Id::try_from(v).ok()).ok_or(format!("\"{key}\" should be a list of ids"))).collect()
 }
 
 /// A JSON number or expression string as expression text.
@@ -193,8 +210,10 @@ fn pt_out(doc: &Document, p: DVec2) -> J {
     json!([len_out(doc, p.x), len_out(doc, p.y)])
 }
 
-fn sketch_info(doc: &Document, id: Id) -> J {
+fn sketch_info(s: &Session, id: Id) -> J {
+    let doc = &s.doc;
     let sk = doc.sketch(id).unwrap();
+    let plane = s.built.sketch_plane(doc, id);
     let report = solver::solve(&mut sk.clone(), &[]);
     let ents: Vec<J> = sk
         .entities
@@ -232,7 +251,9 @@ fn sketch_info(doc: &Document, id: Id) -> J {
         .map(|(i, p)| json!({"index": i, "edges": p.edges, "nested_depth": p.depth, "holes": p.holes.len(), "area": trim_num(p.area() / doc.units.mm().powi(2), 4).parse::<f64>().unwrap_or(0.0), "center": pt_out(doc, p.centroid())}))
         .collect();
     json!({
-        "plane": {"origin": sk.plane.origin.to_array(), "x": sk.plane.x.to_array(), "y": sk.plane.y.to_array()},
+        "plane": plane.map(|p| json!({"origin":(p.origin/doc.units.mm()).to_array(), "x":p.x.to_array(), "y":p.y.to_array(), "normal":p.normal().to_array()})),
+        "local_plane": {"origin":(sk.plane.origin/doc.units.mm()).to_array(), "x":sk.plane.x.to_array(), "y":sk.plane.y.to_array()},
+        "on": sk.on,
         "visible": sk.visible,
         "points": sk.points.iter().map(|(i, p)| (i.to_string(), pt_out(doc, *p))).collect::<serde_json::Map<_, _>>(),
         "entities": ents,
@@ -253,7 +274,8 @@ fn body_info(s: &Session, id: Id) -> Option<J> {
     Some(json!({
         "id": b.id,
         "name": b.name,
-        "visible": !s.doc.hidden_bodies.contains(&id),
+        "component": b.component,
+        "visible": !s.doc.hidden_bodies.contains(&id) && s.built.component_visible(b.component),
         // Exact bodies can be filleted, chamfered, shelled and written to STEP; meshes cannot.
         "kind": if b.is_exact() { "exact" } else { "mesh" },
         "triangles": b.mesh.tris.len(),
@@ -307,6 +329,8 @@ fn marks(s: &Session) -> Vec<(Id, u64)> {
             b.threads.len().hash(&mut mark);
             b.name.hash(&mut mark);
             s.doc.hidden_bodies.contains(&b.id).hash(&mut mark);
+            b.component.hash(&mut mark);
+            s.built.component_visible(b.component).hash(&mut mark);
             (b.id, mark.finish())
         })
         .collect()
@@ -355,7 +379,7 @@ fn points_of(s: &Session, v: &J, key: &str) -> R<Vec<DVec3>> {
 fn feature_info(s: &Session, id: Id) -> R<J> {
     let doc = &s.doc;
     let f = doc.feature(id).ok_or(format!("nothing has id {id}"))?;
-    let mut o = json!({"id": f.id, "name": f.name, "type": f.type_name()});
+    let mut o = json!({"id": f.id, "name": f.name, "type": f.type_name(), "component": f.owner});
     if f.suppressed {
         o["suppressed"] = json!(true);
     }
@@ -371,7 +395,9 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
         Axis::Line(l) => json!(l),
     };
     match &f.kind {
-        FeatureKind::Sketch(_) => {}
+        FeatureKind::Sketch(sk) => { o["on"] = json!(sk.on); }
+        FeatureKind::Plane(_) => planes_api::info(s,id,&mut o),
+        FeatureKind::Component(_) => {o["component_info"]=components_api::node(s,id);}
         FeatureKind::Extrude(e) => {
             o["sketch"] = json!(e.sketch);
             o["distance"] = json!({"expr": e.distance.expr, "value": len_out(doc, e.distance.v)});
@@ -471,6 +497,8 @@ fn scene_info(s: &Session) -> J {
     let doc = &s.doc;
     json!({
         "units": doc.units.name(),
+        "active_component":doc.active_component,
+        "components":[components_api::node(s,0)],
         "file": s.path.as_ref().map(|p| p.display().to_string()),
         "parameters": doc.params.iter().map(|p| json!({"name": p.name, "expr": p.expr, "value": doc.show_param(&p.name)})).collect::<Vec<_>>(),
         "features": doc.features.iter().filter_map(|f| feature_info(s, f.id).ok()).collect::<Vec<_>>(),
@@ -678,9 +706,9 @@ fn text_fields(s: &Session, c: &J, t: &mut Text) -> R<()> {
             let surface = Item::Surface(face.tris.iter().map(|i| body.mesh.tris[*i]).collect());
             if measure::between(&Item::Point(point), &surface).distance > 1e-5 { return Err("the text face point must lie on the body's flat face".into()); }
             plane.origin = point - plane.normal() * (point - plane.origin).dot(plane.normal());
-            t.plane = plane;
+            t.plane = body.plane_to_local(plane);
             t.body = Some(id);
-            t.face = Some(plane.origin);
+            t.face = Some(body.to_local(plane.origin));
             t.frame = s.built.frame(id);
         }
     }
@@ -777,9 +805,14 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         "get_scene_info" => Ok(scene_info(s)),
         "get_object_info" => {
             let id = id_of(c, "id")?;
-            let mut o = feature_info(s, id)?;
+            if id==0 || matches!(s.doc.feature(id).map(|f|&f.kind),Some(FeatureKind::Component(_))) {return Ok(components_api::node(s,id));}
+            let mut o = if s.doc.feature(id).is_some() {
+                feature_info(s, id)?
+            } else if let Some(body) = s.built.body(id) {
+                json!({"id":id,"name":body.name,"type":"body","component":body.component})
+            } else { return Err(format!("nothing has id {id}")); };
             if s.doc.sketch(id).is_some() {
-                o["sketch"] = sketch_info(&s.doc, id);
+                o["sketch"] = sketch_info(s, id);
             }
             if let Some(b) = body_info(s, id) {
                 o["body"] = b;
@@ -851,7 +884,8 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 J::Null => None,
                 _ => Some(ids_of(c, "bodies")?),
             };
-            let picked: Vec<&crate::doc::Body> = s.visible_bodies().filter(|b| only.as_ref().is_none_or(|o| o.contains(&b.id))).collect();
+            let component=components_api::export_component(s,c)?;
+            let picked: Vec<&crate::doc::Body> = s.visible_bodies().filter(|b| only.as_ref().is_none_or(|o| o.contains(&b.id)) && component.is_none_or(|id|s.doc.component_contains(id,b.component))).collect();
             if c["union"].as_bool().unwrap_or(false) && picked.len() > 1 {
                 // Overlapping bodies become one shell, as a slicer wants.
                 if !picked.iter().all(|b| b.is_exact()) {
@@ -865,7 +899,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 // Threads are shells of their own and go along as they are.
                 mesh.tris.extend(picked.iter().flat_map(|b| b.threads.iter().flat_map(|t| t.tris.iter().copied())));
                 mesh.face_ids.clear();
-                let merged = crate::doc::Body { id: 0, name: "union".into(), mesh, solids: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
+                let merged = crate::doc::Body { id: 0, name: "union".into(), component:0, placement:glam::DAffine3::IDENTITY, local_bounds:None, mesh, solids: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
                 let n = io::write_stl([&merged], unit, path.as_ref())?;
                 return Ok(json!({"path": path, "triangles": n, "units": unit.name(), "shells": all.len(), "open_edges": merged.mesh.open_edges()}));
             }
@@ -878,7 +912,8 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 J::Null => None,
                 _ => Some(ids_of(c, "bodies")?),
             };
-            let picked: Vec<&crate::doc::Body> = s.visible_bodies().filter(|b| only.as_ref().is_none_or(|o| o.contains(&b.id))).collect();
+            let component=components_api::export_component(s,c)?;
+            let picked: Vec<&crate::doc::Body> = s.visible_bodies().filter(|b| only.as_ref().is_none_or(|o| o.contains(&b.id)) && component.is_none_or(|id|s.doc.component_contains(id,b.component))).collect();
             let skipped: Vec<Id> = picked.iter().filter(|b| !b.is_exact()).map(|b| b.id).collect();
             let solids: Vec<_> = picked.iter().flat_map(|b| &b.solids).collect();
             if solids.is_empty() {
@@ -936,6 +971,8 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 J::String(all) if all == "all" => s.built.body(body).map(|b| exact::edges(&b.solids).iter().map(|e| e.mid).collect()).ok_or(format!("there is no body {body}"))?,
                 _ => points_of(s, c, "edges")?,
             };
+            let b=s.built.body(body).ok_or("the body does not exist")?;
+            let edges=edges.into_iter().map(|p|b.to_local(p)).collect();
             let frame = s.built.frame(body);
             let id = s.edit_feature(|d| {
                 let id = d.add_feature(FeatureKind::Blend(Blend { body, edges, size, chamfer, frame }));
@@ -948,7 +985,8 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         "shell" => {
             let body = id_of(c, "body")?;
             let thickness = s.doc.value(&text_of(&c["thickness"]).map_err(|_| "shell needs a \"thickness\"")?, Kind::Length)?;
-            let faces = points_of(s, c, "open_faces")?;
+            let b=s.built.body(body).ok_or("the body does not exist")?;
+            let faces = points_of(s, c, "open_faces")?.into_iter().map(|p|b.to_local(p)).collect();
             let frame = s.built.frame(body);
             let id = s.edit_feature(|d| {
                 let id = d.add_feature(FeatureKind::Shell(Shell { body, faces, thickness, frame }));
@@ -1039,6 +1077,9 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             };
             let through = c["through"].as_bool().unwrap_or(false);
             let depth = if through { None } else { Some(opt("depth", Kind::Length)?.ok_or("hole needs a \"depth\", or \"through\": true")?) };
+            let b=s.built.body(body).ok_or("the body does not exist")?;
+            let at=at.into_iter().map(|p|b.to_local(p)).collect();
+            let dir=b.placement.inverse().transform_vector3(dir);
             let hole = Hole {
                 body,
                 at,
@@ -1089,7 +1130,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                     v => Ok(Some(s.doc.value(&text_of(v).map_err(|e| format!("\"{key}\": {e}"))?, Kind::Length)?)),
                 }
             };
-            let t = Thread { body, face, frame: s.built.frame(body), thread: thread.clone(), offset: opt("offset")?, length: opt("length")?, left: c["left_hand"].as_bool().unwrap_or(false), extra: opt("allowance")? };
+            let t = Thread { body, face:b.to_local(face), frame: s.built.frame(body), thread: thread.clone(), offset: opt("offset")?, length: opt("length")?, left: c["left_hand"].as_bool().unwrap_or(false), extra: opt("allowance")? };
             let id = s.edit_feature(|d| {
                 let id = d.add_feature(FeatureKind::Thread(t));
                 Ok((id, id))
@@ -1144,9 +1185,40 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             }
             Ok(json!({"deleted": name}))
         }
+        "create_component" => {
+            let parent=if c["parent"].is_null() {s.doc.active_component} else {id_of(c,"parent")?};
+            let activate=c["activate"].as_bool().unwrap_or(true);
+            let name=c["name"].as_str().map(str::to_owned);
+            let id=s.edit(|d|d.create_component(name,parent,activate))?;
+            Ok(json!({"component":id,"active_component":s.doc.active_component}))
+        }
+        "activate_component" => {
+            let id=if c["id"].is_null() {0} else {id_of(c,"id")?};
+            s.edit(|d|d.activate_component(id))?;
+            Ok(json!({"active_component":id}))
+        }
+        "move_component" => {
+            let id=id_of(c,"id")?;
+            let placement=components_api::move_values(&s.doc,c,id)?;
+            s.edit_feature(|d|{d.move_component(id,placement)?;crate::validation::document(d)?;Ok((id,()))})?;
+            Ok(components_api::node(s,id))
+        }
+        "create_plane" => {
+            let (kind,params)=planes_api::update(s,c,None)?;
+            let id=s.edit_feature(|d| {
+                d.params=params;
+                let id=d.add_feature(FeatureKind::Plane(crate::planes::ConstructionPlane::new(kind)));
+                if let Some(name)=c["name"].as_str() {d.feature_mut(id).unwrap().name=name.into();}
+                crate::validation::document(d)?;
+                Ok((id,id))
+            })?;
+            let mut out=feature_info(s,id)?; out["feature"]=json!(id); Ok(out)
+        }
         "create_sketch" => {
+            let on=if c["plane"].is_object() && !c["plane"]["id"].is_null() {Some(id_of(&c["plane"],"id")?)} else {None};
+            if on.is_some() && !c["offset"].is_null() {return Err("offset a construction plane with create_plane before attaching a sketch".into());}
             let plane = match &c["plane"] {
-                J::Null if !c["face"].is_null() => face_of(s, &c["face"])?.plane.ok_or("sketches need a flat face")?,
+                J::Null if !c["face"].is_null() => face_of(s, &c["face"])?.plane.ok_or("sketches need a flat face")?.transformed(s.built.component_placement(s.doc.active_component).inverse()),
                 J::Null => Plane::XY,
                 J::String(p) => match p.to_ascii_uppercase().as_str() {
                     "XY" | "TOP" => Plane::XY,
@@ -1154,6 +1226,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                     "YZ" | "RIGHT" => Plane::YZ,
                     _ => return Err(format!("unknown plane '{p}'; use XY, XZ or YZ")),
                 },
+                _ if on.is_some() => s.built.planes.get(&on.unwrap()).ok_or("the construction plane is not available")?.plane.transformed(s.built.component_placement(s.doc.active_component).inverse()),
                 o => {
                     let n = xyz(&o["normal"])?;
                     if n.length() < 1e-9 {
@@ -1180,14 +1253,16 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 v => plane.offset(mm(&s.doc, v)?),
             };
             let name = c["name"].as_str().map(str::to_owned);
+            let world_plane = plane.transformed(s.built.component_placement(s.doc.active_component));
             s.edit(|d| {
-                let id = d.add_feature(FeatureKind::Sketch(Sketch::new(plane)));
+                let mut sketch=Sketch::new(plane); sketch.on=on;
+                let id = d.add_feature(FeatureKind::Sketch(sketch));
                 if let Some(n) = name {
                     d.feature_mut(id).unwrap().name = n;
                 }
                 let u = d.units.mm();
                 let tidy = |v: DVec3| v.to_array().map(|c| (c * 1e9).round() / 1e9 + 0.0);
-                Ok(json!({"sketch": id, "origin": tidy(plane.origin / u), "x": tidy(plane.x), "y": tidy(plane.y), "normal": tidy(plane.normal())}))
+                Ok(json!({"sketch": id, "origin": tidy(world_plane.origin / u), "x": tidy(world_plane.x), "y": tidy(world_plane.y), "normal": tidy(world_plane.normal())}))
             })
         }
         "add_geometry" => {
@@ -1275,13 +1350,15 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 (v, _) if extrude => text_of(v).map_err(|_| "extrude needs a \"distance\"")?,
                 _ => String::new(),
             };
+            let owner=face.as_ref().and_then(|f|s.built.body(f.body)).map_or(s.doc.active_component,|b|b.component);
+            let face=face.map(|f|f.transformed(s.built.component_placement(owner).inverse()));
             let c = c.clone();
-            let has_bodies = !s.built.bodies.is_empty();
+            let has_bodies = s.built.bodies.iter().any(|b|b.component==owner);
             let id = s.edit_feature(|d| {
                 let (sid, profs) = match &face {
                     Some(face) => {
                         let (sk, profs) = face.sketch()?;
-                        let sid = d.add_feature(FeatureKind::Sketch(sk));
+                        let sid = d.add_feature_to(owner,FeatureKind::Sketch(sk))?;
                         d.feature_mut(sid).unwrap().name = format!("Face{sid}");
                         (sid, profs)
                     }
@@ -1319,7 +1396,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                     };
                     FeatureKind::Revolve(Revolve { sketch: sid, profiles: profs, axis, angle, op: op_of(&c, if has_bodies { Op::Join } else { Op::New })? })
                 };
-                let id = d.add_feature(kind);
+                let id = d.add_feature_to(owner,kind)?;
                 sk_mut(d, sid).visible = false;
                 Ok((id, id))
             })?;
@@ -1364,7 +1441,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         }
         "trim" | "mirror" | "offset" | "fillet" | "chamfer" | "project" => {
             let sid = sketch_id(&s.doc, c)?;
-            let face = if op == "project" { Some(face_of(s, c)?) } else { None };
+            let face = if op == "project" { Some(face_of(s, c)?.transformed(s.built.component_placement(s.doc.feature(sid).unwrap().owner).inverse())) } else { None };
             let c = c.clone();
             s.edit(|d| {
                 let mut sk = d.sketch(sid).unwrap().clone();
@@ -1389,13 +1466,36 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             })
         }
         "edit_feature" => {
+            if !c["owner"].is_null() {return Err("moving features between components is not supported; activate a component before creating features".into());}
             let id = id_of(c, "feature")?;
             let c = c.clone();
+            let plane_update=match s.doc.feature(id).map(|f|&f.kind) {
+                Some(FeatureKind::Plane(p)) if ["kind","base","distance","faces","flip","points"].iter().any(|key| !c[key].is_null()) => {
+                    let mut prefix=s.doc.clone();
+                    prefix.roll_to(prefix.features.iter().position(|f|f.id==id).unwrap());
+                    let update=planes_api::update(&Session::new(prefix),&c,Some(&p.kind))?;
+                    let mut trial=s.doc.clone(); trial.params=update.1.clone();
+                    let feature=trial.feature_mut(id).unwrap();
+                    let FeatureKind::Plane(p)=&mut feature.kind else {unreachable!()};
+                    p.kind=update.0.clone(); feature.suppressed=false;
+                    let index=trial.features.iter().position(|f|f.id==id).unwrap();
+                    trial.roll_to(index+1);
+                    crate::validation::document(&trial)?;
+                    let built=trial.rebuild();
+                    if let Some(e)=built.errors.get(&id) {return Err(e.clone());}
+                    if !built.planes.contains_key(&id) {return Err("activate or unsuppress the plane's component before editing it".into());}
+                    Some(update)
+                }
+                _=>None,
+            };
             let text_update = match s.doc.feature(id).map(|f| &f.kind) {
                 Some(FeatureKind::Text(t)) => {
                     let mut t = t.clone();
                     let context = text_face_edit_context(s, id, &c)?;
                     text_fields(context.as_ref().unwrap_or(s), &c, &mut t)?;
+                    if let Some(body)=t.body && s.doc.body_owner(body)!=s.doc.feature(id).map(|f|f.owner) {
+                        return Err("text cannot be moved between components; create new text on the target body instead".into());
+                    }
                     let index = s.doc.features.iter().position(|f| f.id == id).unwrap();
                     if s.doc.active() <= index {
                         // A rolled-back feature is not built by edit_feature.
@@ -1413,6 +1513,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 _ => None,
             };
             s.edit_feature(|d| {
+                if let Some((_,params))=&plane_update {d.params=params.clone();}
                 let probe = d.clone();
                 let f = d.feature_mut(id).ok_or(format!("there is no feature {id}"))?;
                 if let Some(n) = c["name"].as_str() {
@@ -1422,6 +1523,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                     f.suppressed = v;
                 }
                 match &mut f.kind {
+                    FeatureKind::Plane(p) => {if let Some((kind,_))=plane_update {p.kind=kind;}}
                     FeatureKind::Text(t) => { *t = text_update.expect("text feature update was prepared"); }
                     FeatureKind::Extrude(e) => {
                         if !c["distance"].is_null() {
@@ -1449,18 +1551,15 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                     }
                     _ => {}
                 }
+                crate::validation::document(d)?;
                 Ok((id, ()))
             })?;
             feature_info(s, id)
         }
         "delete_feature" => {
-            let id = id_of(c, "feature")?;
-            s.edit(|d| {
-                let n = d.features.len();
-                d.features.retain(|f| f.id != id);
-                if d.features.len() == n { Err(format!("there is no feature {id}")) } else { Ok(()) }
-            })?;
-            Ok(json!({"deleted": id, "errors": s.built.errors}))
+            let id=id_of(c,"feature")?;
+            let removed=s.edit(|d|d.delete_feature(id))?;
+            let mut out=changed(s,&before);out["removed_features"]=json!(removed);Ok(out)
         }
         "import_stl" => {
             let path = c["path"].as_str().ok_or("import_stl needs a \"path\"")?;
@@ -1511,12 +1610,16 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         "set_visible" => {
             let id = id_of(c, "id")?;
             let visible = c["visible"].as_bool().unwrap_or(true);
-            if s.doc.sketch(id).is_none() && s.built.body(id).is_none() {
-                return Err(format!("{id} is not a sketch or a body"));
+            if s.doc.sketch(id).is_none() && s.built.body(id).is_none() && !matches!(s.doc.feature(id).map(|f|&f.kind),Some(FeatureKind::Plane(_) | FeatureKind::Component(_))) {
+                return Err(format!("{id} is not a sketch, plane, component, or body"));
             }
             s.edit(|d| {
                 if let Some(sk) = d.sketch_mut(id) {
                     sk.visible = visible;
+                } else if let Some(FeatureKind::Plane(p))=d.feature_mut(id).map(|f|&mut f.kind) {
+                    p.visible=visible; p.visibility_pinned=true;
+                } else if let Some(FeatureKind::Component(component))=d.feature_mut(id).map(|f|&mut f.kind) {
+                    component.visible=visible;
                 } else {
                     d.hidden_bodies.retain(|b| *b != id);
                     if !visible {

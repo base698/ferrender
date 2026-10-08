@@ -100,7 +100,7 @@ impl Clip {
             if !ids.insert(id) { return Err(format!("duplicate clipboard id {id}")); }
         }
         let next = ids.last().copied().unwrap_or(0).checked_add(1).ok_or("clipboard ids are out of range")?;
-        let mut s = Sketch { plane: Plane::XY, points: self.points.iter().copied().collect(), entities: self.entities.iter().copied().collect(), constraints: Default::default(), next, visible: true, fixed: Default::default(), reference: None, arc_guides: self.arc_guides.clone() };
+        let mut s = Sketch { plane: Plane::XY, on: None, points: self.points.iter().copied().collect(), entities: self.entities.iter().copied().collect(), constraints: Default::default(), next, visible: true, fixed: Default::default(), reference: None, arc_guides: self.arc_guides.clone() };
         for c in &self.constraints {
             let id = s.next;
             s.next = s.next.checked_add(1).ok_or("clipboard ids are out of range")?;
@@ -130,8 +130,19 @@ pub fn document(d: &Document) -> Result<(), String> {
         expression(&p.expr)?;
     }
     let mut ids = BTreeSet::new();
+    let mut depths = std::collections::BTreeMap::from([(0,0usize)]);
     for f in &d.features {
         if f.id == 0 || !ids.insert(f.id) || f.id >= d.next_id { return Err("feature ids must be unique and below the next id".into()); }
+        let depth=*depths.get(&f.owner).ok_or("each feature owner must be root or an earlier component")?;
+        if let FeatureKind::Component(c)=&f.kind {
+            if depth>=32 {return Err("components can nest at most 32 levels deep".into());}
+            depths.insert(f.id,depth+1);
+            for v in c.placement.translate.iter().chain(&c.placement.rotate) {
+                expression(&v.expr)?;
+                if !v.v.is_finite() || !(v.v as f32).is_finite() {return Err("component placement values must be finite and representable".into());}
+            }
+        }
+        plane_dependencies(d,f)?;
         match &f.kind {
             FeatureKind::Sketch(s) => s.validate().map_err(|e|format!("sketch {}: {e}",f.id))?,
             FeatureKind::Import(m) => m.validate()?,
@@ -139,9 +150,65 @@ pub fn document(d: &Document) -> Result<(), String> {
             _ => {}
         }
     }
+    if !depths.contains_key(&d.active_component) {return Err("the active component does not exist".into());}
+    for f in d.features.iter().filter(|f|matches!(f.kind,FeatureKind::Pattern(_))) {
+        if let Some(start)=f.id.checked_mul(1000) {
+            if ids.range(start.saturating_add(1)..=start.saturating_add(999)).next().is_some() {
+                return Err("a feature id collides with a pattern's reserved body ids".into());
+            }
+        } else {return Err("pattern body ids are out of range".into());}
+    }
     // Pattern bodies reserve ids at feature_id * 1000 + copy_index.
     if d.next_id == 0 || d.next_id > Id::MAX / 1000 - MAX_FEATURES as Id {
         return Err("the document id range is exhausted".into());
+    }
+    Ok(())
+}
+
+fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
+    use crate::planes::{PlaneRef,PointRef,PlaneKind};
+    let position=d.features.iter().position(|other|other.id==f.id).unwrap();
+    let earlier=|id:Id,what:&str,accept:fn(&FeatureKind)->bool| -> Result<(),String> {
+        if let Some((index,feature))=d.features.iter().enumerate().find(|(_,feature)|feature.id==id) {
+            if index>=position || !accept(&feature.kind) {return Err(format!("{} {id} must name an earlier {what}",f.name));}
+        }
+        // Missing dependencies remain repairable timeline errors after deletion.
+        Ok(())
+    };
+    let anchor=|at:glam::DVec3,frame:Option<[glam::DVec3;2]>| -> Result<(),String> {
+        if !at.is_finite() || !at.as_vec3().is_finite() || frame.is_some_and(|f| f.iter().any(|p|!p.is_finite()) || f[0].cmpgt(f[1]).any()) {
+            return Err("plane references must be finite and have valid bounds".into());
+        }
+        Ok(())
+    };
+    let body=|id:Id| -> Result<(),String> {
+        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
+        else if id>=1000 && d.feature(id/1000).is_some() {earlier(id/1000,"pattern",|k|matches!(k,FeatureKind::Pattern(_)))}
+        else {Ok(())}
+    };
+    let plane=|r:&PlaneRef| -> Result<(),String> {match r {
+        PlaneRef::Origin(_)=>Ok(()),
+        PlaneRef::Plane(id)=>earlier(*id,"construction plane",|k|matches!(k,FeatureKind::Plane(_))),
+        PlaneRef::Face {body:id,at,frame}=>{body(*id)?;anchor(*at,*frame)}
+    }};
+    match &f.kind {
+        FeatureKind::Sketch(s)=>{if let Some(id)=s.on {earlier(id,"construction plane",|k|matches!(k,FeatureKind::Plane(_)))?;}},
+        FeatureKind::Plane(p)=>match &p.kind {
+            PlaneKind::Offset {base,distance}=>{
+                plane(base)?; expression(&distance.expr)?;
+                if !distance.v.is_finite() || !(distance.v as f32).is_finite() {return Err("plane distance must be finite and representable".into());}
+            }
+            PlaneKind::Midplane {a,b,..}=>{plane(a)?;plane(b)?;}
+            PlaneKind::ThreePoint {points}=>for p in points {match p {
+                PointRef::World(p)=>anchor(*p,None)?,
+                PointRef::Vertex {body:id,at,frame}=>{body(*id)?;anchor(*at,*frame)?;}
+                PointRef::SketchPoint {sketch,point}=>{
+                    earlier(*sketch,"sketch",|k|matches!(k,FeatureKind::Sketch(_)))?;
+                    if d.sketch(*sketch).is_some_and(|s|!s.points.contains_key(point)) {return Err("a plane refers to a missing sketch point".into());}
+                }
+            }},
+        },
+        _=>{}
     }
     Ok(())
 }

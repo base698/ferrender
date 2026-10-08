@@ -4,6 +4,7 @@
 
 mod dimensions_v022;
 mod desktop_open;
+mod v030;
 
 use std::path::PathBuf;
 

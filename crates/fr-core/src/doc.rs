@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use glam::{DVec2, DVec3};
+use glam::{DAffine3, DVec2, DVec3};
 use serde::{Deserialize, Serialize};
 
 use crate::csg::{self, Bool};
@@ -16,6 +16,8 @@ use crate::profile::{self, Profile};
 use crate::sketch::{Geom, Id, Plane, Sketch};
 use crate::solver;
 use crate::threads;
+pub use crate::components::{Component,Placement};
+pub use crate::planes::{ConstructionPlane, OriginPlane, PlaneKind, PlaneRef, PointRef};
 use crate::units::{Unit, fmt_len, trim_num};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -430,6 +432,8 @@ pub struct Combine {
 #[serde(rename_all = "snake_case")]
 pub enum FeatureKind {
     Sketch(Sketch),
+    Plane(ConstructionPlane),
+    Component(Component),
     Extrude(Extrude),
     Revolve(Revolve),
     /// A mesh brought in from a file, already in millimetres.
@@ -450,13 +454,19 @@ pub struct Feature {
     pub name: String,
     #[serde(default)]
     pub suppressed: bool,
+    #[serde(default, skip_serializing_if = "is_root")]
+    pub owner: Id,
     pub kind: FeatureKind,
 }
+
+fn is_root(id: &Id) -> bool { *id == 0 }
 
 impl Feature {
     pub fn type_name(&self) -> &'static str {
         match &self.kind {
             FeatureKind::Sketch(_) => "sketch",
+            FeatureKind::Plane(_) => "plane",
+            FeatureKind::Component(_) => "component",
             FeatureKind::Extrude(_) => "extrude",
             FeatureKind::Revolve(_) => "revolve",
             FeatureKind::Import(_) => "import",
@@ -475,6 +485,8 @@ impl Feature {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Document {
+    #[serde(default, skip_serializing_if = "is_root")]
+    pub active_component: Id,
     #[serde(default)]
     pub units: Unit,
     #[serde(default)]
@@ -491,6 +503,9 @@ pub struct Document {
 
 #[derive(Clone, Debug)]
 pub struct Body {
+    pub component: Id,
+    pub placement: DAffine3,
+    pub local_bounds: Option<[DVec3;2]>,
     /// The feature that created it.
     pub id: Id,
     pub name: String,
@@ -509,6 +524,18 @@ pub struct Body {
 }
 
 impl Body {
+    pub fn to_local(&self,p:DVec3)->DVec3 {self.placement.inverse().transform_point3(p)}
+    pub fn plane_to_local(&self,plane:Plane)->Plane {plane.transformed(self.placement.inverse())}
+    pub fn local_frame(&self)->Option<[DVec3;2]> {self.local_bounds.or_else(||self.mesh.bbox().map(|(lo,hi)|[lo,hi]))}
+    pub fn local_copy(&self)->Result<Self,String> {
+        let mut body=self.clone();
+        let steps=crate::components::steps(self.placement.inverse());
+        if !steps.is_empty() {body.place(&steps)?;}
+        body.placement=DAffine3::IDENTITY;
+        body.local_bounds=None;
+        Ok(body)
+    }
+
     pub fn is_exact(&self) -> bool {
         !self.solids.is_empty()
     }
@@ -626,8 +653,8 @@ impl Shape {
         }
     }
 
-    fn body(self, id: Id, name: String) -> Result<Body, String> {
-        let mut b = Body { id, name, mesh: Mesh::default(), solids: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
+    fn body(self, id: Id, name: String, component: Id) -> Result<Body, String> {
+        let mut b = Body { id, name, component, placement: DAffine3::IDENTITY, local_bounds: None, mesh: Mesh::default(), solids: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
         match self {
             Shape::Exact(l) => b.set_exact(l)?,
             Shape::Mesh(m) => b.set_mesh(m),
@@ -639,6 +666,9 @@ impl Shape {
 /// What the features produce.
 #[derive(Clone, Debug, Default)]
 pub struct Built {
+    pub components: BTreeMap<Id,crate::components::BuiltComponent>,
+    pub placements_applied: bool,
+    pub planes: BTreeMap<Id, crate::planes::ResolvedPlane>,
     pub bodies: Vec<Body>,
     /// Features that failed, with the reason.
     pub errors: BTreeMap<Id, String>,
@@ -651,7 +681,7 @@ impl Built {
 
     /// A body's bounds, as fillets, chamfers and shells record them when their edges or faces are picked.
     pub fn frame(&self, id: Id) -> Option<[DVec3; 2]> {
-        self.body(id).and_then(|b| b.mesh.bbox()).map(|(lo, hi)| [lo, hi])
+        self.body(id).and_then(Body::local_frame)
     }
 }
 
@@ -698,9 +728,24 @@ impl Document {
 
     /// Appends a feature, naming it after its type (`Sketch2`, `Extrude1`).
     pub fn add_feature(&mut self, kind: FeatureKind) -> Id {
+        // Reserve every copy slot, including copies added by later pattern edits.
+        while let Some(end)=self.features.iter().filter(|f|matches!(f.kind,FeatureKind::Pattern(_)))
+            .map(|f|f.id.saturating_mul(1000)).find(|start|self.next_id>*start && self.next_id<start.saturating_add(1000)) {
+            self.next_id=end.saturating_add(1000);
+        }
         let id = self.next_id;
         self.next_id += 1;
-        let mut f = Feature { id, name: String::new(), suppressed: false, kind };
+        let target=match &kind {
+            FeatureKind::Transform(t)=>Some(t.body), FeatureKind::Combine(c)=>Some(c.target),
+            FeatureKind::Blend(b)=>Some(b.body), FeatureKind::Shell(s)=>Some(s.body),
+            FeatureKind::Hole(h)=>Some(h.body), FeatureKind::Thread(t)=>Some(t.body), FeatureKind::Text(t)=>t.body,
+            _=>None,
+        };
+        let owner=match &kind {
+            FeatureKind::Pattern(p)=>self.feature(p.source).map(|f|f.owner),
+            _=>target.and_then(|id|self.body_owner(id)),
+        }.unwrap_or(self.active_component);
+        let mut f = Feature { id, name: String::new(), suppressed: false, owner, kind };
         let n = self.features.iter().filter(|o| o.type_name() == f.type_name()).count() + 1;
         let t = f.type_name();
         f.name = format!("{}{}{n}", t[..1].to_uppercase(), &t[1..]);
@@ -723,6 +768,7 @@ impl Document {
     /// Moves the roll-back marker so that `count` features are built; the end clears it.
     pub fn roll_to(&mut self, count: usize) {
         self.rollback = (count < self.features.len()).then_some(count);
+        if !self.component_available(self.active_component) {self.active_component=0;}
     }
 
     fn parameter_at(&self, name: &str, depth: usize, cache: &RefCell<BTreeMap<String, Result<Quantity, String>>>) -> Option<Result<Quantity, String>> {
@@ -825,17 +871,24 @@ impl Document {
         refs.iter().map(|r| all.iter().find(|p| &p.edges == r).ok_or_else(|| "a profile it used is no longer closed".to_owned())).collect()
     }
 
-    fn tool(&self, f: &Feature, bodies: &[Body]) -> Result<Option<(Shape, Op)>, String> {
-        let sk = |id: Id| self.sketch(id).ok_or("its sketch was deleted".to_owned());
+    fn tool(&self, f: &Feature, bodies: &[Body], context: &Built) -> Result<Option<(Shape, Op)>, String> {
+        let sk = |id: Id| {
+            if let Some(e)=context.errors.get(&id) { return Err(format!("its sketch could not be placed: {e}")); }
+            if self.feature(id).is_some_and(|f|!context.components.contains_key(&f.owner)) {return Err("its sketch's component is suppressed or unavailable".into());}
+            if !self.features.iter().take(self.active()).take_while(|p|p.id!=f.id).any(|p|p.id==id && !p.suppressed) { return Err("its sketch was deleted, suppressed, or comes later in the timeline".into()); }
+            self.sketch(id).ok_or("its sketch was deleted".to_owned())
+        };
         match &f.kind {
             FeatureKind::Extrude(e) => {
                 let s = sk(e.sketch)?;
+                let source=self.feature(e.sketch).unwrap().owner;
+                let plane=s.plane.transformed(context.component_placement(f.owner).inverse()*context.component_placement(source));
                 let all = profile::profiles(s);
                 let (mut z0, mut z1) = if e.symmetric { (-e.distance.v / 2.0, e.distance.v / 2.0) } else { (0.0, e.distance.v) };
                 if e.through_all {
                     // Far enough to clear every body on the side the distance points to (both, if symmetric).
-                    let n = s.plane.normal();
-                    let reach = bodies.iter().filter_map(|b| b.mesh.bbox()).flat_map(|(lo, hi)| (0..8).map(move |i| DVec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z }))).map(|c| (c - s.plane.origin).dot(n));
+                    let n = plane.normal();
+                    let reach = bodies.iter().filter(|b|b.component==f.owner).filter_map(|b| b.mesh.bbox()).flat_map(|(lo, hi)| (0..8).map(move |i| DVec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z }))).map(|c| (c - plane.origin).dot(n));
                     let (lo, hi) = reach.fold((0.0f64, 0.0f64), |(lo, hi), v| (lo.min(v), hi.max(v)));
                     (z0, z1) = match (e.symmetric, e.distance.v >= 0.0) {
                         (true, _) => (lo - 1.0, hi + 1.0),
@@ -846,20 +899,21 @@ impl Document {
                 let picked = Self::pick(&all, &e.profiles)?;
                 // The kernel has no tapered sweep here, so a taper is built as a mesh.
                 let shape = match e.taper.as_ref().filter(|t| t.v.abs() > 1e-9) {
-                    Some(t) => Shape::Mesh(mesh::extrude_tapered(&picked, &s.plane, z0, z1, t.v)?),
-                    None => Shape::Exact(exact::extrude(&picked, &s.plane, z0, z1)?),
+                    Some(t) => Shape::Mesh(mesh::extrude_tapered(&picked, &plane, z0, z1, t.v)?),
+                    None => Shape::Exact(exact::extrude(&picked, &plane, z0, z1)?),
                 };
                 Ok(Some((shape, e.op)))
             }
             FeatureKind::Revolve(r) => {
                 let s = sk(r.sketch)?;
+                let plane=s.plane.transformed(context.component_placement(f.owner).inverse()*context.component_placement(self.feature(r.sketch).unwrap().owner));
                 let all = profile::profiles(s);
                 let (a, b) = match r.axis {
                     Axis::X => (DVec2::ZERO, DVec2::X),
                     Axis::Y => (DVec2::ZERO, DVec2::Y),
                     Axis::Line(l) => s.line(l).ok_or("its axis line was deleted")?,
                 };
-                Ok(Some((Shape::Exact(exact::revolve(&Self::pick(&all, &r.profiles)?, &s.plane, a, b, r.angle.v)?), r.op)))
+                Ok(Some((Shape::Exact(exact::revolve(&Self::pick(&all, &r.profiles)?, &plane, a, b, r.angle.v)?), r.op)))
             }
             FeatureKind::Text(t) if t.op == Op::New => {
                 let profiles = t.outlines()?;
@@ -883,7 +937,7 @@ impl Document {
             }
         }
         let probe = self.clone();
-        for f in &mut self.features {
+        for f in self.features.iter_mut().take(probe.active()).filter(|f|!f.suppressed && probe.component_available(f.owner)) {
             let mut err = None;
             let mut set = |v: &mut Value, kind: Kind| match probe.value(&v.expr, kind) {
                 Ok(x) => *v = x,
@@ -936,6 +990,11 @@ impl Document {
                     for v in [&mut t.height, &mut t.depth, &mut t.spacing, &mut t.x, &mut t.y] { set(v, Kind::Length); }
                     set(&mut t.angle, Kind::Angle);
                 }
+                FeatureKind::Plane(p) => { if let PlaneKind::Offset {distance,..}=&mut p.kind { set(distance,Kind::Length); } }
+                FeatureKind::Component(c) => {
+                    c.placement.translate.iter_mut().for_each(|v|set(v,Kind::Length));
+                    c.placement.rotate.iter_mut().for_each(|v|set(v,Kind::Angle));
+                }
                 FeatureKind::Import(_) | FeatureKind::Combine(_) => {}
             }
             if let Some(e) = err {
@@ -943,32 +1002,71 @@ impl Document {
             }
         }
 
-        let mut count = 0;
-        for f in self.features.iter().take(self.active()).filter(|f| !f.suppressed) {
+        built.components.insert(0,crate::components::BuiltComponent {placement:DAffine3::IDENTITY,visible:true});
+        let mut counts:BTreeMap<Id,usize>=BTreeMap::new();
+        for index in 0..self.active() {
+            let f = self.features[index].clone();
+            if f.suppressed || !built.components.contains_key(&f.owner) { continue; }
+            if let FeatureKind::Sketch(sketch)=&f.kind && let Some(id)=sketch.on {
+                match built.planes.get(&id) {
+                    Some(p) => self.sketch_mut(f.id).unwrap().plane=p.plane.transformed(built.component_placement(f.owner).inverse()*built.component_placement(p.component)),
+                    None => { built.errors.insert(f.id,format!("plane {id} is missing, rolled back, suppressed, or could not be built")); }
+                }
+            }
             if built.errors.contains_key(&f.id) {
                 continue;
             }
-            if matches!(f.kind, FeatureKind::Sketch(_)) {
+            if let FeatureKind::Component(c)=&f.kind {
+                let parent=&built.components[&f.owner];
+                let placement=parent.placement*c.placement.affine();
+                if !placement.is_finite() || !placement.translation.as_vec3().is_finite() {
+                    built.errors.insert(f.id,"the component placement is out of range".into()); continue;
+                }
+                built.components.insert(f.id,crate::components::BuiltComponent {placement,visible:parent.visible && c.visible});
+                continue;
+            }
+            if matches!(f.kind, FeatureKind::Sketch(_)) { continue; }
+            if matches!(f.kind, FeatureKind::Plane(_)) {
+                match self.resolve_plane(&f,&built) {
+                    Ok(p) => { built.planes.insert(f.id,p); }
+                    Err(e) => { built.errors.insert(f.id,e); }
+                }
                 continue;
             }
             // A feature can touch several bodies or drill several holes. Publish
             // its result only after all of those operations have succeeded.
             let mut bodies = built.bodies.clone();
-            let mut next_count = count;
-            match self.apply(f, &mut bodies, &mut next_count) {
+            let mut next_count = counts.get(&f.owner).copied().unwrap_or(0);
+            match self.apply(&f, &mut bodies, &mut next_count, &built) {
                 Ok(()) => {
                     built.bodies = bodies;
-                    count = next_count;
+                    counts.insert(f.owner,next_count);
                 }
                 Err(e) => {
                     built.errors.insert(f.id, e);
                 }
             }
         }
+        let components=built.components.clone();
+        built.bodies.retain_mut(|body| {
+            let placement=components[&body.component].placement;
+            body.local_bounds=body.mesh.bbox().map(|(lo,hi)|[lo,hi]);
+            let steps=crate::components::steps(placement);
+            if !steps.is_empty() && let Err(e)=body.place(&steps) {built.errors.insert(body.id,e);return false;}
+            body.placement=placement;
+            true
+        });
+        for p in built.planes.values_mut() {
+            let placement=components[&p.component].placement;
+            p.plane=p.plane.transformed(placement);
+            p.corners=p.corners.map(|p|placement.transform_point3(p));
+        }
+        built.placements_applied=true;
+        if !built.components.contains_key(&self.active_component) {self.active_component=0;}
         built
     }
 
-    fn apply(&self, f: &Feature, bodies: &mut Vec<Body>, count: &mut usize) -> Result<(), String> {
+    fn apply(&self, f: &Feature, bodies: &mut Vec<Body>, count: &mut usize, context: &Built) -> Result<(), String> {
         let find = |bodies: &[Body], id: Id| bodies.iter().position(|b| b.id == id).ok_or("a body it used no longer exists".to_owned());
         const MESH_ONLY: &str = "this body is a mesh (imported, tapered, or combined with one), and only exact bodies made from sketches can do that";
         match &f.kind {
@@ -1020,22 +1118,30 @@ impl Document {
                 };
                 let ti = find(bodies, c.target)?;
                 let tools: Vec<usize> = c.tools.iter().map(|t| if *t == c.target { Err("a body cannot be combined with itself".to_owned()) } else { find(bodies, *t) }).collect::<Result<_, _>>()?;
-                if bodies[ti].is_exact() && tools.iter().all(|t| bodies[*t].is_exact()) {
+                let target_frame=context.component_placement(bodies[ti].component);
+                let placed_tools=tools.iter().map(|i| {
+                    let mut tool=bodies[*i].clone();
+                    let transform=target_frame.inverse()*context.component_placement(tool.component);
+                    let steps=crate::components::steps(transform);
+                    if !steps.is_empty() {tool.place(&steps)?;}
+                    Ok(tool)
+                }).collect::<Result<Vec<_>,String>>()?;
+                if bodies[ti].is_exact() && placed_tools.iter().all(Body::is_exact) {
                     let mut result = bodies[ti].solids.clone();
-                    for t in &tools {
-                        result = exact::boolean(&result, &bodies[*t].solids, op)?;
+                    for t in &placed_tools {
+                        result = exact::boolean(&result, &t.solids, op)?;
                     }
                     bodies[ti].set_exact(result)?;
                 } else {
                     let mut result = bodies[ti].bare();
-                    for t in &tools {
-                        result = csg::boolean(&result, &bodies[*t].bare(), op)?;
+                    for t in &placed_tools {
+                        result = csg::boolean(&result, &t.bare(), op)?;
                     }
                     bodies[ti].set_mesh(result);
                 }
                 // What is joined on brings its threads with it.
                 if c.op == Op::Join {
-                    let carried: Vec<Mesh> = tools.iter().flat_map(|t| bodies[*t].threads.clone()).collect();
+                    let carried: Vec<Mesh> = placed_tools.iter().flat_map(|t| t.threads.clone()).collect();
                     for t in carried {
                         bodies[ti].add_thread(t);
                     }
@@ -1186,35 +1292,38 @@ impl Document {
                 Ok(())
             }
             FeatureKind::Pattern(p) => {
-                let source = self.feature(p.source).filter(|s| !s.suppressed).ok_or("the feature it repeats is missing or suppressed")?;
-                let (tool, op) = self.tool(source, bodies)?.ok_or("only extrudes, revolves, imports and standalone text can be patterned")?;
+                let source = self.features.iter().take_while(|source| source.id != f.id).find(|source|source.id == p.source && !source.suppressed).ok_or("the feature it repeats is missing or suppressed")?;
+                if context.errors.contains_key(&source.id) || !context.components.contains_key(&source.owner) {
+                    return Err("the feature it repeats could not be built".into());
+                }
+                let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, imports and standalone text can be patterned")?;
                 let mut landed = 0;
                 for (k, place) in p.placements()?.iter().enumerate() {
                     let copy = tool.placed(place);
                     // A cut that lands clear of every body has nothing to do; the others still apply.
-                    if matches!(op, Op::Cut | Op::Intersect) && !bodies.iter().any(|b| overlap(b.mesh.bbox(), copy.bbox())) {
+                    if matches!(op, Op::Cut | Op::Intersect) && !bodies.iter().any(|b| b.component==f.owner && overlap(b.mesh.bbox(), copy.bbox())) {
                         continue;
                     }
                     landed += 1;
                     // Bodies are named by the feature that made them; copies get ids of their own beside it.
-                    Self::merge(copy, op, f.id * 1000 + k as Id + 1, bodies, count)?;
+                    Self::merge(copy, op, f.id * 1000 + k as Id + 1, f.owner, bodies, count)?;
                 }
                 if landed == 0 {
                     return Err("none of the copies reach a body; try another axis, or a negative spacing or angle".into());
                 }
                 Ok(())
             }
-            _ => match self.tool(f, bodies)? {
-                Some((tool, op)) => Self::merge(tool, op, f.id, bodies, count),
+            _ => match self.tool(f, bodies, context)? {
+                Some((tool, op)) => Self::merge(tool, op, f.id, f.owner, bodies, count),
                 None => Ok(()),
             },
         }
     }
 
     /// Adds a feature's shape to the bodies it touches, as its operation says.
-    fn merge(tool: Shape, op: Op, id: Id, bodies: &mut Vec<Body>, count: &mut usize) -> Result<(), String> {
+    fn merge(tool: Shape, op: Op, id: Id, component: Id, bodies: &mut Vec<Body>, count: &mut usize) -> Result<(), String> {
         let reach = tool.bbox();
-        let hits: Vec<usize> = (0..bodies.len()).filter(|i| overlap(bodies[*i].mesh.bbox(), reach)).collect();
+        let hits: Vec<usize> = (0..bodies.len()).filter(|i| bodies[*i].component==component && overlap(bodies[*i].mesh.bbox(), reach)).collect();
         // Exact against exact stays exact; a mesh on either side makes the result a mesh.
         let exact_tool = |bodies: &[Body]| match &tool {
             Shape::Exact(l) if hits.iter().all(|i| bodies[*i].is_exact()) => Some(l.clone()),
@@ -1245,7 +1354,7 @@ impl Document {
             }
             Op::New | Op::Join => {
                 *count += 1;
-                bodies.push(tool.body(id, format!("Body{count}"))?);
+                bodies.push(tool.body(id, format!("Body{count}"), component)?);
             }
             Op::Cut | Op::Intersect => {
                 if hits.is_empty() {
@@ -1274,9 +1383,11 @@ impl Document {
     }
 
     /// The middle of what feature `id` adds or removes, for showing where its copies will go.
-    pub fn tool_center(&self, id: Id, bodies: &[Body]) -> Option<DVec3> {
-        let (shape, _) = self.tool(self.feature(id)?, bodies).ok()??;
-        shape.bbox().map(|(lo, hi)| (lo + hi) / 2.0)
+    pub fn tool_center(&self, id: Id, built: &Built) -> Option<DVec3> {
+        let bodies=built.bodies.iter().map(Body::local_copy).collect::<Result<Vec<_>,_>>().ok()?;
+        let feature=self.feature(id)?;
+        let (shape, _) = self.tool(feature, &bodies, built).ok()??;
+        shape.bbox().map(|(lo, hi)| built.component_placement(feature.owner).transform_point3((lo + hi) / 2.0))
     }
 
     /// The axis line of a revolve in sketch coordinates, for drawing.
@@ -1431,6 +1542,6 @@ impl Session {
 
     /// Bodies that are not hidden.
     pub fn visible_bodies(&self) -> impl Iterator<Item = &Body> {
-        self.built.bodies.iter().filter(|b| !self.doc.hidden_bodies.contains(&b.id))
+        self.built.bodies.iter().filter(|b| !self.doc.hidden_bodies.contains(&b.id) && self.built.component_visible(b.component))
     }
 }

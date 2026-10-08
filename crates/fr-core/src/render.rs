@@ -115,12 +115,17 @@ pub fn scene_bounds(s: &Session) -> Option<(DVec3, DVec3)> {
             pts.extend([lo, hi]);
         }
     }
-    for (_, sk) in s.doc.sketches().filter(|(_, sk)| sk.visible) {
+    for (f, sk) in s.doc.sketches().filter(|(f,sk)| sk.visible && s.built.component_visible(f.owner)) {
+        let Some(plane)=s.built.sketch_plane(&s.doc,f.id) else {continue};
         if let Some((lo, hi)) = sk.bbox() {
             for c in [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y)] {
-                pts.push(sk.plane.to_world(c));
+                pts.push(plane.to_world(c));
             }
         }
+    }
+    for (id,p) in &s.built.planes {
+        if matches!(s.doc.feature(*id).map(|f|&f.kind),Some(crate::FeatureKind::Plane(c)) if c.visible)
+            && s.built.component_visible(p.component) {pts.extend(p.corners);}
     }
     let first = *pts.first()?;
     Some(pts.iter().fold((first, first), |(lo, hi), p| (lo.min(*p), hi.max(*p))))
@@ -280,11 +285,25 @@ pub fn snapshot(s: &Session, cam: Option<Camera>, w: usize, h: usize) -> Image {
         img.line(px(cam.target.project_onto(axis) - axis * reach), px(cam.target.project_onto(axis) + axis * reach), color, 1.0);
     }
     draw_bodies(&mut img, s.visible_bodies(), &cam, None);
-    for (_, sk) in s.doc.sketches().filter(|(_, sk)| sk.visible) {
+    // Plane overlays are deliberately faint and do not participate in mesh export.
+    for (id,p) in &s.built.planes {
+        if !s.built.component_visible(p.component) || !matches!(s.doc.feature(*id).map(|f|&f.kind),Some(crate::FeatureKind::Plane(c)) if c.visible) {continue;}
+        let corners=p.corners.map(px);
+        let (mut lo,mut hi)=(DVec2::splat(f64::INFINITY),DVec2::splat(f64::NEG_INFINITY));
+        for c in corners {lo=lo.min(c);hi=hi.max(c);}
+        let x0=lo.x.floor().max(0.) as usize; let y0=lo.y.floor().max(0.) as usize;
+        let x1=hi.x.ceil().max(0.).min(w as f64) as usize; let y1=hi.y.ceil().max(0.).min(h as f64) as usize;
+        for y in y0.min(h)..y1 {for x in x0.min(w)..x1 {
+            if crate::profile::inside(&corners,DVec2::new(x as f64+0.5,y as f64+0.5)) {img.blend(x,y,CONSTRUCTION,0.1);}
+        }}
+        for i in 0..4 {img.line(corners[i],corners[(i+1)%4],CONSTRUCTION,1.2);}
+    }
+    for (f, sk) in s.doc.sketches().filter(|(f,sk)| sk.visible && s.built.component_visible(f.owner)) {
+        let Some(plane)=s.built.sketch_plane(&s.doc,f.id) else {continue};
         for (id, e) in &sk.entities {
             let color = if e.construction { CONSTRUCTION } else { SKETCH };
             for seg in sk.polyline(*id).windows(2) {
-                img.line(px(sk.plane.to_world(seg[0])), px(sk.plane.to_world(seg[1])), color, 2.0);
+                img.line(px(plane.to_world(seg[0])), px(plane.to_world(seg[1])), color, 2.0);
             }
         }
     }

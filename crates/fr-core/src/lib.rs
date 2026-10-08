@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod csg;
+pub mod components;
 pub mod doc;
 pub mod exact;
 pub mod expr;
@@ -13,6 +14,7 @@ pub mod measure;
 pub mod mesh;
 pub mod ops;
 pub mod profile;
+pub mod planes;
 pub mod reference;
 pub mod render;
 pub mod sketch;

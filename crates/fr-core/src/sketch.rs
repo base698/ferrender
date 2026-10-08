@@ -235,6 +235,8 @@ impl Clip {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sketch {
     pub plane: Plane,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<Id>,
     pub points: BTreeMap<Id, DVec2>,
     pub entities: BTreeMap<Id, Entity>,
     pub constraints: BTreeMap<Id, Constraint>,
@@ -264,7 +266,7 @@ pub fn seg_dist(p: DVec2, a: DVec2, b: DVec2) -> f64 {
 
 impl Sketch {
     pub fn new(plane: Plane) -> Sketch {
-        Sketch { plane, points: BTreeMap::from([(ORIGIN, DVec2::ZERO)]), entities: BTreeMap::new(), constraints: BTreeMap::new(), next: 1, visible: true, fixed: BTreeSet::new(), reference: None, arc_guides: BTreeMap::new() }
+        Sketch { plane, on: None, points: BTreeMap::from([(ORIGIN, DVec2::ZERO)]), entities: BTreeMap::new(), constraints: BTreeMap::new(), next: 1, visible: true, fixed: BTreeSet::new(), reference: None, arc_guides: BTreeMap::new() }
     }
 
     fn id(&mut self) -> Id {

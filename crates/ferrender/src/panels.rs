@@ -74,6 +74,10 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Chamfer Corner", "", Action::Chamfer);
         });
         ui.menu_button("Model", |ui| {
+            item(app, ui, "New Component", "", Action::NewComponent);
+            item(app, ui, "Activate Root", "", Action::ActivateRoot);
+            item(app, ui, "Construction Plane", "", Action::Plane);
+            ui.separator();
             item(app, ui, "Extrude", "E", Action::Extrude);
             item(app, ui, "Revolve", "", Action::Revolve);
             item(app, ui, "Text / Emboss", "", Action::Text);
@@ -181,7 +185,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                     (icon::RECTANGLE, "Rectangle", Tool::Rect, "Two-point rectangle (R)"),
                     (icon::CIRCLE, "Circle", Tool::Circle, "Centre and radius circle (C)"),
                     (icon::CIRCLE_NOTCH, "Arc", Tool::Arc, "Centre, start and end arc (A)"),
-                    (icon::CIRCLE_NOTCH, "3-Point Arc", Tool::Arc3, "Arc through start, middle and end points"),
+                    (icon::CIRCLE_NOTCH, "3-Point Arc", Tool::Arc3, "Arc: start, end, then a point that sets the bulge"),
                     (icon::CIRCLE_NOTCH, "Tangent Arc", Tool::TangentArc, "Continue a selected line or arc smoothly"),
                     (icon::BEZIER_CURVE, "Spline", Tool::Spline, "Curve through four editable fit points"),
                     (icon::DOT_OUTLINE, "Point", Tool::Point, "Point (P)"),
@@ -247,6 +251,8 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
             }
         } else {
             group(ui, "SKETCH", |ui| {
+                if big(ui, icon::TREE_STRUCTURE, "Component", false, "New Component: create and activate a child component").clicked() { app.run(&ctx, Action::NewComponent); }
+                if big(ui, icon::SQUARE, "Plane", matches!(app.dialog, Dialog::Plane(_)), "Construction Plane: offset, midplane, or through three points").clicked() { app.run(&ctx, Action::Plane); }
                 if big(ui, icon::PENCIL_RULER, "New Sketch", app.dialog == Dialog::PickPlane, "Start a sketch on a plane or a flat face").clicked() {
                     app.run(&ctx, Action::NewSketch);
                 }
@@ -267,7 +273,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "MODIFY", |ui| {
-                if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_)), "Move, rotate or scale the selected body").clicked() {
+                if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_) | Dialog::MoveComponent(_)), "Move the selected component, or move, rotate or scale a body").clicked() {
                     app.run(&ctx, Action::Transform);
                 }
                 if big(ui, icon::UNITE, "Combine", matches!(app.dialog, Dialog::Combine(_)), "Join, cut or intersect bodies").clicked() {
@@ -318,6 +324,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
 pub fn status(app: &mut App, ui: &mut Ui) {
     let colors = Palette::from_ctx(ui.ctx());
     ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Active: {}", app.doc().component_name(app.doc().active_component))).strong());
         match app.sketch() {
             Some((id, _)) => {
                 let name = app.doc().feature(id).map_or(String::new(), |f| f.name.clone());
@@ -339,7 +346,7 @@ pub fn status(app: &mut App, ui: &mut Ui) {
                     let u = app.doc().units;
                     let size = b.mesh.bbox().map_or(glam::DVec3::ZERO, |(lo, hi)| hi - lo) / u.mm();
                     let n = |v: f64| fr_core::units::trim_num(v, 3);
-                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", b.name, if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.tris.len())).color(colors.muted));
+                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", format!("{} › {}", app.doc().component_name(b.component), b.name), if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.tris.len())).color(colors.muted));
                 }
                 if let Some(f) = &app.sel_face
                     && let Some(b) = app.session.built.body(f.body)
@@ -375,6 +382,8 @@ pub fn status(app: &mut App, ui: &mut Ui) {
 fn feature_icon(kind: &FeatureKind) -> &'static str {
     match kind {
         FeatureKind::Sketch(_) => icon::PENCIL_RULER,
+        FeatureKind::Plane(_) => icon::SQUARE,
+        FeatureKind::Component(_) => icon::TREE_STRUCTURE,
         FeatureKind::Extrude(_) => icon::ARROW_FAT_LINES_UP,
         FeatureKind::Revolve(_) => icon::ARROWS_CLOCKWISE,
         FeatureKind::Import(_) => icon::DOWNLOAD_SIMPLE,
@@ -391,7 +400,7 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
 }
 
 /// Edit, suppress and delete, shared by the timeline and the browser.
-fn feature_menu(app: &mut App, ui: &mut Ui, id: Id, suppressed: bool) {
+pub(crate) fn feature_menu(app: &mut App, ui: &mut Ui, id: Id, suppressed: bool) {
     if ui.button("Edit").clicked() {
         app.edit_feature(id);
         ui.close();
@@ -459,13 +468,13 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new("TIMELINE").size(10.0).color(colors.muted));
-            let features: Vec<(Id, String, &'static str, bool)> = app.doc().features.iter().map(|f| (f.id, f.name.clone(), feature_icon(&f.kind), f.suppressed)).collect();
+            let features: Vec<(Id, String, &'static str, bool, Id)> = app.doc().features.iter().map(|f| (f.id, f.name.clone(), feature_icon(&f.kind), f.suppressed, f.owner)).collect();
             if features.is_empty() {
                 ui.label(RichText::new("Features appear here in the order they were made. Start with New Sketch.").color(colors.muted));
             }
             let (active, total) = (app.doc().active(), features.len());
             let mut chips = Vec::new();
-            for (i, (id, name, glyph, suppressed)) in features.into_iter().enumerate() {
+            for (i, (id, name, glyph, suppressed, owner)) in features.into_iter().enumerate() {
                 if i == active {
                     marker(app, ui);
                 }
@@ -475,6 +484,8 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
                 let chosen = app.mode == Mode::Sketch(id) || app.sel_feature == Some(id);
                 let resp = ui.add(egui::Button::new(RichText::new(format!("{glyph} {name}")).color(color)).selected(chosen));
                 chips.push(resp.rect);
+                ui.painter().line_segment([resp.rect.left_bottom(), resp.rect.right_bottom()], Stroke::new(2.0, crate::components_ui::color(app.doc(), owner)));
+                let resp = resp.on_hover_text(format!("in {}", app.doc().component_name(owner)));
                 let resp = match &error {
                     Some(e) => resp.on_hover_text(e),
                     None if i >= active => resp.on_hover_text("Not built: the timeline is rolled back to before this"),
@@ -484,6 +495,7 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
                     app.edit_feature(id);
                 } else if resp.clicked() {
                     app.sel_feature = Some(id);
+                    app.sel_component = app.doc().feature(id).filter(|f| matches!(f.kind, FeatureKind::Component(_))).map(|f| f.id);
                     app.sel_body = app.session.built.body(id).map(|b| b.id);
                 }
                 resp.context_menu(|ui| {
@@ -508,73 +520,15 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
     });
 }
 
-fn eye(ui: &mut Ui, visible: bool) -> bool {
+pub(crate) fn eye(ui: &mut Ui, visible: bool) -> bool {
     let colors = Palette::from_ctx(ui.ctx());
     ui.add(egui::Button::new(RichText::new(if visible { icon::EYE } else { icon::EYE_SLASH }).color(if visible { colors.ink } else { colors.muted })).frame(false)).on_hover_text("Show or hide").clicked()
 }
 
-pub fn browser(app: &mut App, ui: &mut Ui) {
-    let colors = Palette::from_ctx(ui.ctx());
-    ui.label(RichText::new("BROWSER").size(10.0).color(colors.muted));
-    ui.add_space(2.0);
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.label(RichText::new(format!("{} {}", icon::CUBE, app.doc_name())).strong());
-        egui::CollapsingHeader::new(format!("{} Document Settings", icon::GEAR)).default_open(true).show(ui, |ui| {
-            ui.label(format!("Units: {}", app.doc().units.name()));
-            let n = app.doc().params.len();
-            if ui.link(format!("Parameters ({n})")).clicked() {
-                app.show_params = true;
-            }
-        });
-        egui::CollapsingHeader::new(format!("{} Origin", icon::FOLDER)).default_open(false).show(ui, |ui| {
-            for (label, plane) in [("XY plane (top)", Plane::XY), ("XZ plane (front)", Plane::XZ), ("YZ plane (right)", Plane::YZ)] {
-                if ui.link(label).on_hover_text("Start a sketch on this plane").clicked() {
-                    app.finish_sketch();
-                    app.create_sketch(plane);
-                }
-            }
-        });
-        egui::CollapsingHeader::new(format!("{} Sketches", icon::FOLDER)).default_open(true).show(ui, |ui| {
-            let list: Vec<(Id, String, bool)> = app.doc().sketches().map(|(f, s)| (f.id, f.name.clone(), s.visible)).collect();
-            if list.is_empty() {
-                ui.label(RichText::new("None yet").color(colors.muted));
-            }
-            for (id, name, visible) in list {
-                ui.horizontal(|ui| {
-                    if eye(ui, visible) {
-                        let _ = app.execute(&json!({"op": "set_visible", "id": id, "visible": !visible}));
-                    }
-                    let resp = ui.selectable_label(app.mode == Mode::Sketch(id), name).on_hover_text("Double-click to edit");
-                    if resp.double_clicked() {
-                        app.edit_sketch(id);
-                    } else if resp.clicked() {
-                        app.sel_feature = Some(id);
-                    }
-                    resp.context_menu(|ui| feature_menu(app, ui, id, false));
-                });
-            }
-        });
-        egui::CollapsingHeader::new(format!("{} Bodies", icon::FOLDER)).default_open(true).show(ui, |ui| {
-            let list: Vec<(Id, String, bool)> = app.session.built.bodies.iter().map(|b| (b.id, b.name.clone(), !app.doc().hidden_bodies.contains(&b.id))).collect();
-            if list.is_empty() {
-                ui.label(RichText::new("None yet").color(colors.muted));
-            }
-            for (id, name, visible) in list {
-                ui.horizontal(|ui| {
-                    if eye(ui, visible) {
-                        let _ = app.execute(&json!({"op": "set_visible", "id": id, "visible": !visible}));
-                    }
-                    if ui.selectable_label(app.sel_body == Some(id), name).clicked() {
-                        app.sel_body = Some(id);
-                    }
-                });
-            }
-        });
-    });
-}
+pub fn browser(app: &mut App, ui: &mut Ui) { crate::components_ui::browser(app, ui); }
 
 /// A size box with its evaluated result or error next to it.
-fn value_row(app: &App, ui: &mut Ui, label: &str, text: &mut String, kind: Kind) {
+pub(crate) fn value_row(app: &App, ui: &mut Ui, label: &str, text: &mut String, kind: Kind) {
     let colors = Palette::from_ctx(ui.ctx());
     ui.label(label);
     ui.add(egui::TextEdit::singleline(text).desired_width(110.0).hint_text(match kind {
@@ -601,7 +555,7 @@ fn op_row(ui: &mut Ui, op: &mut Op, allowed: &[Op]) {
 }
 
 /// OK and Cancel, with the preview's error if there is one.
-fn confirm(app: &mut App, ui: &mut Ui, ok: &str) {
+pub(crate) fn confirm(app: &mut App, ui: &mut Ui, ok: &str) {
     let colors = Palette::from_ctx(ui.ctx());
     let error = app.preview.as_ref().and_then(|p| p.2.clone());
     if let Some(e) = &error {
@@ -632,7 +586,7 @@ fn thread_row(ui: &mut Ui, thread: &mut String, fits: impl Fn(&threads::ThreadSp
     ui.end_row();
 }
 
-fn dialog_window(app: &App, title: &str) -> egui::Window<'static> {
+pub(crate) fn dialog_window(app: &App, title: &str) -> egui::Window<'static> {
     egui::Window::new(title.to_owned()).collapsible(false).resizable(false).pivot(Align2::RIGHT_TOP).default_pos(app.vp.right_top() + vec2(-14.0, 14.0))
 }
 
@@ -640,6 +594,9 @@ fn dialogs(app: &mut App, ctx: &Context) {
     let colors = Palette::from_ctx(ctx);
     match app.dialog.clone() {
         Dialog::None => {}
+        Dialog::Plane(d) => crate::construction::dialog(app, ctx, d),
+        Dialog::MoveComponent(d) => crate::components_ui::move_dialog(app, ctx, d),
+        Dialog::DeleteComponent(id) => crate::components_ui::delete_dialog(app, ctx, id),
         Dialog::PointCoordinates(mut d) => {
             dialog_window(app, "Point Coordinates").show(ctx, |ui| {
                 ui.label(if d.point.is_some() { "Edit the selected point" } else { "Place a point by its coordinates" });
@@ -682,10 +639,10 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         }
                     }
                 });
-                ui.label(RichText::new("or click a flat face of a body.").color(colors.muted));
+                ui.label(RichText::new("or click a flat face or construction plane.").color(colors.muted));
                 ui.horizontal(|ui| {
                     ui.label("Offset");
-                    ui.add(egui::TextEdit::singleline(&mut app.plane_offset).desired_width(90.0).hint_text("0 mm")).on_hover_text("Distance from the plane or face, for a sketch above or below it");
+                    ui.add(egui::TextEdit::singleline(&mut app.plane_offset).desired_width(90.0).hint_text("0 mm")).on_hover_text("One-time offset from the plane or face. Use Construction Plane for an offset that follows later edits.");
                 });
                 if ui.button("Cancel").clicked() {
                     app.dialog = Dialog::None;
@@ -961,6 +918,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
         Dialog::Text(mut t) => {
             dialog_window(app, if t.editing.is_some() { "Edit Text / Emboss" } else { "Text / Emboss" }).show(ctx, |ui| {
                 ui.set_max_width(380.0);
+                ui.small(format!("Component: {}", app.doc().component_name(t.owner)));
                 if t.editing.is_some() {
                     ui.label(RichText::new("Later features are hidden while editing this text.").small().color(colors.muted));
                 }
@@ -974,6 +932,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         for (label, plane) in [("XY", Plane::XY), ("XZ", Plane::XZ), ("YZ", Plane::YZ)] {
                             if ui.selectable_label(t.body.is_none() && t.plane == plane, label).clicked() {
                                 (t.plane, t.body, t.face, t.frame, t.op) = (plane, None, None, None, Op::New);
+                                if t.editing.is_none() { t.owner = app.doc().active_component; }
                             }
                         }
                     });

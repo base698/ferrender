@@ -200,13 +200,21 @@ been tried against the live API.
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
+| **Components (0.3 test build)** | Nested ownership, activation, scoped modeling, subtree visibility, and rigid component placement |
+| **Construction planes (0.3 test build)** | Persistent Offset, Midplane, and Three Points references with attached sketches |
 | **Inspect** | Measure, Section Analysis, degrees of freedom while sketching |
 | **Timeline** | Edit, rename, suppress, delete, roll back; undo and redo |
 | **Files** | `.ferr` documents; STL in and out; STEP out; recovery of unsaved work after a crash |
 | **AI** | MCP server, local command socket, built-in assistant |
 
-It is early, and smaller than what it imitates: no assemblies or joints, no loft or sweep, no drawings, and the
+It is early, and smaller than what it imitates: no joints or linked component instances, no loft or sweep, no drawings, and the
 [limits](#limits) below are real. `TODO.md` has the list.
+
+## Components and construction planes in 0.3.0 testing
+
+**0.3.0-dev is a test build awaiting user verification, not a published release.** The work adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes.
+
+Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [candidate notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. Existing designs remain readable; new component and construction-plane files require 0.3.0 or later.
 
 ## Sketching improvements in 0.2
 
@@ -347,6 +355,18 @@ An imported STL, a tapered extrude, and anything combined with one of those is
 a mesh body. Both kinds work with extrude, revolve, cut, join, move and
 pattern. Only exact bodies can be filleted, chamfered, shelled or written to
 STEP. The status bar says which kind the selected body is.
+
+### Components (0.3 test build)
+
+Choose **Model → New Component**, name the part, and build its sketches and bodies while it is active. The browser shows the hierarchy and the status bar identifies the active component. **Activate Root** returns to the document level. Join, Cut, Intersect, and Through All stay within the feature's component; use Combine explicitly to work across components.
+
+Select a component node and choose Move to translate or rotate its whole subtree. Select a body instead to add an ordinary body Transform feature. Hide a component to hide its descendants. Each feature keeps its owner in the single document timeline; rolling back before a component's creation makes it unavailable and returns activation to root.
+
+### Construction planes (0.3 test build)
+
+Choose **Model → Construction Plane** or the **Plane** toolbar button. Offset keeps a signed distance from an origin plane, a flat face, or another construction plane. Midplane sits halfway between parallel faces or bisects intersecting faces; Flip chooses the other angular bisector. Three Points uses picked vertices, sketch points, or entered coordinates. Typed point coordinates use the owning component's axes.
+
+Start New Sketch on a construction plane to keep a persistent attachment. Editing the plane or its references updates the sketch and its dependent solid features. A one-time Offset in New Sketch remains a separate shortcut that copies a plane without establishing that relationship. Planes appear under Construction, can be hidden or edited, and contribute no solid geometry to STL or STEP.
 
 ### Fillet, Chamfer, Shell
 

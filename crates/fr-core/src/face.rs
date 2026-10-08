@@ -22,6 +22,14 @@ pub struct Face {
 }
 
 impl Face {
+    /// Rigidly change the coordinate frame while keeping sketch UVs and topology.
+    pub fn transformed(&self,t:glam::DAffine3)->Self {
+        let mut face=self.clone();
+        face.plane=face.plane.map(|p|p.transformed(t));
+        face.at=t.transform_point3(face.at);
+        for p in face.outline.iter_mut().flatten() {*p=t.transform_point3(*p);}
+        face
+    }
     /// The face of `body` that contains triangle `tri`.
     pub fn pick(body: &Body, tri: usize) -> Face {
         let tris = body.mesh.face(tri);
