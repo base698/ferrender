@@ -130,6 +130,7 @@ impl Editor {
                             }
                         });
                         ui.small("Origin is the lower-left corner in sketch coordinates. Width keeps the image proportions.");
+                        ui.small("With Select, drag an empty part of the image to move it. Select the image, then drag a corner to scale it. Sketch geometry takes priority.");
                         ui.add(egui::Slider::new(&mut image.opacity, 0.0..=1.0).text("Opacity"));
                         ui.checkbox(&mut image.visible, "Visible");
                     }
@@ -206,7 +207,7 @@ impl Editor {
     }
 }
 
-fn project(plane: Plane, camera: Camera, rect: Rect, point: DVec2) -> Pos2 {
+pub(crate) fn project(plane: Plane, camera: Camera, rect: Rect, point: DVec2) -> Pos2 {
     let p = camera.project(plane.to_world(point)).0;
     rect.center() + vec2(p.x as f32, p.y as f32)
 }

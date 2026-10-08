@@ -67,7 +67,7 @@ SKETCHES
    Creates or updates signed position_x and position_y dimensions. Omit point to create a new point. Both expressions remain parametric, edits are one undo step, and conflicts leave the document unchanged. The fixed origin cannot be moved. Spline fit points use this same command; radius/tangent/equal constraints apply to circles and arcs, not spline entities.
 {"op":"add_constraint","sketch":ID,"kind":KIND,"refs":[ids],"value":V}
    geometric kinds: coincident (2 points | point+line | point+curve), horizontal / vertical (line | 2 points), parallel, perpendicular, collinear (2 lines), tangent (line+curve | 2 curves), equal (2 lines | 2 curves), midpoint (point+line), concentric (2 curves), symmetric (2 points + mirror line), fix (point | line)
-   dimension kinds (need "value"): distance (line = its length | 2 points | point+line | 2 parallel lines), radius, diameter (circle or arc), angle (2 lines)
+   dimension kinds (need "value"): distance (line = its length | 2 points | point+line | 2 parallel lines), radius, diameter (circle or arc), angle (one line = signed direction from sketch +X; one arc = sweep greater than 0 and less than 360 degrees; 2 lines = angle between them)
    A constraint that conflicts with existing ones is rejected. Returns its id and the degrees of freedom left (0 = fully constrained).
 {"op":"set_dimension","sketch":ID,"constraint":ID,"value":V}
 {"op":"delete","sketch":ID,"ids":[...]}            points, entities or constraints
@@ -1241,6 +1241,8 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let r = s.edit(|d| {
                 let kind = d.sketch(sid).unwrap().constraints.get(&cid).and_then(|c| c.kind.value_kind()).ok_or(format!("{cid} is not a dimension"))?;
                 let v = d.enter(&text, kind)?;
+                let constraint = &d.sketch(sid).unwrap().constraints[&cid];
+                d.sketch(sid).unwrap().validate_dimension(constraint.kind, &constraint.refs, v.v)?;
                 sk_mut(d, sid).constraints.get_mut(&cid).unwrap().value = Some(v);
                 let report = settle(d, sid)?;
                 Ok(json!({"id": cid, "degrees_of_freedom": report.dof}))

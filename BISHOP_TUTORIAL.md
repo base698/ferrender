@@ -4,7 +4,7 @@ This tutorial recreates the photo-based bishop using Ferrender's desktop tools: 
 
 The silhouette matches the supplied bishop model closely. Its proportions were estimated from one photograph; only the 30 mm total height was specified. The red annotation on the photograph is not part of the piece.
 
-This tutorial targets **Ferrender 0.2.0**. Check **Help → About Ferrender** for the version and source commit before testing. The recipe was rebuilt using the new point-coordinate and three-point-arc commands: 45 positioned outline/through points, 25 outline edges, a fully constrained closed profile, and one exact 30 mm solid. Resizing to 36 mm and exporting STL/STEP also passed. Automated offscreen tests exercise the new controls, but the complete human mouse-and-keyboard walkthrough remains a manual acceptance check. The [0.1.0 instructions](docs/tutorials/BISHOP_0.1.md) are preserved for older builds.
+This tutorial targets **Ferrender 0.2.2**, whose three-point arc tool uses **start → end → bulge**. Builds 0.2.0 and 0.2.1 used start → bulge → end; use the [0.2.0 tutorial](https://github.com/base698/ferrender/blob/v0.2.0/BISHOP_TUTORIAL.md) with those builds. Check **Help → About Ferrender** for the version and source commit before testing. The geometric recipe was verified for 0.2.0 using the point-coordinate and three-point-arc commands: 45 positioned outline/through points, 25 outline edges, a fully constrained closed profile, and one exact 30 mm solid. Resizing to 36 mm and exporting STL/STEP also passed. Automated offscreen tests exercise the new controls, but the complete human mouse-and-keyboard walkthrough remains a manual acceptance check. The [0.1.0 instructions](docs/tutorials/BISHOP_0.1.md) are preserved for older builds.
 
 ![Profile and finished silhouette with dimensions](docs/images/bishop-profile-guide.png)
 
@@ -60,7 +60,7 @@ Keep **Construction off**. For each arc, you need its two outline endpoints and 
 For every **3-Point Arc** row:
 
 1. Choose **Sketch → 3-Point Arc**.
-2. Snap to the row's **From** point, then its **Through point**, then its **To** point. For edge 2, that is **P1 → T2 → P2**.
+2. Snap to the row's **From** point, then its **To** point, then its **Through point**. For edge 2, that is **P1 → P2 → T2**. The first two clicks fix the ends; the third chooses the bulge.
 3. Compare the bulge with the diagram. The curve should pass through all three points. The through point stays attached to the arc if its coordinates change later.
 4. Do not add a radius or tangent constraint to this recipe: the three dimensioned points already determine the circle.
 
@@ -193,7 +193,7 @@ When experimenting with the timeline, hold and move the marker to choose a posit
 | Revolve has no closed profile | Turn on **Highlight Open Ends** in the Sketch Palette. Snap a missing connection to the existing point, or select two free endpoints and apply Coincident. If fixed coordinates conflict, correct those coordinates first. Verify the axis edge is ordinary geometry. |
 | Many extra regions appear | Look for duplicate edges or ordinary tracing guides. Remove duplicates or make guides construction geometry; keep the actual outline ordinary. |
 | A three-point arc is refused | Check the three coordinates, their units, and click order. Distinct points on one straight line cannot define an arc. |
-| A shallow curve appears enormous or backwards | Use start → through → end. The middle click must be the T point for that row, not a guessed center or another P point. |
+| A shallow curve appears enormous or backwards | In 0.2.2, use start → end → through. The last click must be the T point for that row, not a guessed center or another P point. |
 | A finial or collar looks angular | Check whether you accidentally used Line in place of Arc. Some visible surface faceting is display tessellation; STEP preserves the exact curved surfaces. |
 | Revolve makes a sideways shape | Use the sketch's Y axis on the XZ sketch. |
 | The cut does nothing | Check Operation = Cut, that the slot is a closed ordinary profile, and that its lower end intersects the head. |
@@ -211,7 +211,7 @@ The numeric recipe above reproduces the supplied model. The new sketching tools 
 ### Bring in a reference photograph
 
 1. While editing the XZ outline sketch, choose **Sketch → Reference Image… → Choose Image…** and import your PNG or JPEG.
-2. Reduce **Opacity** so the lines remain visible. Adjust **Origin X**, **Origin Y**, and **Rotation** to put the photographed centerline upright over the sketch axis, then click **Apply**. The origin is the image's lower-left corner, not the piece's bottom-center. Reopen the dialog to refine placement.
+2. Reduce **Opacity** so the lines remain visible. Adjust **Origin X**, **Origin Y**, and **Rotation** to put the photographed centerline upright over the sketch axis, then click **Apply**. The origin is the image's lower-left corner, not the piece's bottom-center. In Select, drag an empty part of the image to move it, or select it and drag a square corner handle to scale around the opposite corner. Sketch geometry takes priority over the image body. Reopen the dialog for exact placement.
 3. Choose **Calibrate from Two Points…**, then pick the bottom and top of the photographed piece. In the reopened dialog, enter **Known distance = `30 mm`** and click **Calibrate and Apply**. The first selected point stays in place during scaling. Check the centerline and base alignment again.
 4. Draw over the visible silhouette. The image is embedded in the `.ferr` document and is only a tracing aid; it contributes no solid geometry and is not exported to STL or STEP.
 
@@ -219,7 +219,7 @@ A single angled photo cannot establish hidden dimensions or eliminate perspectiv
 
 ### Use curves without finding their centers
 
-- **3-Point Arc:** click the start, a point on the desired bulge, and the end. The middle click is on the arc, not its center. This is convenient for the stem and head, whose circle centers lie far from the silhouette. Three points on a straight line cannot define a circle.
+- **3-Point Arc:** click the start and end, then a point on the desired bulge. The last click is on the arc, not its center. This is convenient for the stem and head, whose circle centers lie far from the silhouette. Three points on a straight line cannot define a circle.
 - **Tangent Arc:** start at an existing line or arc endpoint, then click the new end. Select the source curve first if several curves meet at the junction. Use this for a smooth continuation when redesigning an outline. Do not add tangency indiscriminately to the dimensioned recipe above: its independent circles and fixed endpoints may conflict with it.
 - **Spline:** click four fit points in order. The curve passes through those points; the inner points are not Bezier handles. Use Select to drag free fit points, or double-click a fit point to enter coordinates. Keep the first and last points shared with neighboring edges so the result can close into a profile. A spline can simplify a freeform head or stem, but replacing the recipe's arcs changes its shape.
 

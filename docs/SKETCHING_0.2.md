@@ -1,6 +1,6 @@
 # Sketching in Ferrender 0.2
 
-This guide covers Ferrender **0.2.0** and includes a manual acceptance plan. A test listed below is a check to perform, not a claim that someone has already performed it. See the release notes for completed validation.
+This guide covers Ferrender **0.2.2** and includes a manual acceptance plan. For a shorter retest of the 0.2.2 changes, see [Sketching fixes in 0.2.2](SKETCHING_0.2.2.md). A test listed below is a check to perform, not a claim that someone has already performed it. See the release notes for completed validation.
 
 The new tools help you place a profile accurately, trace a photograph, and find open ends before making a solid. The [30 mm bishop tutorial](../BISHOP_TUTORIAL.md) uses direct coordinates and three-point arcs from a blank document. The [older tutorial](tutorials/BISHOP_0.1.md) remains available for 0.1 builds.
 
@@ -14,15 +14,33 @@ Both fields accept signed length expressions, for example `-4 mm`, `0.25 in`, or
 
 A point with both coordinates dimensioned will resist dragging. Edit the coordinates or remove the relevant constraint if you want that direction to be free. Other constraints still apply; incompatible values must be refused without leaving a partial edit. The sketch origin is fixed and cannot be moved this way.
 
+## Dimensions on existing geometry
+
+Draw roughly, then select a line and press **D** or choose **Dimension** to enter its length. You can also choose Dimension first and click the line; the value box now opens immediately. A circle defaults to diameter and an arc to radius. If the curve already has a radius or diameter dimension, Ferrender reopens that value instead of adding a competing dimension. Press Enter to accept a value; double-click its label to edit it later.
+
+For a dimension between two items, use Select and **Shift-click both items before pressing D**. Two points give distance; a point and a line give perpendicular distance; two parallel lines give spacing; two other lines give angle. In the Dimension tool you can still click a point and then another point or line. Because a first line click now opens its length immediately, use the preselection method for two-line dimensions.
+
+Length dimensions change geometry only as its other constraints allow. A line whose endpoints already have fixed X/Y coordinates may refuse an incompatible length. Edit those coordinates or remove an unwanted constraint first.
+
+## Sticky directions and explicit angle locks
+
+While drawing a line, nearby horizontal, vertical, 45°, parallel, perpendicular, and endpoint-tangent directions can snap gently. Tangent arcs also snap near 45° sweep increments. Move farther away to leave an ordinary snap.
+
+Hold **Shift** to freeze the line's current direction or a tangent arc's current sweep. Moving the pointer then changes the line length or arc size. Keep Shift held through placement to retain the angle as an editable dimension. Releasing Shift before placement releases the explicit lock. Shift still adds to a selection when using Select.
+
+You can type a line's **Length** and **Angle**, or a tangent arc's **Sweep**. Line Angle is measured from sketch +X and accepts zero or signed angles. Sweep must be greater than 0° and less than 360°. An explicit angle remains constrained during later edits; double-click its dimension to change it, or select that dimension and delete it to release the angle. A constraint that conflicts with existing geometry must be refused without partially adding the shape.
+
 ## Arcs
 
 | Tool | Click order | Use |
 |---|---|---|
 | **Arc** (`A`) | Center, start, end | A known circle center and radius. |
-| **3-Point Arc** | Start, through, end | A visible bulge or a curve whose center lies off-screen. |
+| **3-Point Arc** | Start, end, through/bulge | A visible bulge or a curve whose center lies off-screen. |
 | **Tangent Arc** | Existing line/arc endpoint, new end | Smooth continuation from an existing line or circular arc. |
 
-Use **Sketch → 3-Point Arc** and click three distinct, non-collinear points. The middle point lies on the curve. Snapping that middle click to an existing point keeps a point-on-arc constraint, so later edits can preserve its relationship. The three clicks determine which side of the circle to keep, including an arc longer than a semicircle. This remains a circular arc, not a spline.
+Use **Sketch → 3-Point Arc** and click the two endpoints first, then a point on the desired bulge. After the second click, moving the pointer chooses the side and curvature while the endpoints stay in place. Snapping the last click to an existing point keeps a point-on-arc constraint, so later edits can preserve its relationship. The three distinct, non-collinear points determine which side of the circle to keep, including an arc longer than a semicircle. This remains a circular arc, not a spline. After choosing the endpoints, type **Diameter** to hold an exact circle size while choosing the side and bulge. A diameter smaller than the distance between the endpoints is impossible and is refused.
+
+The UI click order changed in **0.2.2**: 0.2.0 and 0.2.1 used start → through → end. Existing saved arcs keep their shape. The command API still names the points `start`, `through`, and `end`; this UI change does not change their meaning.
 
 For **Tangent Arc**, start at the endpoint of an existing line or arc, then choose the new endpoint. If several source curves share the start, select the intended source first. The new arc shares the connection point and receives a tangent constraint. A straight continuation does not define a finite-radius arc; use Line in that case. This tool's source is a line or circular arc, not a spline. Press **Escape** to abandon an unfinished gesture.
 
@@ -41,6 +59,8 @@ This first tool uses exactly four fit points. You may snap the fourth point back
 ## Reference images
 
 While editing the target sketch, choose **Sketch → Reference Image…** or the Sketch Palette button, then **Choose Image…**. Import a PNG or JPEG. **Origin X** and **Origin Y** locate the lower-left corner in sketch coordinates. **Width** preserves the image proportions; **Rotation**, **Opacity**, and **Visible** control its orientation and appearance. Click **Apply** to accept the edit. Reopen the dialog for **Replace Image…** or **Remove Image**. Each accepted change is undoable; Cancel discards the pending edit.
+
+In **Select** (`S`), drag an empty part of the image to move it. Click it to show four square corner handles, then drag a corner to scale uniformly around the opposite corner. Scaling preserves the image's proportions and rotation. Sketch points, edges, and dimension labels take priority over the image body; selected image handles take priority at its corners. Hidden references cannot be picked. Each completed drag is one undoable edit; Escape cancels a drag, and a second Escape clears the image selection. The dialog remains available for exact placement and calibration.
 
 For scale calibration:
 
@@ -68,7 +88,7 @@ No orange rings is a useful local check, not proof of a closed, valid region. Du
 
 ## Files, undo, and expressions
 
-Save native `.ferr` files to retain the new geometry, dimensions, and embedded reference. Older files remain readable. A file that uses a new feature may require 0.2 or later; keep a separate copy if you also test 0.1. STL is a triangle export and does not retain an editable sketch; STEP preserves exact solids but not the Ferrender feature history.
+Save native `.ferr` files to retain the new geometry, dimensions, and embedded reference. Older files remain readable. A saved single-line direction or single-arc sweep dimension uses file format 4 and requires 0.2.2 or later. Other new 0.2 features may require 0.2 or later; keep a separate copy if you also test 0.1. STL is a triangle export and does not retain an editable sketch; STEP preserves exact solids but not the Ferrender feature history.
 
 The expression parser accepts scientific notation, including `1e-6 mm`, `-2.5E+1 mm`, and exponent-form JSON numeric coordinates sent through the command API. It still rejects malformed or non-finite numbers. This fixes the near-zero arc-coordinate problem seen while creating the pawn. Parameters and unit conversion otherwise work as before.
 
@@ -87,8 +107,8 @@ Before testing, save open work and use **Help → About Ferrender → Copy build
 
 ### 2. Three-point arcs
 
-1. Enter points at `(0, 0)`, `(5, 5)`, and `(10, 0)` mm. Choose **3-Point Arc** and click them in that order. Expect the upper semicircle through all three points, not an arc through a guessed center.
-2. Edit the middle point to `(5, 6)`. Expect the arc to pass through all three points. Undo/Redo should restore/reapply the shape without losing its connections.
+1. Enter points at `(0, 0)`, `(10, 0)`, and `(5, 5)` mm. Choose **3-Point Arc** and click them in that order: start → end → bulge. Expect the upper semicircle through all three points, with the first two clicks remaining its endpoints.
+2. Edit the through point (the last click) to `(5, 6)`. Expect the arc to pass through all three points. Undo/Redo should restore/reapply the shape without losing its connections.
 3. Try a clockwise arc, a counterclockwise arc, and a sweep greater than 180°. In each case the chosen through point must lie on the retained segment, not the other side of the circle.
 4. Try coincident clicks and three collinear points. Expect a readable refusal, no stray half-arc, and an intact previous sketch. Escape after one or two clicks should cancel only the unfinished gesture.
 5. Add a line between the two ends of a valid arc. Finish Sketch and extrude 3 mm. Expect one closed exact body. Save and reopen it.
@@ -113,7 +133,7 @@ Before testing, save open work and use **Help → About Ferrender → Copy build
 ### 5. Reference image and scale
 
 1. Import a small PNG into an empty sketch and click **Apply**. Check that it lies in the sketch plane, has the correct orientation, and remains behind the drawing while panning, zooming, and using Look At.
-2. Change width, position, rotation, opacity, and visibility; click **Apply** after each accepted change. Confirm the image changes and the geometry does not. Undo/Redo should restore accepted image edits.
+2. Change width, position, rotation, opacity, and visibility; click **Apply** after each accepted change. Use Select to drag the image and its corner handles, including with a rotated image. Confirm only the image moves or scales, and the opposite corner stays fixed during uniform scaling. Undo/Redo should restore whole accepted edits, one per completed drag. Escape should cancel an unfinished drag.
 3. Use **Calibrate from Two Points…**, click two clear landmarks, enter **Known distance = `30 mm`**, and choose **Calibrate and Apply**. Draw or measure between their calibrated positions and check the result. Repeat with a different known distance; cancel an unfinished calibration and confirm the scale does not change.
 4. Save, close, rename the original image file, and reopen the `.ferr` file. The image must still appear. Move the `.ferr` file to a different folder and repeat. This checks embedding rather than a hidden dependency on the original path.
 5. Repeat import with a JPEG. Remove the reference and check that existing sketch entities survive; Undo should restore the reference. Check image behavior with a second sketch on a different plane.

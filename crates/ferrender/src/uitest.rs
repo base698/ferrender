@@ -2,6 +2,8 @@
 //! rendered offscreen on the GPU. Frames are written to `target/uitest/`
 //! for eyeballing.
 
+mod dimensions_v022;
+
 use std::path::PathBuf;
 
 use egui::{Event, Key, Modifiers, PointerButton, Pos2};
@@ -15,7 +17,11 @@ use crate::app::{Action, App, Dialog, Mode, Tool};
 use crate::config::Appearance;
 use crate::recovery::Recovery;
 
+mod reference_v022;
+
 type H<'a> = Harness<'a, App>;
+
+mod drawing_v022;
 
 fn out_dir() -> PathBuf {
     let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/uitest");
@@ -103,11 +109,10 @@ fn sketch_dimension_copy_paste_and_extrude() {
     assert_eq!(sk.constraints.len(), 4, "a rectangle gets horizontal and vertical constraints");
     assert_eq!(h.state().report.dof, 2);
 
-    // Dimension the bottom edge by clicking it, clicking empty space, and typing.
+    // Dimension the bottom edge directly by clicking it and typing.
     run(&mut h, Action::Tool(Tool::Dimension));
-    let (edge, empty) = (at(&h, 25.0, 0.0), at(&h, 25.0, -14.0));
+    let edge = at(&h, 25.0, 0.0);
     click(&mut h, edge);
-    click(&mut h, empty);
     assert!(h.state().value_edit.is_some(), "the dimension box should open");
     h.state_mut().value_edit.as_mut().unwrap().text = "w = 60 mm".into();
     assert!(h.state_mut().commit_value());
@@ -119,10 +124,8 @@ fn sketch_dimension_copy_paste_and_extrude() {
     assert!((widest - 60.0).abs() < 1e-6, "the rectangle should now be 60 wide, got {widest}");
 
     // Typing into the real box works too: the left edge, in inches.
-    let (edge, empty) = (at(&h, 0.0, 15.0), at(&h, -14.0, 15.0));
+    let edge = at(&h, 0.0, 15.0);
     click(&mut h, edge);
-    click(&mut h, empty);
-    h.state_mut().value_edit.as_mut().unwrap().text.clear();
     h.step();
     h.event(Event::Text("1 in".into()));
     h.step();
@@ -1613,7 +1616,7 @@ fn new_curve_tools_close_profiles_and_show_editable_points() {
     h.state_mut().opts.dimensions = false;
     h.run_steps(2);
     run(&mut h, Action::Tool(Tool::Arc3));
-    for (x,y) in [(-25.0,0.0),(-20.0,8.0),(-15.0,0.0)] { let pos=at(&h,x,y); click(&mut h,pos); }
+    for (x,y) in [(-25.0,0.0),(-15.0,0.0),(-20.0,8.0)] { let pos=at(&h,x,y); click(&mut h,pos); }
     let (_, sk) = h.state().sketch().unwrap();
     assert_eq!(sk.entities.len(),1);
     assert_eq!(sk.open_endpoints().len(),2);

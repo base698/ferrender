@@ -1235,7 +1235,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "ferrender"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-io",
  "eframe",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "fr-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "cadrum",

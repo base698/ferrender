@@ -119,7 +119,11 @@ impl Sketch {
         let geom = self.entities[&id].geom;
         let construction = self.entities[&id].construction;
         // What a dimension or midpoint on the entity meant no longer holds for the pieces.
-        let stale = |c: &Constraint| c.refs.contains(&id) && matches!(c.kind, CKind::Distance | CKind::Midpoint | CKind::Equal | CKind::Symmetric);
+        let stale = |c: &Constraint| c.refs.contains(&id) && (
+            matches!(c.kind, CKind::Distance | CKind::Midpoint | CKind::Equal | CKind::Symmetric)
+            // The original sweep describes the whole arc, not a trimmed fragment.
+            || (c.kind == CKind::Angle && c.refs == [id] && matches!(geom, Geom::Arc { .. }))
+        );
         // Trim turns a guided arc into ordinary circular pieces; its former fit
         // point does not define either new piece. Keep that point as a sketch point.
         self.arc_guides.remove(&id);
@@ -155,9 +159,11 @@ impl Sketch {
         self.entities.get_mut(&id).unwrap().geom = piece(geom, from, to);
         if let Some((from, to)) = parts.next() {
             let second = self.add(piece(geom, from, to), construction);
-            let own: Vec<Constraint> = self.constraints.values().filter(|c| c.refs == [id] && matches!(c.kind, CKind::Horizontal | CKind::Vertical)).cloned().collect();
+            let own: Vec<Constraint> = self.constraints.values().filter(|c| c.refs == [id]
+                && (matches!(c.kind, CKind::Horizontal | CKind::Vertical)
+                    || (c.kind == CKind::Angle && matches!(geom, Geom::Line { .. })))).cloned().collect();
             for c in own {
-                let _ = self.add_constraint(c.kind, &[second], None);
+                let _ = self.add_constraint(c.kind, &[second], c.value);
             }
         }
         self.drop_unused(&[first, last]);

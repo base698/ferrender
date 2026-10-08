@@ -188,7 +188,7 @@ impl CKind {
             CKind::Fix => "a point or a line",
             CKind::Distance => "a line, two points, a point and a line, or two lines",
             CKind::Radius | CKind::Diameter => "a circle or arc",
-            CKind::Angle => "two lines",
+            CKind::Angle => "a line, a circular arc, or two lines",
             CKind::PositionX | CKind::PositionY => "one point",
         }
     }
@@ -337,7 +337,8 @@ impl Sketch {
         let ok = match kind {
             CKind::Coincident => pat == [P, P] || pat == [P, L] || pat == [P, C],
             CKind::Horizontal | CKind::Vertical => pat == [L] || pat == [P, P],
-            CKind::Parallel | CKind::Perpendicular | CKind::Collinear | CKind::Angle => pat == [L, L],
+            CKind::Parallel | CKind::Perpendicular | CKind::Collinear => pat == [L, L],
+            CKind::Angle => pat == [L] || pat == [L, L] || (pat == [C] && matches!(self.entities[&r[0].1].geom, Geom::Arc { .. })),
             CKind::Tangent => pat == [L, C] || pat == [C, C],
             CKind::Equal => pat == [L, L] || pat == [C, C],
             CKind::Midpoint => pat == [P, L],
@@ -360,12 +361,27 @@ impl Sketch {
         if kind.value_kind().is_some() != value.is_some() {
             return Err(if value.is_some() { format!("{} takes no value", kind.name()) } else { format!("{} needs a value", kind.name()) });
         }
+        if let Some(v) = &value { self.validate_dimension(kind, &refs, v.v)?; }
         if self.constraints.values().any(|c| c.kind == kind && c.refs == refs) {
             return Err(format!("that {} constraint already exists", kind.name()));
         }
         let id = self.id();
         self.constraints.insert(id, Constraint { kind, refs, value });
         Ok(id)
+    }
+
+    /// Dimensional domains shared by interactive entry, the API and native-file validation.
+    pub fn validate_dimension(&self, kind: CKind, refs: &[Id], value: f64) -> Result<(), String> {
+        if !value.is_finite() { return Err("a dimension must be finite".into()); }
+        if kind == CKind::Angle && let [id] = refs {
+            match self.entities.get(id).map(|e| e.geom) {
+                Some(Geom::Line { .. }) => {}, // Absolute line direction is signed; zero is horizontal.
+                Some(Geom::Arc { .. }) if value > 0.0 && value < 360.0 => {},
+                Some(Geom::Arc { .. }) => return Err("an arc sweep must be greater than 0° and less than 360°".into()),
+                _ => return Err("an angle needs a line or circular arc".into()),
+            }
+        }
+        Ok(())
     }
 
     /// The points an entity is defined by.
@@ -476,6 +492,11 @@ impl Sketch {
             (CKind::PositionY, [p]) => self.pos(*p).y,
             (CKind::Radius, [e]) => self.curve(*e).map_or(0.0, |c| c.1),
             (CKind::Diameter, [e]) => self.curve(*e).map_or(0.0, |c| c.1 * 2.0),
+            (CKind::Angle, [id]) => match self.entities.get(id).map(|e| e.geom) {
+                Some(Geom::Line { a, b }) => (self.pos(b) - self.pos(a)).to_angle().to_degrees(),
+                Some(Geom::Arc { .. }) => self.arc_angles(*id).map_or(0.0, |(_, sweep)| sweep.to_degrees()),
+                _ => 0.0,
+            },
             (CKind::Angle, [a, b]) => match (self.line(*a), self.line(*b)) {
                 (Some(a), Some(b)) => {
                     let (d1, d2) = (a.1 - a.0, b.1 - b.0);

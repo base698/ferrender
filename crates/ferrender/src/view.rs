@@ -11,7 +11,7 @@ use fr_core::sketch::{Constraint, Ref};
 use fr_core::{Axis, Body, CKind, Document, Geom, Id, Kind, ORIGIN, Plane, Sketch, solver};
 use glam::{DVec2, DVec3};
 
-use crate::app::{App, Dialog, Drag, Face, Mode, Picked, Snap, Tool, Typed};
+use crate::app::{App, Dialog, Drag, EditTarget, Face, Mode, Picked, Snap, Tool, Typed};
 use fr_core::measure::Item;
 use crate::{gpu, theme};
 
@@ -549,8 +549,25 @@ fn draw_dimension(app: &App, painter: &Painter, sk: &Sketch, c: &Constraint, awa
             Some(label(painter, rim + out * 34.0, &text, color, outline))
         }
         CKind::Angle => {
-            let (a, b) = (sk.line(c.refs[0])?, sk.line(c.refs[1])?);
-            let at = px((a.0 + a.1 + b.0 + b.1) / 4.0);
+            let at = match c.refs.as_slice() {
+                [entity] => {
+                    if let Some((a, b)) = sk.line(*entity) {
+                        // Leave room for the length dimension on the other side of a line.
+                        let mid = px((a + b) / 2.0);
+                        let direction = (px(b) - px(a)).normalized();
+                        mid + direction.rot90() * 48.0
+                    } else {
+                        let (center, radius) = sk.curve(*entity)?;
+                        let (start, sweep) = sk.arc_angles(*entity)?;
+                        px(center + DVec2::from_angle(start + sweep / 2.0) * radius) + vec2(0.0, -22.0)
+                    }
+                }
+                [first, second] => {
+                    let (a, b) = (sk.line(*first)?, sk.line(*second)?);
+                    px((a.0 + a.1 + b.0 + b.1) / 4.0)
+                }
+                _ => return None,
+            };
             Some(label(painter, at, &app.doc().show(value, Kind::Angle), color, outline))
         }
         _ => None,
@@ -685,7 +702,101 @@ fn toggle(list: &mut Vec<Id>, id: Id, add: bool) {
     }
 }
 
+/// Run before painting: preview motion and a release outside the viewport must
+/// still be handled by the gesture that started here, not by the hovered panel.
+fn update_reference_drag(app: &mut App, ui: &Ui) -> bool {
+    let dragging = app.reference_drag.is_dragging();
+    let available = app.tool == Tool::Select && app.dialog == Dialog::None
+        && app.reference_editor.sketch_id().is_none() && app.value_edit.is_none()
+        && !app.show_params && !app.show_about && app.file_error.is_none() && app.rename.is_none();
+    let sketch = app.sketch().filter(|(_, sk)| sk.reference.as_ref().is_some_and(|image| image.visible))
+        .map(|(sid, sk)| (sid, sk.clone()));
+    if !available || sketch.is_none() {
+        app.reference_drag.clear();
+        return dragging;
+    }
+    if !dragging { return false; }
+    let (focused, released, down, pointer) = ui.input(|i| (i.focused && !i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(false))), i.pointer.button_released(PointerButton::Primary), i.pointer.primary_down(), i.pointer.latest_pos()));
+    if !focused || (!down && !released) {
+        app.reference_drag.cancel_drag();
+        return true;
+    }
+    let (sid, sk) = sketch.unwrap();
+    if !app.reference_drag.selected(sid) {
+        app.reference_drag.clear();
+        return true;
+    }
+    let position = pointer.and_then(|p| sketch_pos(app, &sk, p)).filter(|p| p.is_finite());
+    let Some(position) = position else {
+        app.reference_drag.cancel_drag();
+        app.toast("The pointer cannot be projected onto the sketch plane. Image movement was cancelled.");
+        return true;
+    };
+    let invalid = app.reference_drag.update(position).is_err();
+    if released {
+        match app.reference_drag.finish() {
+            Ok(Some(change)) if change.sketch == sid => {
+                app.sketch_edit(|sk, _| { sk.reference = change.image; Ok(()) });
+            }
+            Err(error) => app.toast(error),
+            _ => {}
+        }
+    } else {
+        ui.ctx().set_cursor_icon(if invalid { egui::CursorIcon::NotAllowed } else { egui::CursorIcon::Grabbing });
+    }
+    ui.ctx().request_repaint();
+    true
+}
+
+/// Returns true only when the image consumes this interaction. Blank canvas
+/// outside the image retains ordinary box selection; sketch hits retain editing.
+fn reference_select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, sid: Id, sk: &Sketch, hover: Hit) -> bool {
+    if app.dialog != Dialog::None || app.show_params || app.show_about || app.file_error.is_some() || app.rename.is_some() { return false; }
+    let Some(image) = sk.reference.as_ref().filter(|i| i.visible) else { return false; };
+    if ui.input(|i| i.modifiers.alt || i.key_down(egui::Key::Space)) { return false; }
+    if let Some(pos) = resp.hover_pos()
+        && let Some(handle) = app.reference_drag.hit(sid, image, sk.plane, app.cam, app.vp, pos, hover == Hit::None) {
+        ui.ctx().set_cursor_icon(handle.cursor());
+    }
+    if resp.drag_started_by(PointerButton::Primary) {
+        let Some(origin) = ui.input(|i| i.pointer.press_origin()) else { return false; };
+        let handle = app.reference_drag.hit(sid, image, sk.plane, app.cam, app.vp, origin, hit(app, sk, origin) == Hit::None);
+        if let Some(handle) = handle {
+            let Some(start) = sketch_pos(app, sk, origin).filter(|p| p.is_finite()) else {
+                app.toast("The pointer cannot be projected onto the sketch plane.");
+                return true;
+            };
+            match app.reference_drag.begin(sid, image, handle, start) {
+                Ok(()) => {
+                    app.sel.clear();
+                    app.dim_refs.clear();
+                    app.drag = Drag::None;
+                    // Include the threshold-crossing frame's movement as well.
+                    let at = ui.input(|i| i.pointer.latest_pos()).and_then(|p| sketch_pos(app, sk, p));
+                    if let Some(at) = at { let _ = app.reference_drag.update(at); }
+                    ui.ctx().request_repaint();
+                }
+                Err(error) => app.toast(error),
+            }
+            return true;
+        }
+        app.reference_drag.clear();
+    }
+    if resp.clicked_by(PointerButton::Primary) {
+        if let Some(pos) = resp.interact_pointer_pos()
+            && app.reference_drag.hit(sid, image, sk.plane, app.cam, app.vp, pos, hover == Hit::None).is_some() {
+            app.reference_drag.select(sid);
+            app.sel.clear();
+            app.dim_refs.clear();
+            return true;
+        }
+        app.reference_drag.clear();
+    }
+    false
+}
+
 fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, sk: &Sketch, hover: Hit) {
+    if reference_select_tool(app, ui, resp, sid, sk, hover) { return; }
     let colors = ViewColors::new(painter.ctx());
     let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
     if resp.drag_started_by(PointerButton::Primary) && !ui.input(|i| i.modifiers.alt || i.key_down(egui::Key::Space)) {
@@ -799,12 +910,7 @@ fn dimension_tool(app: &mut App, resp: &egui::Response, sk: &Sketch, hover: Hit)
     match hover {
         Hit::Label(cid) => app.edit_dimension(cid, pos),
         Hit::Entity(e) => match (sk.ref_kind(e), first, first_kind) {
-            (Some(Ref::Curve), None, _) => {
-                let kind = if matches!(sk.entities[&e].geom, Geom::Circle { .. }) { CKind::Diameter } else { CKind::Radius };
-                app.dim_refs = vec![e];
-                app.new_dimension(kind, vec![e], pos);
-            }
-            (Some(Ref::Line), None, _) => app.dim_refs = vec![e],
+            (Some(Ref::Curve | Ref::Line), None, _) => app.dimension_selection(vec![e], pos),
             (Some(Ref::Line), Some(a), Some(Ref::Line)) if a != e => {
                 let (l1, l2) = (sk.line(a).unwrap(), sk.line(e).unwrap());
                 let (d1, d2) = ((l1.1 - l1.0).normalize_or_zero(), (l2.1 - l2.0).normalize_or_zero());
@@ -845,6 +951,107 @@ fn arc_points(c: DVec2, s: DVec2, e: DVec2) -> Vec<DVec2> {
     (0..=32).map(|i| c + DVec2::from_angle(a0 + sweep * i as f64 / 32.0) * r).collect()
 }
 
+/// Position the bulge of an endpoint-first arc without moving either endpoint.
+/// The pointer picks the side and the nearer of the minor/major circular segments.
+pub(crate) fn arc_bulge_for_diameter(start: DVec2, end: DVec2, pointer: DVec2, diameter: f64) -> Result<DVec2, String> {
+    let chord = end - start;
+    let half = chord.length() / 2.0;
+    if half < 5e-7 { return Err("An arc needs two different endpoints.".into()); }
+    if !diameter.is_finite() || diameter + 1e-9 < half * 2.0 {
+        return Err("The diameter cannot be smaller than the distance between the endpoints.".into());
+    }
+    let normal = chord.normalize().perp();
+    let mid = (start + end) / 2.0;
+    let height = (pointer - mid).dot(normal);
+    let radius = (diameter / 2.0).max(half);
+    let offset = (radius * radius - half * half).max(0.0).sqrt();
+    // The alternate formula avoids cancellation for a nearly straight small bulge.
+    let minor = half * half / (radius + offset);
+    let major = radius + offset;
+    let sag = if (height.abs() - major).abs() < (height.abs() - minor).abs() { major } else { minor };
+    Ok(mid + normal * sag * if height < 0.0 { -1.0 } else { 1.0 })
+}
+
+fn angle_delta(a: f64, b: f64) -> f64 { (a.rem_euclid(360.0) - b.rem_euclid(360.0) + 180.0).rem_euclid(360.0) - 180.0 }
+
+/// Angular hysteresis: acquire within 3°, release beyond 6°.
+fn sticky_angle(raw: f64, candidates: &[(f64, &'static str)], typed: &mut Typed) -> f64 {
+    if let Some((angle, _)) = typed.guide && angle_delta(raw, angle).abs() <= 6.0 { return angle; }
+    typed.guide = candidates.iter().copied().filter(|(angle, _)| angle_delta(raw, *angle).abs() <= 3.0)
+        .min_by(|a, b| angle_delta(raw, a.0).abs().total_cmp(&angle_delta(raw, b.0).abs()));
+    typed.guide.map_or(raw, |g| g.0)
+}
+
+fn update_angle_lock(typed: &mut Typed, shift: bool, current: f64) -> Option<f64> {
+    if shift && !typed.shift_down { typed.locked = Some(current); }
+    if !shift { typed.locked = None; }
+    typed.shift_down = shift;
+    typed.locked
+}
+
+pub(crate) fn line_drawing_snap(sk: &Sketch, start: DVec2, mut snap: Snap, typed: &mut Typed, scale: f64, shift: bool, angle: Option<f64>) -> Snap {
+    let delta = snap.p - start;
+    if delta.length() * scale < 2.0 { return snap; }
+    let raw = delta.to_angle().to_degrees();
+    let mut candidates: Vec<_> = (-4..=4).map(|i| (i as f64 * 45.0, if i % 2 == 0 { "Axis" } else { "45°" })).collect();
+    for (&id, entity) in &sk.entities {
+        if let Some((a, b)) = sk.line(id) {
+            let a = (b - a).to_angle().to_degrees();
+            for (offset, label) in [(0.0, "Parallel"), (90.0, "Perpendicular"), (180.0, "Parallel"), (270.0, "Perpendicular")] {
+                candidates.push((a + offset, label));
+            }
+        } else if let Geom::Arc { s, e, .. } = entity.geom {
+            for point in [s, e] {
+                if sk.pos(point).distance(start) < 1e-6 && let Some(t) = sk.endpoint_tangent(id, point) {
+                    candidates.push((t.to_angle().to_degrees(), "Tangent"));
+                }
+            }
+        }
+    }
+    let inferred = if angle.is_none() && snap.point.is_none() && snap.on.is_none() { sticky_angle(raw, &candidates, typed) } else { typed.guide = None; raw };
+    let locked = update_angle_lock(typed, shift, angle.unwrap_or(inferred));
+    let target = angle.or(locked).unwrap_or(inferred);
+    if angle.is_some() || locked.is_some() || typed.guide.is_some() {
+        let radians = target.rem_euclid(360.0).to_radians();
+        snap.p = start + DVec2::from_angle(radians) * delta.length();
+        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on) = (None, None); }
+        snap.h = radians.sin().abs() < 1e-9;
+        snap.v = radians.cos().abs() < 1e-9;
+    }
+    snap
+}
+
+/// A tangent arc's chord points halfway between its starting and ending tangents.
+/// Locking this signed sweep preserves the turn while letting its radius change.
+pub(crate) fn tangent_drawing_snap(start: DVec2, tangent: DVec2, mut snap: Snap, typed: &mut Typed, shift: bool, sweep: Option<f64>) -> Snap {
+    let delta = snap.p - start;
+    if delta.length() < 1e-6 { return snap; }
+    let tangent = tangent.normalize_or(DVec2::X);
+    let raw = 2.0 * delta.dot(tangent.perp()).atan2(delta.dot(tangent)).to_degrees();
+    let candidates: Vec<_> = (-7..=7).filter(|i| *i != 0).map(|i| (i as f64 * 45.0, "Sweep")).collect();
+    // Sweep values are signed and must not wrap: +315° and -45° are different arcs.
+    if sweep.is_some() || snap.point.is_some() || snap.on.is_some() { typed.guide = None; }
+    if typed.guide.is_some_and(|g| (raw - g.0).abs() > 6.0) { typed.guide = None; }
+    if sweep.is_none() && typed.guide.is_none() && snap.point.is_none() && snap.on.is_none() {
+        typed.guide = candidates.into_iter().filter(|(a, _)| (raw - a).abs() <= 3.0).min_by(|a, b| (raw - a.0).abs().total_cmp(&(raw - b.0).abs()));
+    }
+    let inferred = typed.guide.map_or(raw, |g| g.0);
+    let sign = if raw < 0.0 { -1.0 } else { 1.0 };
+    let current = sweep.map_or(inferred, |a| a * sign);
+    // Shift pressed while the cursor is still on the straight tangent waits for
+    // a usable arc, instead of creating an impossible zero-sweep lock.
+    let usable = current.abs() > 1e-6 && current.abs() < 360.0 - 1e-6;
+    let locked = if usable || typed.locked.is_some() || !shift { update_angle_lock(typed, shift, current) } else { None };
+    let target = sweep.map(|a| a * locked.map_or(sign, |v| v.signum())).or(locked).unwrap_or(inferred);
+    if target.abs() < 1e-6 || target.abs() >= 360.0 - 1e-6 { return snap; }
+    if sweep.is_some() || locked.is_some() || typed.guide.is_some() {
+        let half = (target / 2.0).to_radians();
+        snap.p = start + (tangent * half.cos() + tangent.perp() * half.sin()) * delta.length();
+        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on) = (None, None); }
+    }
+    snap
+}
+
 fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sk: &Sketch) {
     let colors = ViewColors::new(painter.ctx());
     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -854,22 +1061,38 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     let names: &[&str] = match (tool, app.clicks.len()) {
         (Tool::Rect, 1) => &["Width", "Height"],
         (Tool::Circle, 1) => &["Diameter"],
-        (Tool::Line, 1) => &["Length"],
+        (Tool::Line, 1) => &["Length", "Angle"],
+        (Tool::Arc3, 2) => &["Diameter"],
+        (Tool::TangentArc, 1) => &["Sweep"],
         _ => &[],
     };
     if names.is_empty() {
         app.typed = None;
     } else if app.typed.as_ref().is_none_or(|t| t.fields.len() != names.len()) {
-        app.typed = Some(Typed { fields: vec![String::new(); names.len()], active: 0, last: None });
+        app.typed = Some(Typed { fields: vec![String::new(); names.len()], ..Default::default() });
     }
     let hovered = resp.hover_pos().and_then(|p| snap(app, sk, p, from));
     // Over the boxes themselves the pointer is not over the sketch; the shape stays where it was.
     let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false });
     let Some(mut s) = hovered.or(kept) else { return };
+    let attachment = s;
     if let Some(t) = &mut app.typed {
         t.last = Some((s.p, s.point, s.on));
     }
-    let sizes: Vec<Option<f64>> = app.typed.as_ref().map_or(Vec::new(), |t| t.fields.iter().map(|f| App::typed_size(app.doc(), f)).collect());
+    let field_angle = |i: usize| tool == Tool::TangentArc || (tool == Tool::Line && i == 1);
+    let parse = |i: usize, text: &str| if field_angle(i) { App::typed_angle(app.doc(), text, tool == Tool::TangentArc) } else { App::typed_size(app.doc(), text) };
+    let sizes: Vec<Option<f64>> = app.typed.as_ref().map_or(Vec::new(), |t| t.fields.iter().enumerate().map(|(i, f)| parse(i, f)).collect());
+    let shift = ui.input(|i| i.modifiers.shift);
+    if let Some(t) = &mut app.typed {
+        if tool == Tool::Line {
+            s = line_drawing_snap(sk, app.clicks[0].p, s, t, app.cam.scale, shift, sizes.get(1).copied().flatten());
+        } else if tool == Tool::TangentArc && let Some(start) = app.clicks[0].point
+            && let Ok(source) = App::tangent_source(sk, start, &app.sel)
+            && let Some(tangent) = sk.endpoint_tangent(source, start) {
+            s = tangent_drawing_snap(app.clicks[0].p, tangent, s, t, shift, sizes.first().copied().flatten());
+        }
+    }
+    let mut placement_error = None;
     if sizes.iter().any(Option::is_some) {
         // A typed size holds; the pointer still chooses the side or the direction.
         let a = app.clicks[0].p;
@@ -884,9 +1107,14 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
                 }
             }
             Tool::Circle => s.p = a + (s.p - a).try_normalize().unwrap_or(DVec2::X) * sizes[0].unwrap_or(0.0) / 2.0,
-            _ => s.p = a + (s.p - a).try_normalize().unwrap_or(DVec2::X) * sizes[0].unwrap_or(0.0),
+            Tool::Line => if let Some(length) = sizes[0] { s.p = a + (s.p - a).normalize_or(DVec2::X) * length; },
+            Tool::Arc3 => match arc_bulge_for_diameter(a, app.clicks[1].p, s.p, sizes[0].unwrap_or(0.0)) {
+                Ok(p) => s.p = p,
+                Err(e) => placement_error = Some(e),
+            },
+            _ => {},
         }
-        (s.point, s.on) = (None, None);
+        (s.point, s.on) = if s.p.distance(attachment.p) <= 1e-7 { (attachment.point, attachment.on) } else { (None, None) };
     }
     let px = |p: DVec2| on_screen(app, sk, p);
     let stroke = Stroke::new(1.6, if app.opts.construction { colors.construction } else { colors.sketch });
@@ -901,7 +1129,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     match (tool, c.len()) {
         (Tool::Line, 1) => {
             painter.line_segment([px(c[0].p), px(s.p)], stroke);
-            boxes = Some((px((c[0].p + s.p) / 2.0), vec![c[0].p.distance(s.p)]));
+            boxes = Some((px((c[0].p + s.p) / 2.0), vec![c[0].p.distance(s.p), (s.p - c[0].p).to_angle().to_degrees()]));
         }
         (Tool::Rect, 1) => {
             let (a, b) = (c[0].p, s.p);
@@ -932,11 +1160,14 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
         (Tool::Arc3, 2) => {
             let mut preview = Sketch::new(Plane::XY);
             let a = preview.add_point(c[0].p);
-            let b = preview.add_point(c[1].p);
-            let e = preview.add_point(s.p);
-            if let Ok(id) = preview.add_arc3(a, b, e, false) {
+            let e = preview.add_point(c[1].p);
+            let through = preview.add_point(s.p);
+            painter.extend(Shape::dashed_line(&[px(c[0].p), px(c[1].p)], Stroke::new(1.0, colors.dim_ink), 5.0, 4.0));
+            let diameter = if let Ok(id) = preview.add_arc3(a, through, e, false) {
                 painter.add(Shape::line(preview.polyline(id).into_iter().map(px).collect(), stroke));
-            }
+                preview.curve(id).unwrap().1 * 2.0
+            } else { c[0].p.distance(c[1].p) };
+            boxes = Some((px(s.p), vec![diameter]));
         }
         (Tool::TangentArc, 1) => {
             if let Some(start) = c[0].point
@@ -946,6 +1177,9 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
                 let end = preview.add_point(s.p);
                 if let Ok(id) = preview.add_tangent_arc(source, start, end, false) {
                     painter.add(Shape::line(preview.polyline(id).into_iter().map(px).collect(), stroke));
+                    boxes = Some((px(s.p), vec![preview.measure(CKind::Angle, &[id])]));
+                } else {
+                    boxes = Some((px(s.p), vec![90.0]));
                 }
             }
         }
@@ -963,6 +1197,17 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
         }
         _ => {}
     }
+    // Show both soft inference and explicit locks before placement.
+    if let Some(t) = &app.typed {
+        if let Some(angle) = t.locked {
+            let value = if tool == Tool::TangentArc { angle.abs() } else { angle_delta(angle, 0.0) };
+            note(px(s.p) + vec2(0.0, 56.0), format!("{} {}° locked", egui_phosphor::regular::LOCK_SIMPLE, fr_core::units::trim_num(value, 2)));
+        } else if let Some((angle, guide)) = t.guide {
+            let value = if tool == Tool::TangentArc { angle.abs() } else { angle_delta(angle, 0.0) };
+            note(px(s.p) + vec2(0.0, 56.0), format!("{guide} · {}° · Shift to lock", fr_core::units::trim_num(value, 2)));
+        }
+    }
+    if let Some(error) = &placement_error { note(px(s.p) + vec2(0.0, 78.0), error.clone()); }
     // Show what the click will attach to.
     let at = px(s.p);
     if s.point.is_some() {
@@ -986,7 +1231,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
                     for (i, text) in t.fields.iter_mut().enumerate() {
                         ui.label(RichText::new(names[i]).small().color(colors.dim_ink));
                         // Empty, the box shows the size the pointer gives, and typing replaces it.
-                        let r = ui.add(egui::TextEdit::singleline(text).id(egui::Id::new(("typed-size", i))).desired_width(74.0).hint_text(len(live[i])));
+                        let r = ui.add(egui::TextEdit::singleline(text).id(egui::Id::new(("typed-size", i))).desired_width(74.0).hint_text(if field_angle(i) { format!("{}°", fr_core::units::trim_num(live[i], 2)) } else { len(live[i]) }));
                         if !text.is_empty() {
                             let held = sizes.get(i).copied().flatten().is_some();
                             ui.label(RichText::new(if held { egui_phosphor::regular::LOCK_SIMPLE } else { egui_phosphor::regular::WARNING }).color(if held { colors.selected } else { colors.error }));
@@ -1017,15 +1262,55 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
                 app.cancel_tool();
                 return;
             }
-            match t.fields.iter().find(|f| !f.is_empty() && App::typed_size(app.doc(), f).is_none()) {
-                Some(bad) => app.toast(format!("\"{bad}\" is not a size. Try 20 mm, 0.5 in, $w / 2 or w = 20.")),
+            let bad = t.fields.iter().enumerate().find(|(i, f)| !f.trim().is_empty() && if field_angle(*i) { App::typed_angle(app.doc(), f, tool == Tool::TangentArc).is_none() } else { App::typed_size(app.doc(), f).is_none() });
+            match bad {
+                Some((i, bad)) => app.toast(format!("\"{bad}\" is not a valid {}. Use a length such as 20 mm, or an angle such as 30 deg.", names[i].to_lowercase())),
                 None => place = true,
             }
         }
         app.typed = Some(t);
     }
+    if (place || resp.clicked_by(PointerButton::Primary)) && !names.is_empty() {
+        if let Some(t) = &app.typed {
+            if let Some((i, bad)) = t.fields.iter().enumerate().find(|(i, f)| !f.trim().is_empty() && if field_angle(*i) { App::typed_angle(app.doc(), f, tool == Tool::TangentArc).is_none() } else { App::typed_size(app.doc(), f).is_none() }) {
+                app.toast(format!("\"{bad}\" is not a valid {}.", names[i].to_lowercase()));
+                return;
+            }
+        }
+        // TextEdit can receive text and Enter in the same frame. Recompute from the
+        // final text before committing, so a fresh dimension never pulls the first
+        // endpoint away from the position the user already placed.
+        if let Some(t) = &app.typed {
+            let a = app.clicks[0].p;
+            match tool {
+                Tool::Line => {
+                    let direction = t.fields.get(1).and_then(|f| App::typed_angle(app.doc(), f, false)).or(t.locked)
+                        .map(|a| DVec2::from_angle(a.rem_euclid(360.0).to_radians())).unwrap_or_else(|| (s.p - a).normalize_or(DVec2::X));
+                    let length = t.fields.first().and_then(|f| App::typed_size(app.doc(), f)).unwrap_or_else(|| a.distance(s.p));
+                    s.p = a + direction * length;
+                }
+                Tool::Arc3 => if let Some(diameter) = t.fields.first().and_then(|f| App::typed_size(app.doc(), f)) {
+                    match arc_bulge_for_diameter(a, app.clicks[1].p, s.p, diameter) {
+                        Ok(p) => { s.p = p; placement_error = None; },
+                        Err(error) => { app.toast(error); return; },
+                    }
+                },
+                Tool::TangentArc => if let Some(sweep) = t.fields.first().and_then(|f| App::typed_angle(app.doc(), f, true))
+                    && let Some(start) = app.clicks[0].point
+                    && let Ok(source) = App::tangent_source(sk, start, &app.sel)
+                    && let Some(tangent) = sk.endpoint_tangent(source, start) {
+                    s = tangent_drawing_snap(a, tangent, s, &mut t.clone(), shift, Some(sweep));
+                },
+                _ => {},
+            }
+            if t.fields.iter().any(|f| !f.trim().is_empty()) {
+                (s.point, s.on) = if s.p.distance(attachment.p) <= 1e-7 { (attachment.point, attachment.on) } else { (None, None) };
+            }
+        }
+        if let Some(error) = placement_error { app.toast(error); return; }
+    }
     if resp.double_clicked_by(PointerButton::Primary) || resp.secondary_clicked() {
-        app.clicks.clear();
+        app.cancel_tool();
     } else if place {
         app.clicks.push(s);
         app.commit_clicks();
@@ -1044,11 +1329,31 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
 fn value_box(app: &mut App, ui: &Ui) {
     let Some(mut edit) = app.value_edit.clone() else { return };
     let (mut commit, mut cancel) = (false, false);
+    let kind = match &edit.target {
+        EditTarget::New(kind, _) => Some(*kind),
+        EditTarget::Existing(id) => app.sketch().and_then(|(_, sk)| sk.constraints.get(id)).map(|c| c.kind),
+        _ => None,
+    };
+    let title = match kind {
+        Some(CKind::Distance) => "Length / distance",
+        Some(CKind::Radius) => "Radius",
+        Some(CKind::Diameter) => "Diameter",
+        Some(CKind::Angle) => "Angle",
+        Some(CKind::PositionX) => "X position",
+        Some(CKind::PositionY) => "Y position",
+        _ => "Size",
+    };
     egui::Area::new("value-edit".into()).order(egui::Order::Foreground).fixed_pos(edit.pos + vec2(8.0, 8.0)).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut edit.text).desired_width(130.0).hint_text("10 mm, $w / 2, d = 5"));
+            ui.label(title);
+            let mut output = egui::TextEdit::singleline(&mut edit.text).desired_width(160.0).hint_text("10 mm, $w / 2, d = 5").show(ui);
+            let r = &output.response;
             if edit.focus {
                 r.request_focus();
+                output.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0), egui::text::CCursor::new(edit.text.chars().count()),
+                )));
+                output.state.store(ui.ctx(), r.id);
                 edit.focus = false;
             }
             if let Some(e) = &edit.error {
@@ -1071,7 +1376,7 @@ fn value_box(app: &mut App, ui: &Ui) {
     }
 }
 
-fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id) {
+fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, reference_consumed: bool) {
     let Some(sk) = app.session.doc.sketch(sid).cloned() else { return };
     if app.opts.gaps && app.gap_cache.as_ref().is_none_or(|(rev, cached, _)| *rev != app.session.rev || *cached != sid) {
         app.gap_cache = Some((app.session.rev, sid, sk.open_endpoints()));
@@ -1097,14 +1402,11 @@ fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
     }
     if matches!(app.dialog, Dialog::PointCoordinates(_)) { return; }
     if app.value_edit.is_some() {
-        // A click elsewhere confirms the box, or drops it if the value is no good.
-        if resp.clicked() && !app.commit_value() {
-            app.value_edit = None;
-            app.dim_refs.clear();
-        }
+        // Keep invalid values visible so they can be corrected or explicitly cancelled.
+        if resp.clicked() { app.commit_value(); }
     } else {
         match app.tool {
-            Tool::Select => select_tool(app, ui, resp, painter, sid, &sk, hover),
+            Tool::Select => if !reference_consumed { select_tool(app, ui, resp, painter, sid, &sk, hover); },
             Tool::Dimension => dimension_tool(app, resp, &sk, hover),
             Tool::Trim => {
                 if let (true, Hit::Entity(e), Some(pos)) = (resp.clicked_by(PointerButton::Primary), hover, resp.interact_pointer_pos())
@@ -1127,6 +1429,9 @@ fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
             }
             _ => draw_tool(app, ui, resp, painter, &sk),
         }
+    }
+    if app.tool == Tool::Select && let Some(image) = app.reference_drag.preview(sid).or(sk.reference.as_ref()) {
+        app.reference_drag.paint(painter, sid, image, sk.plane, app.cam, app.vp);
     }
     value_box(app, ui);
 }
@@ -1570,24 +1875,25 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     let rect = ui.available_rect_before_wrap();
     let resp = ui.interact(rect, ui.id().with("viewport"), Sense::click_and_drag());
     app.vp = rect;
+    let reference_consumed = update_reference_drag(app, ui);
     if app.fit_pending {
         app.fit_pending = false;
         app.fit();
     }
-    if app.timeline.preview.is_none() {
+    if app.timeline.preview.is_none() && !app.reference_drag.is_dragging() && !reference_consumed {
         navigate(app, ui, &resp);
     }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::Palette::from_ctx(ui.ctx()).background);
-    if let Some((_, sk)) = app.sketch() {
+    if let Some((sid, sk)) = app.sketch() {
         let plane = sk.plane;
-        let image = app.reference_editor.calibration_image().or(sk.reference.as_ref()).cloned();
+        let image = app.reference_drag.preview(sid).or(app.reference_editor.calibration_image()).or(sk.reference.as_ref()).cloned();
         if let Some(image) = image && let Err(error) = app.reference_texture.paint(&painter, &image, plane, app.cam, rect) { app.toast(error); }
     }
     draw_grid(app, &painter);
     draw_bodies(app, ui, &painter);
     match app.mode {
-        Mode::Sketch(sid) => sketch_mode(app, ui, &resp, &painter, sid),
+        Mode::Sketch(sid) => sketch_mode(app, ui, &resp, &painter, sid, reference_consumed),
         Mode::Model => model_mode(app, &resp, &painter),
     }
     let hint = match (&app.dialog, app.mode) {
@@ -1609,6 +1915,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (_, Mode::Sketch(_)) => app.tool.hint(app.clicks.len()),
         _ => "Drag to orbit, Shift-drag or middle-drag to pan, scroll to zoom. Click a face to select it.",
     };
-    let hint = app.reference_editor.calibration_hint().unwrap_or(hint);
+    let reference_hint = if let Mode::Sketch(sid) = app.mode { app.reference_drag.hint(sid) } else { None };
+    let hint = app.reference_editor.calibration_hint().or(reference_hint).unwrap_or(hint);
     painter.text(rect.left_bottom() + vec2(12.0, -10.0), Align2::LEFT_BOTTOM, hint, FontId::proportional(12.5), theme::Palette::from_ctx(ui.ctx()).muted);
 }

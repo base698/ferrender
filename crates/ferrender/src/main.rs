@@ -9,6 +9,7 @@ mod native_theme;
 mod panels;
 mod recovery;
 mod reference;
+mod reference_drag;
 mod theme;
 mod timeline;
 mod view;

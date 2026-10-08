@@ -80,6 +80,7 @@ fn validate_contents(s: &Sketch) -> Result<(), String> {
         if let Some(v) = &c.value {
             expression(&v.expr)?;
             if !v.v.is_finite() { return Err(format!("constraint {id} has a non-finite value")); }
+            s.validate_dimension(c.kind, &c.refs, v.v).map_err(|e| format!("constraint {id}: {e}"))?;
         }
     }
     if s.fixed.iter().any(|id| !s.points.contains_key(id) && !matches!(s.entities.get(id).map(|e|e.geom), Some(Geom::Circle { .. }))) {

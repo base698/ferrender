@@ -57,7 +57,7 @@ impl Tool {
         match (self, placed) {
             (Tool::Select, _) => "Click to select, drag to move. Shift-click adds to the selection.",
             (Tool::Line, 0) => "Click to start a line.",
-            (Tool::Line, _) => "Click the next point. Esc or Enter ends the line.",
+            (Tool::Line, _) => "Click the next point. Hold Shift to lock the angle; Tab types an exact angle. Esc ends the line.",
             (Tool::Rect, 0) => "Click the first corner.",
             (Tool::Rect, _) => "Click the opposite corner.",
             (Tool::Circle, 0) => "Click the centre.",
@@ -66,10 +66,10 @@ impl Tool {
             (Tool::Arc, 1) => "Click where the arc starts.",
             (Tool::Arc, _) => "Click where the arc ends.",
             (Tool::Arc3, 0) => "Click the arc's start point.",
-            (Tool::Arc3, 1) => "Click a point the arc passes through.",
-            (Tool::Arc3, _) => "Click the arc's end point.",
+            (Tool::Arc3, 1) => "Click the arc’s other endpoint.",
+            (Tool::Arc3, _) => "Move to choose the bulge, then click. Type a diameter for an exact size.",
             (Tool::TangentArc, 0) => "Click a line or arc endpoint. At a junction, select the source edge first.",
-            (Tool::TangentArc, _) => "Click the new endpoint; the arc stays tangent to its source.",
+            (Tool::TangentArc, _) => "Click the new endpoint. Hold Shift to keep the sweep angle fixed; the join stays tangent.",
             (Tool::Spline, 0) => "Click the spline's start point.",
             (Tool::Spline, 1) => "Click the first interior fit point.",
             (Tool::Spline, 2) => "Click the second interior fit point.",
@@ -79,7 +79,7 @@ impl Tool {
             (Tool::Polygon, _) => "Click to place a corner.",
             (Tool::Trim, _) => "Click the part of a line, arc or circle to remove. It is cut back to where other geometry crosses it.",
             (Tool::Project, _) => "Click a face of a body to copy its outline into the sketch.",
-            (Tool::Dimension, _) => "Click a line, circle or arc, or two points or lines, then type the size.",
+            (Tool::Dimension, _) => "Click a line, circle or arc to set its size. For an angle or spacing, Shift-select two items first, then choose Dimension.",
         }
     }
 }
@@ -467,6 +467,11 @@ pub struct Typed {
     pub active: usize,
     /// Where the pointer last was, for when it is over the boxes themselves.
     pub last: Option<(DVec2, Option<Id>, Option<Id>)>,
+    /// Soft angular inference, retained through small pointer movements.
+    pub guide: Option<(f64, &'static str)>,
+    /// Explicit Shift lock in degrees: line direction, or signed tangent-arc sweep.
+    pub locked: Option<f64>,
+    pub shift_down: bool,
 }
 
 /// One thing picked with the Inspect tool.
@@ -611,6 +616,7 @@ pub struct App {
     pub gap_cache: Option<(u64, Id, Vec<Id>)>,
     pub reference_editor: crate::reference::Editor,
     pub reference_texture: crate::reference::TextureCache,
+    pub reference_drag: crate::reference_drag::State,
     pub report: solver::Report,
     pub toast: Option<(String, f64)>,
     pub file_error: Option<FileError>,
@@ -688,6 +694,7 @@ impl App {
             gap_cache: None,
             reference_editor: Default::default(),
             reference_texture: Default::default(),
+            reference_drag: Default::default(),
             report: solver::Report::default(),
             toast: None,
             file_error: None,
@@ -865,6 +872,7 @@ impl App {
     fn leave_sketch(&mut self) {
         self.reference_editor.cancel();
         self.reference_texture.clear();
+        self.reference_drag.clear();
         self.mode = Mode::Model;
         self.tool = Tool::Select;
         self.clicks.clear();
@@ -899,6 +907,7 @@ impl App {
 
     /// Abandons whatever the current tool was in the middle of.
     pub fn cancel_tool(&mut self) {
+        self.reference_drag.clear();
         self.clicks.clear();
         self.dim_refs.clear();
         self.value_edit = None;
@@ -925,8 +934,16 @@ impl App {
         let selected = self.sel.clone();
         let mut last = None;
         // Sizes typed into the boxes become dimensions on what is drawn.
-        let typed = self.typed.take().map_or(Vec::new(), |t| t.fields);
+        let drawing = self.typed.take().unwrap_or_default();
+        let locked = drawing.locked;
+        let typed = drawing.fields;
         let size = |d: &mut Document, i: usize| typed.get(i).filter(|t| Self::typed_size(d, t).is_some()).and_then(|t| d.enter(t, Kind::Length).ok());
+        let angle = |d: &mut Document, i: usize| -> Result<Option<fr_core::Value>, String> {
+            if let Some(text) = typed.get(i).filter(|t| !t.trim().is_empty()) {
+                return d.enter(text, Kind::Angle).map(Some);
+            }
+            locked.map(|v| d.enter(&format!("{} deg", if tool == Tool::TangentArc { v.abs() } else { v }), Kind::Angle)).transpose()
+        };
         let done = self.sketch_edit(|sk, d| {
             match tool {
                 Tool::Line => {
@@ -935,12 +952,14 @@ impl App {
                     }
                     let (a, b) = (place(sk, &c[0]), place(sk, &c[1]));
                     let l = sk.add(Geom::Line { a, b }, construction);
-                    if c[1].point.is_none() && (c[1].h || c[1].v) {
+                    let direction = angle(d, 1)?;
+                    if direction.is_none() && c[1].point.is_none() && (c[1].h || c[1].v) {
                         let _ = sk.add_constraint(if c[1].h { CKind::Horizontal } else { CKind::Vertical }, &[l], None);
                     }
                     if let Some(v) = size(d, 0) {
                         sk.add_constraint(CKind::Distance, &[l], Some(v))?;
                     }
+                    if let Some(v) = direction { sk.add_constraint(CKind::Angle, &[l], Some(v))?; }
                     last = Some(b);
                 }
                 Tool::Rect => {
@@ -988,13 +1007,20 @@ impl App {
                 }
                 Tool::Arc3 => {
                     let ids = [place(sk, &c[0]), place(sk, &c[1]), place(sk, &c[2])];
-                    sk.add_arc3(ids[0], ids[1], ids[2], construction)?;
+                    // UI order is endpoints first, bulge last; core/API order remains start-through-end.
+                    let diameter = size(d, 0);
+                    if diameter.as_ref().is_some_and(|v| v.v + 1e-9 < c[0].p.distance(c[1].p)) {
+                        return Err("The diameter cannot be smaller than the distance between the endpoints.".into());
+                    }
+                    let arc = sk.add_arc3(ids[0], ids[2], ids[1], construction)?;
+                    if let Some(v) = diameter { sk.add_constraint(CKind::Diameter, &[arc], Some(v))?; }
                 }
                 Tool::TangentArc => {
                     let start = c[0].point.ok_or("Start at an existing line or arc endpoint.")?;
                     let source = Self::tangent_source(sk, start, &selected)?;
                     let end = place(sk, &c[1]);
-                    sk.add_tangent_arc(source, start, end, construction)?;
+                    let arc = sk.add_tangent_arc(source, start, end, construction)?;
+                    if let Some(v) = angle(d, 0)? { sk.add_constraint(CKind::Angle, &[arc], Some(v))?; }
                 }
                 Tool::Spline => {
                     let ids = [place(sk, &c[0]), place(sk, &c[1]), place(sk, &c[2]), place(sk, &c[3])];
@@ -1073,6 +1099,12 @@ impl App {
         d.value(rhs, Kind::Length).ok().map(|v| v.v).filter(|v| *v > 1e-9)
     }
 
+    /// Angles accept signs and zero for line directions; tangent sweeps use (0°, 360°).
+    pub fn typed_angle(d: &Document, text: &str, sweep: bool) -> Option<f64> {
+        let rhs = text.split_once('=').map_or(text, |p| p.1);
+        d.value(rhs, Kind::Angle).ok().map(|v| v.v).filter(|v| v.is_finite() && (!sweep || (*v > 0.0 && *v < 360.0)))
+    }
+
     /// Applies a constraint to the selection.
     pub fn constrain(&mut self, kind: CKind) {
         let Some((_, sk)) = self.sketch() else { return };
@@ -1140,6 +1172,42 @@ impl App {
         self.value_edit = Some(ValueEdit { target: EditTarget::New(kind, refs), text, pos, focus: true, error: None });
     }
 
+    /// Dimension the selected sketch geometry without requiring another viewport click.
+    pub fn dimension_selection(&mut self, refs: Vec<Id>, pos: Pos2) {
+        let Some((_, sk)) = self.sketch() else { return };
+        if let [cid] = refs.as_slice() && sk.constraints.get(cid).is_some_and(|c| c.value.is_some()) {
+            self.edit_dimension(*cid, pos);
+            return;
+        }
+        use fr_core::sketch::Ref;
+        let kinds: Vec<_> = refs.iter().filter_map(|r| sk.ref_kind(*r)).collect();
+        if kinds.len() != refs.len() {
+            self.toast("Select sketch geometry or one dimension label to edit.");
+            return;
+        }
+        let kind = match kinds.as_slice() {
+            [Ref::Line] => Some(CKind::Distance),
+            [Ref::Curve] => {
+                let existing = sk.constraints.values().find(|c| c.refs == refs && matches!(c.kind, CKind::Radius | CKind::Diameter)).map(|c| c.kind);
+                existing.or(Some(if matches!(sk.entities[&refs[0]].geom, Geom::Circle { .. }) { CKind::Diameter } else { CKind::Radius }))
+            }
+            [Ref::Line, Ref::Line] => {
+                let (a, b) = (sk.line(refs[0]).unwrap(), sk.line(refs[1]).unwrap());
+                let parallel = (a.1 - a.0).normalize_or_zero().perp_dot((b.1 - b.0).normalize_or_zero()).abs() < 0.02;
+                Some(if parallel { CKind::Distance } else { CKind::Angle })
+            }
+            [Ref::Point, Ref::Point] | [Ref::Point, Ref::Line] | [Ref::Line, Ref::Point] => Some(CKind::Distance),
+            [Ref::Point] => { self.dim_refs = refs; return; }
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            self.dim_refs = refs.clone();
+            self.new_dimension(kind, refs, pos);
+        } else if !refs.is_empty() {
+            self.toast("Select a line, circle or arc, or two points or lines to dimension.");
+        }
+    }
+
     /// Confirms the dimension box. Returns false, keeping it open, if the value is not usable.
     pub fn commit_value(&mut self) -> bool {
         let Some(edit) = self.value_edit.clone() else { return true };
@@ -1149,13 +1217,18 @@ impl App {
             let positive = |v: fr_core::Value| if v.v > 0.0 { Ok(v) } else { Err("Dimensions must be greater than zero.".to_owned()) };
             match &edit.target {
                 EditTarget::Existing(cid) => {
-                    let kind = sk.constraints.get(cid).map(|c| c.kind).ok_or("That dimension no longer exists.")?;
+                    let constraint = sk.constraints.get(cid).ok_or("That dimension no longer exists.")?;
+                    let kind = constraint.kind;
+                    let signed = matches!(kind, CKind::PositionX | CKind::PositionY)
+                        || (kind == CKind::Angle && constraint.refs.len() == 1 && sk.line(constraint.refs[0]).is_some());
                     let value = d.enter(&edit.text, kind.value_kind().ok_or("That constraint is not a dimension.")?)?;
-                    sk.constraints.get_mut(cid).unwrap().value = Some(if matches!(kind, CKind::PositionX | CKind::PositionY) { value } else { positive(value)? });
+                    sk.constraints.get_mut(cid).unwrap().value = Some(if signed { value } else { positive(value)? });
                 }
                 EditTarget::New(kind, refs) => {
                     let v = d.enter(&edit.text, kind.value_kind().unwrap())?;
-                    let v = if matches!(kind, CKind::PositionX | CKind::PositionY) { v } else { positive(v)? };
+                    let signed = matches!(kind, CKind::PositionX | CKind::PositionY)
+                        || (*kind == CKind::Angle && refs.len() == 1 && sk.line(refs[0]).is_some());
+                    let v = if signed { v } else { positive(v)? };
                     sk.add_constraint(*kind, refs, Some(v))?;
                 }
                 EditTarget::Fillet(p) | EditTarget::Chamfer(p) => {
@@ -1623,6 +1696,9 @@ impl App {
     }
 
     pub fn run(&mut self, ctx: &Context, a: Action) {
+        if matches!(a, Action::Open | Action::Import | Action::Save | Action::SaveAs | Action::About | Action::Parameters | Action::Recover | Action::View(_) | Action::Fit) {
+            self.reference_drag.clear();
+        }
         match a {
             Action::New => {
                 if self.confirm_discard() {
@@ -1673,6 +1749,7 @@ impl App {
             Action::Paste => self.paste(None),
             Action::Delete => self.delete(),
             Action::SelectAll => {
+                self.reference_drag.clear();
                 if let Some((_, sk)) = self.sketch() {
                     self.sel = sk.entities.keys().copied().chain(sk.points.keys().copied().filter(|p| *p != ORIGIN)).collect();
                     self.tool = Tool::Select;
@@ -1737,7 +1814,10 @@ impl App {
                     self.cancel_tool();
                     self.dialog = Dialog::None;
                     self.tool = t;
-                    if !matches!(t, Tool::Select | Tool::TangentArc) {
+                    if t == Tool::Dimension {
+                        let pos = self.ctx.input(|i| i.pointer.hover_pos()).filter(|p| self.vp.contains(*p)).unwrap_or(self.vp.center());
+                        self.dimension_selection(self.sel.clone(), pos);
+                    } else if !matches!(t, Tool::Select | Tool::TangentArc) {
                         self.sel.clear();
                     }
                 }
@@ -1879,6 +1959,8 @@ impl App {
             }
             Action::Cancel => {
                 if self.reference_editor.sketch_id().is_some() { self.reference_editor.cancel(); return; }
+                if self.reference_drag.is_dragging() { self.reference_drag.cancel_drag(); return; }
+                if let Mode::Sketch(sid) = self.mode && self.reference_drag.selected(sid) { self.reference_drag.clear(); return; }
                 if self.timeline.preview.take().is_some() {
                     return;
                 }

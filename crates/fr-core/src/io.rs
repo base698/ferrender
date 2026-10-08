@@ -12,7 +12,7 @@ use crate::units::Unit;
 
 /// Written into every native file so other tools can recognise it.
 pub const FORMAT: &str = "ferrender";
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STL_BYTES: usize = 128 * 1024 * 1024;
 
@@ -22,6 +22,9 @@ pub fn to_json(doc: &Document) -> String {
     o.insert("format".into(), FORMAT.into());
     // Keep ordinary designs readable by version-1 apps; text needs the new schema.
     let version = if doc.features.iter().any(|f| match &f.kind {
+        crate::doc::FeatureKind::Sketch(s) => s.constraints.values().any(|c| c.kind == crate::sketch::CKind::Angle && c.refs.len() == 1),
+        _ => false,
+    }) { 4 } else if doc.features.iter().any(|f| match &f.kind {
         crate::doc::FeatureKind::Sketch(s) => s.reference.is_some() || !s.arc_guides.is_empty()
             || s.entities.values().any(|e| matches!(e.geom, crate::sketch::Geom::Spline { .. }))
             || s.constraints.values().any(|c| matches!(c.kind, crate::sketch::CKind::PositionX | crate::sketch::CKind::PositionY)),

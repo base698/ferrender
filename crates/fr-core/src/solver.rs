@@ -130,6 +130,19 @@ impl Sys<'_> {
                 (CKind::PositionY, _) => out.push(self.p(x, r[0]).y - v),
                 (CKind::Radius, _) => out.push(self.curve(x, r[0]).1 - v),
                 (CKind::Diameter, _) => out.push(self.curve(x, r[0]).1 * 2.0 - v),
+                (CKind::Angle, [Ref::Line]) => {
+                    let (a, b) = self.line(x, r[0]);
+                    let delta = (b - a).to_angle() - v.rem_euclid(360.0).to_radians();
+                    // Wrap at ±π, so a direction near the negative X axis stays continuous.
+                    out.push(delta.sin().atan2(delta.cos()) * self.size);
+                }
+                (CKind::Angle, [Ref::Curve]) => {
+                    let Geom::Arc { c, s, e } = sk.entities[&r[0]].geom else { unreachable!("angle refs validated") };
+                    let a = self.p(x, s) - self.p(x, c);
+                    let b = self.p(x, e) - self.p(x, c);
+                    let sweep = a.perp_dot(b).atan2(a.dot(b)).rem_euclid(std::f64::consts::TAU);
+                    out.push((sweep - v.to_radians()) * self.size);
+                }
                 (CKind::Angle, _) => {
                     let (a, b) = (self.line(x, r[0]), self.line(x, r[1]));
                     let (d1, d2) = (a.1 - a.0, b.1 - b.0);

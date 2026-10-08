@@ -212,6 +212,8 @@ It is early, and smaller than what it imitates: no assemblies or joints, no loft
 
 The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](docs/SKETCHING_0.2.md) for the controls, limits, and checks. The [30 mm bishop tutorial](BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](docs/tutorials/BISHOP_0.1.md) is preserved.
 
+Version 0.2.2 improves three-point arc placement, dimensions on existing geometry, persistent Shift angle locks, and direct reference-image movement and scaling. See the [0.2.2 guide and focused retest plan](docs/SKETCHING_0.2.2.md).
+
 Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System follows the OS, and your selection is remembered across launches. See the [appearance guide and manual test plan](docs/APPEARANCE.md).
 
 ## Get started
@@ -258,15 +260,21 @@ Use **Help → About Ferrender** to see the version, full source commit, whether
 New Sketch, pick a plane (or click a flat face of a body). Line
 (L), Rectangle (R), Circle (C), Arc (A), Point (P). Clicks snap to existing
 points and onto lines and curves; a nearly horizontal or vertical line becomes
-exactly so. **3-Point Arc** uses start, through, and end points; **Tangent Arc**
+exactly so. **3-Point Arc** uses start, end, then through/bulge points; **Tangent Arc**
 continues from a line or arc endpoint. **Spline** passes through four editable
 fit points. **Point Coordinates…** creates a point or edits a selected one
 with signed X/Y expressions; double-click a point to reopen it. Position
 dimensions keep the coordinates attached to parameters. Drag with Select (S);
-geometry moves as far as its constraints allow. X toggles construction geometry.
+geometry moves as far as its constraints allow. While drawing a line, **Shift**
+freezes its current direction; for a tangent arc it freezes the current sweep.
+Hold Shift through placement to keep that angle as an editable constraint.
+Line Angle, tangent-arc Sweep, and three-point-arc Diameter can also be typed
+while drawing. X toggles construction geometry.
 
 **Reference Image…** embeds a PNG or JPEG behind the active sketch for tracing,
-with placement, opacity, and two-point scale calibration. It contributes no
+with placement, opacity, and two-point scale calibration. With Select, drag an
+empty part of the image to move it, or its selected corner handles to scale
+uniformly. It contributes no
 solid geometry or STL/STEP content. **Highlight Open Ends** in the Sketch
 Palette marks unconnected outline endpoints; it does not repair them or
 certify that a crossing or self-intersecting outline is a valid profile.
@@ -292,9 +300,14 @@ sketch turns black when it is fully constrained.
 
 ### Dimension (D)
 
-Click a line for its length, a circle or arc for its
-diameter or radius, two points or two parallel lines for a distance, two other
-lines for an angle. Double-click a dimension to change it.
+Select an existing line, circle, arc, or dimension label, then press **D** to
+enter or edit its size. Alternatively, choose Dimension first and click the
+item. A line opens its length immediately; a circle uses diameter and an arc
+uses radius. To dimension between two items, Shift-select both before pressing
+D: two points or parallel lines give distance, two other lines give angle,
+and a point plus a line gives perpendicular distance. Double-click a dimension
+to change it. An existing radius or diameter is reopened instead of adding a
+competing size constraint.
 
 ### Values
 
