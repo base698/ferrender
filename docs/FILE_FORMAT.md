@@ -1,0 +1,139 @@
+# The Ferrender file format
+
+This is the normative description of `.ferr` files as written by Ferrender 0.4. It covers the two outer forms (plain JSON and the ZIP container), the document object, every feature kind's fields, how references to geometry are stored, the version table and the compatibility rules. The test `crates/fr-core/tests/format_fixture.rs` freezes one example of every feature kind in `crates/fr-core/tests/fixtures/all-features.ferr`; a change that alters serialization must update both the fixture and this document.
+
+Lengths are millimetres, angles are degrees, coordinates are right-handed with Z up. Numbers are JSON numbers; `f32`-precision is noted where it applies.
+
+## Outer forms
+
+A reader tells the forms apart by the first bytes of the file.
+
+### Plain JSON (first byte `{`)
+
+One UTF-8 JSON object, pretty-printed with two-space indentation, at most 64 MiB. This is the only form before 0.4 and remains the form for any design that has no binary payloads. It is what `git diff`, the MCP `open`/`save` commands and older Ferrender builds work with.
+
+### Container (first bytes `PK`)
+
+A ZIP archive, at most 512 MiB and 4096 entries, written when the design carries a reference image or an imported mesh. Entries, in the order written:
+
+| Entry | Compression | Content |
+|---|---|---|
+| `manifest.json` | Deflate | `{"format":"ferrender-container","version":9,"min_reader":9,"design_version":N,"app":"Ferrender 0.4.0","kernel":{"cadrum":"0.8.20"},"saved":"2026-10-08T21:14:03Z","entries":[...]}`. `min_reader` is the lowest format version that can open the container; `design_version` is the version the JSON inside would carry as a plain file. |
+| `design.json` | Deflate | The document object exactly as the plain form, except that payload fields hold a marker object `{"blob": "<entry name>"}` instead of their base64 string. At most 64 MiB. |
+| `images/<feature id>.png` | Stored | A sketch's reference image, as the normalised RGBA8 PNG the plain form embeds in base64. At most 20 MiB each. |
+| `meshes/<feature id>.tris` | Deflate | An imported mesh: consecutive triangles of three vertices of three little-endian IEEE 754 `f32` values, 36 bytes per triangle, no header. At most 1 000 000 triangles. |
+| `thumbnail.png` | Stored | Optional. A 256 × 256 isometric render of the visible bodies at save time. At most 4 MiB. |
+
+Only these names are allowed; any other entry, any entry whose name contains `\`, starts with `/` or has a `.`/`..`/empty path segment, and any entry declaring more than its limit make the reader refuse the file before decompressing anything. Entry names use `/` as the separator. Entries are not encrypted and never use a compression method other than Deflate or Stored.
+
+**Upgrade and backup.** Every plain file opens in 0.4. When a design that needs the container is saved over an existing plain file, the plain file is first copied, once, to `<name> (0.3 backup).ferr` in the same folder; later saves do not touch the backup. A design without payloads is always written plain, so files from before 0.4 that do not use images or meshes are rewritten byte-compatibly.
+
+## The document object
+
+```json
+{
+  "format": "ferrender",
+  "version": 5,
+  "units": "mm",
+  "params": [ {"name": "width", "expr": "20 mm"} ],
+  "features": [ ... ],
+  "hidden_bodies": [ 3 ],
+  "next_id": 27,
+  "rollback": 12,
+  "active_component": 24
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `format` | string | Always `"ferrender"`. Anything else is refused. |
+| `version` | integer | The **lowest** format version able to read this document (see the table below); a reader refuses a higher version than it knows. Readers ignore fields they do not know, so new optional fields do not raise the version. |
+| `units` | `"mm"`, `"cm"` or `"in"` | Display and entry units. Stored values are millimetres regardless. Default `"mm"`. |
+| `params` | array | Named parameters. `expr` is an expression in the document's units at save time, always with explicit units (`"20 mm"`, `"45 deg"`, `"3"`). At most 1024. |
+| `features` | array | The timeline, in order. At most 10 000. |
+| `hidden_bodies` | array of ids | Bodies hidden in the viewport. |
+| `next_id` | integer | The next feature id. Ids are never reused; pattern copies use `source_feature_id * 1000 + k`. |
+| `rollback` | integer, optional | How many features the timeline currently builds; absent means all. |
+| `active_component` | integer, optional | The component new features go into; absent or `0` is the root. |
+
+### Values
+
+A dimension or feature value is `{"expr": "...", "v": 20.0}`: the expression as typed (unit-pinned, may reference `$params`) and its evaluated value in millimetres, degrees or as a plain number. Readers re-evaluate `expr` on load; `v` is a cache.
+
+### Features
+
+```json
+{ "id": 3, "name": "Extrude1", "suppressed": false, "owner": 24, "kind": { "extrude": { ... } } }
+```
+
+`owner` (optional, default `0`) is the component the feature belongs to and must name a `component` feature earlier in the list. `kind` is an object with exactly one key naming the feature kind. The kinds:
+
+| Key | Fields | Notes |
+|---|---|---|
+| `sketch` | `plane` {`origin`,`x`,`y`}, `points` {id: [x,y]}, `entities` {id: entity}, `constraints` {id: constraint}, `next`, `visible`, `fixed` (array, optional), `arc_guides` (optional), `reference` (optional), `on` (optional plane feature id) | Point `0` is the fixed origin and is always `[0,0]`. `plane` is in the owner component's frame; `on` means the plane follows a construction plane and `plane` is the last resolved value. |
+| `extrude` | `sketch`, `profiles` [[entity ids]], `distance` value, `symmetric`, `op`, `through_all`, `taper` (value, optional) | `profiles` names each region by the entity ids on its outer boundary. `op` ∈ `new`/`join`/`cut`/`intersect`. |
+| `revolve` | `sketch`, `profiles`, `axis` (`"x"`, `"y"` or `{"line": id}`), `angle` value, `op` | |
+| `pattern` | `source` (feature id), `kind`: `{"linear": {axis, count, spacing, second?: {axis, count, spacing}}}`, `{"circular": {axis, count, angle}}` or `{"mirror": {axis}}` | Axes are the owner component's: `0` = X, `1` = Y, `2` = Z. |
+| `primitive` | `shape` (`{"box": {width, depth, height}}`, `{"cylinder": {diameter, height}}`, `{"sphere": {diameter}}`, `{"cone": {bottom_diameter, top_diameter, height}}`, `{"torus": {major_radius, tube_radius}}`; all values), `position` [3 values], `rotate` [3 values], `op` | |
+| `import` | base64 string (plain form) or `{"blob": "meshes/N.tris"}` (container) | Little-endian `f32` triangle soup, 36 bytes per triangle. |
+| `transform` | `body`, `translate` [3 values], `rotate` [3 values], `scale` value | Scale about the origin, rotate about X then Y then Z, then translate. |
+| `combine` | `target`, `tools` [body ids], `op`, `keep_tools` | |
+| `blend` | `body`, `edges` [[x,y,z]], `size` value, `chamfer` (bool), `frame` | A fillet when `chamfer` is false. Edges are named by a point on them; see References. |
+| `shell` | `body`, `faces` [[x,y,z]], `thickness` value, `frame` | |
+| `hole` | `body`, `at` [[x,y,z]], `dir` [x,y,z], `shape` (`simple`/`counterbore`/`countersink`), `fit` (`plain`/`close`/`normal`/`loose`/`tapped`), `thread` (catalog name, e.g. `"M3x0.5"`), `diameter`, `depth`, `tip_angle`, `head_diameter`, `head_depth`, `head_angle` (values or null), `modeled`, `left`, `extra` | `depth` null means through. |
+| `thread` | `body`, `face` [x,y,z], `frame`, `thread`, `offset`, `length`, `left`, `extra` | |
+| `text` | `text`, `plane`, `height`, `depth`, `spacing`, `angle`, `x`, `y` (values), `align` (`left`/`center`/`right`), `op`, `body`, `face`, `frame` | `body`/`face` are set for raised or engraved text on a face, null for free-standing text. |
+| `split` | `body`, `plane` (`{"origin": "XY"\|"XZ"\|"YZ"}`, `{"plane": id}` or `{"face": {...}}`) | |
+| `remove` | `bodies` [ids] | Removes bodies at this point of the timeline. |
+| `component` | `placement` {`translate` [3 values], `rotate` [3 values]}, `visible` | The component's parent is the feature's `owner`. |
+| `plane` | `kind` (`{"offset": {base, distance}}`, `{"midplane": {a, b, flip}}`, `{"three_point": {points}}`), `visible`, `visibility_pinned` | `base`, `a`, `b` are plane references: `{"origin": "XY"}`, `{"plane": id}` or `{"face": {...}}`; `points` are `{"world": [x,y,z]}`, `{"vertex": {...}}` or `{"sketch_point": {sketch, point}}`. |
+
+Sketch entities are `{"type": "line", "a": p, "b": p, "construction": false}`, `{"type": "circle", "c": p, "r": 3.0, ...}`, `{"type": "arc", "c": p, "s": p, "e": p, ...}` (counter-clockwise from `s` to `e`) and `{"type": "spline", "a": p, "b": p, "c": p, "d": p, ...}` (interpolating through four fit points), where `p` is a point id. `arc_guides` records how an arc was drawn: `{"kind": "through", "point": id}` for a three-point arc or `{"kind": "tangent", "source": entity, "start": point}` for a tangent arc. `fixed` lists points and circles that are locked (projected geometry).
+
+Constraints are `{"kind": "...", "refs": [ids], "value": value?}`. Geometric kinds: `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `collinear`, `tangent`, `equal`, `midpoint`, `concentric`, `symmetric`, `fix`. Dimension kinds carry a `value`: `distance`, `radius`, `diameter`, `angle`, `position_x`, `position_y`. `refs` are in the canonical order the solver expects; a file whose refs are out of order is refused.
+
+A sketch's `reference` image is `{"png": <base64 or blob marker>, "name", "pixel_width", "pixel_height", "origin": [x,y], "width", "rotation", "opacity", "visible"}`; the pixels are always a normalised RGBA8 PNG with no metadata, at most 4 megapixels and 8192 on a side.
+
+### References to faces, edges and vertices
+
+Features that act on existing geometry (`blend`, `shell`, `hole`, `thread`, `text`, `plane`, `split`) name a face or edge by **a point on it in world coordinates** and the **bounding box of the body at the time of the pick** (`frame`: `[[xmin,ymin,zmin],[xmax,ymax,zmax]]`). On rebuild the feature looks for the face or edge nearest that point, both where it was and at the same relative position inside the body's current bounds, so the reference survives the body changing size. It can be lost when an earlier feature reshapes that area; the feature then reports an error rather than guessing. 0.4 adds construction-derived tags beside the point (see `docs/0.4-release.md`, feature 3); files without tags keep working by position.
+
+## Version table
+
+| `version` | First written by | Added |
+|---|---|---|
+| 1 | 0.1.0 | The base: sketches with lines, circles and arcs, extrude, revolve, import, transform, combine, pattern, fillet, chamfer, shell, hole, thread. |
+| 2 | 0.1.x | `text`. |
+| 3 | 0.2.0 | Reference images, splines, three-point and tangent arc guides, `position_x`/`position_y` dimensions. |
+| 4 | 0.2.2 | Persistent angle locks (a single-line `angle` constraint). |
+| 5 | 0.3.0 | Components (`owner`, `component`, `active_component`), construction planes (`plane`, `sketch.on`). |
+| 6 | 0.3.0 | Rectangular grid patterns (`pattern.kind.linear.second`). |
+| 7 | 0.3.0 | `primitive`. |
+| 8 | 0.3.0 | `split` and `remove`. |
+| 9 | 0.4.0 | The ZIP container. A plain JSON file is never stamped 9; only `manifest.json`'s `min_reader` carries it. |
+
+The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". There is no migration code: every version's documents deserialize directly, with absent fields taking their defaults. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| Plain file or `design.json` | 64 MiB |
+| Container | 512 MiB, 4096 entries |
+| Features | 10 000 |
+| Parameters | 1024 |
+| Items in one sketch (points + entities + constraints + guides) | 10 000 |
+| Expression length | 4096 bytes |
+| Imported mesh | 1 000 000 triangles |
+| Reference image | 4 megapixels, 8192 px per side, 20 MiB as PNG |
+| Document ids | `next_id` below `u32::MAX / 1000 − 10 000`, because pattern copies take `id * 1000 + k` |
+
+On load the document is validated against these limits and against structural rules (unique ids below `next_id`, points referenced by entities exist, constraint refs canonical, owners precede their features, no component cycles deeper than 32) before anything reaches the solver or the kernel. Broken *dependencies* (a deleted sketch, a face that is gone) are not load errors: the file opens and the feature shows the error in the timeline so it can be repaired.
+
+## Recovery copies
+
+Unsaved work is copied to `<config dir>/recovery/*.ferr-recovery`: a JSON object `{"format": "ferrender-recovery", "path": ..., "saved": <unix seconds>, "doc": <the plain document object>}`. Recovery copies always use the plain form, payloads inline, and are private to the machine.
+
+## Related
+
+`docs/0.4-release.md` for the geometry cache, tags and mesh blobs planned on top of this; `README.md` › Files for the user-facing description.

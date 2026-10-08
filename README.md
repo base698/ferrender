@@ -556,12 +556,18 @@ panel, which is saved to the config file.
 
 ### Files
 
-The native format is `.ferr`: one JSON file holding the units, parameters and
+The native format is `.ferr`: a JSON document holding the units, parameters and
 the feature timeline, with every sketch's points, entities, constraints and
 dimension expressions. Bodies are not stored; they are rebuilt from the
-features on open. Imported meshes and reference images are stored inside it.
-Files that use new sketch types, position dimensions, or reference images
-require a version that supports them; keep a separate copy for older builds.
+features on open. A design that carries reference images or imported meshes is
+saved as a ZIP container instead (since 0.4): the same JSON as `design.json`,
+each image and mesh as its own entry, a `manifest.json` and a `thumbnail.png`.
+Plain designs stay plain JSON, so they diff in git and open in older builds.
+Every earlier `.ferr` opens unchanged; the first time a design with images or
+meshes is saved by 0.4, the old file is kept beside it as `name (0.3 backup).ferr`.
+Files that use features an older build lacks are refused by it with a message;
+[docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) describes both forms and the version
+table.
 
 Unsaved changes are copied, about a second after each one, to a `recovery`
 folder beside the settings. The copy is removed when you save and when the app

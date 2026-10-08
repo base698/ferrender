@@ -1512,6 +1512,8 @@ pub struct Session {
     pub rev: u64,
     /// Goes up whenever the document may have changed.
     pub edits: u64,
+    /// The file at `path` is (or was last written as) a ZIP container rather than plain JSON.
+    pub container: bool,
 }
 
 /// History metadata belonging to the most recent in-progress edit. Keeping
@@ -1531,7 +1533,7 @@ impl Default for Session {
 impl Session {
     pub fn new(mut doc: Document) -> Session {
         let built = doc.rebuild();
-        Session { doc, built, undo: Vec::new(), redo: Vec::new(), checkpoint: None, path: None, dirty: false, rev: 1, edits: 0 }
+        Session { doc, built, undo: Vec::new(), redo: Vec::new(), checkpoint: None, path: None, dirty: false, rev: 1, edits: 0, container: false }
     }
 
     /// Records the current state as an undo step; call before changing the document.
@@ -1621,17 +1623,31 @@ impl Session {
         true
     }
 
-    pub fn save(&mut self, path: &Path) -> Result<(), String> {
-        crate::io::save(&self.doc, path)?;
+    /// Saves as plain JSON, or as a container with a rendered thumbnail when the
+    /// design carries images or meshes. See [`crate::io::save_with`] for the backup rule.
+    pub fn save(&mut self, path: &Path) -> Result<crate::io::Saved, String> {
+        self.save_as(path, None)
+    }
+
+    /// Like [`Session::save`], naming the application in the container manifest.
+    pub fn save_as(&mut self, path: &Path, app: Option<String>) -> Result<crate::io::Saved, String> {
+        let mut extras = crate::io::Extras { thumbnail_png: None, app };
+        if crate::io::needs_container(&self.doc) && self.built.bodies.iter().map(|b| b.mesh.tris.len()).sum::<usize>() <= crate::io::THUMBNAIL_MAX_TRIANGLES {
+            let size = crate::io::THUMBNAIL_SIZE;
+            extras.thumbnail_png = Some(crate::render::snapshot(self, None, size, size).png());
+        }
+        let saved = crate::io::save_with(&self.doc, path, &extras)?;
         self.checkpoint = None;
         self.path = Some(path.to_owned());
+        self.container = saved.container;
         self.dirty = false;
-        Ok(())
+        Ok(saved)
     }
 
     pub fn open(path: &Path) -> Result<Session, String> {
         let mut s = Session::new(crate::io::load(path)?);
         s.path = Some(path.to_owned());
+        s.container = crate::io::is_container(path);
         Ok(s)
     }
 

@@ -1,0 +1,1178 @@
+{
+  "features": [
+    {
+      "id": 1,
+      "kind": {
+        "sketch": {
+          "constraints": {
+            "11": {
+              "kind": "vertical",
+              "refs": [
+                10
+              ]
+            },
+            "12": {
+              "kind": "distance",
+              "refs": [
+                4
+              ],
+              "value": {
+                "expr": "$width",
+                "v": 20.0
+              }
+            },
+            "13": {
+              "kind": "angle",
+              "refs": [
+                4
+              ],
+              "value": {
+                "expr": "0 deg",
+                "v": 0.0
+              }
+            },
+            "5": {
+              "kind": "horizontal",
+              "refs": [
+                4
+              ]
+            },
+            "7": {
+              "kind": "vertical",
+              "refs": [
+                6
+              ]
+            },
+            "9": {
+              "kind": "horizontal",
+              "refs": [
+                8
+              ]
+            }
+          },
+          "entities": {
+            "10": {
+              "a": 3,
+              "b": 0,
+              "construction": false,
+              "type": "line"
+            },
+            "4": {
+              "a": 0,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            },
+            "6": {
+              "a": 2,
+              "b": 1,
+              "construction": false,
+              "type": "line"
+            },
+            "8": {
+              "a": 1,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 14,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              20.0,
+              10.0
+            ],
+            "2": [
+              20.0,
+              0.0
+            ],
+            "3": [
+              0.0,
+              10.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Base",
+      "suppressed": false
+    },
+    {
+      "id": 2,
+      "kind": {
+        "sketch": {
+          "arc_guides": {
+            "7": {
+              "kind": "through",
+              "point": 4
+            }
+          },
+          "constraints": {
+            "15": {
+              "kind": "position_x",
+              "refs": [
+                14
+              ],
+              "value": {
+                "expr": "100 mm",
+                "v": 100.0
+              }
+            },
+            "16": {
+              "kind": "position_y",
+              "refs": [
+                14
+              ],
+              "value": {
+                "expr": "100 mm",
+                "v": 100.0
+              }
+            }
+          },
+          "entities": {
+            "13": {
+              "a": 9,
+              "b": 10,
+              "c": 11,
+              "construction": false,
+              "d": 12,
+              "type": "spline"
+            },
+            "2": {
+              "c": 1,
+              "construction": false,
+              "r": 3.0,
+              "type": "circle"
+            },
+            "7": {
+              "c": 6,
+              "construction": false,
+              "e": 3,
+              "s": 5,
+              "type": "arc"
+            },
+            "8": {
+              "a": 5,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 17,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              40.0,
+              5.0
+            ],
+            "10": [
+              84.0,
+              4.0
+            ],
+            "11": [
+              88.0,
+              -4.0
+            ],
+            "12": [
+              92.0,
+              0.0
+            ],
+            "14": [
+              100.0,
+              100.0
+            ],
+            "3": [
+              60.0,
+              0.0
+            ],
+            "4": [
+              65.0,
+              5.0
+            ],
+            "5": [
+              70.0,
+              0.0
+            ],
+            "6": [
+              65.0,
+              0.0
+            ],
+            "9": [
+              80.0,
+              0.0
+            ]
+          },
+          "visible": true
+        }
+      },
+      "name": "Shapes",
+      "suppressed": false
+    },
+    {
+      "id": 3,
+      "kind": {
+        "extrude": {
+          "distance": {
+            "expr": "5 mm",
+            "v": 5.0
+          },
+          "op": "new",
+          "profiles": [
+            [
+              4,
+              6,
+              8,
+              10
+            ]
+          ],
+          "sketch": 1,
+          "symmetric": false,
+          "through_all": false
+        }
+      },
+      "name": "Extrude1",
+      "suppressed": false
+    },
+    {
+      "id": 4,
+      "kind": {
+        "pattern": {
+          "kind": {
+            "linear": {
+              "axis": 0,
+              "count": 2,
+              "second": {
+                "axis": 1,
+                "count": 2,
+                "spacing": {
+                  "expr": "15 mm",
+                  "v": 15.0
+                }
+              },
+              "spacing": {
+                "expr": "30 mm",
+                "v": 30.0
+              }
+            }
+          },
+          "source": 3
+        }
+      },
+      "name": "Pattern1",
+      "suppressed": false
+    },
+    {
+      "id": 5,
+      "kind": {
+        "plane": {
+          "kind": {
+            "offset": {
+              "base": {
+                "origin": "XY"
+              },
+              "distance": {
+                "expr": "5 mm",
+                "v": 5.0
+              }
+            }
+          },
+          "visibility_pinned": false,
+          "visible": true
+        }
+      },
+      "name": "Plane1",
+      "suppressed": false
+    },
+    {
+      "id": 6,
+      "kind": {
+        "sketch": {
+          "constraints": {},
+          "entities": {
+            "2": {
+              "c": 1,
+              "construction": false,
+              "r": 2.0,
+              "type": "circle"
+            }
+          },
+          "next": 3,
+          "on": 5,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              5.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              10.0,
+              5.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "On plane",
+      "suppressed": false
+    },
+    {
+      "id": 7,
+      "kind": {
+        "extrude": {
+          "distance": {
+            "expr": "4 mm",
+            "v": 4.0
+          },
+          "op": "join",
+          "profiles": [
+            [
+              2
+            ]
+          ],
+          "sketch": 6,
+          "symmetric": false,
+          "through_all": false
+        }
+      },
+      "name": "Extrude2",
+      "suppressed": false
+    },
+    {
+      "id": 8,
+      "kind": {
+        "blend": {
+          "body": 3,
+          "chamfer": false,
+          "edges": [
+            [
+              0.0,
+              0.0,
+              2.5
+            ],
+            [
+              20.0,
+              0.0,
+              2.5
+            ],
+            [
+              10.0,
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0,
+              5.0
+            ],
+            [
+              0.0,
+              10.0,
+              2.5
+            ],
+            [
+              0.0,
+              5.0,
+              0.0
+            ],
+            [
+              0.0,
+              5.0,
+              5.0
+            ],
+            [
+              20.0,
+              10.0,
+              2.5
+            ],
+            [
+              20.0,
+              5.0,
+              0.0
+            ],
+            [
+              20.0,
+              5.0,
+              5.0
+            ],
+            [
+              10.0,
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              10.0,
+              5.0
+            ],
+            [
+              8.0,
+              4.999999999999999,
+              5.0
+            ],
+            [
+              8.0,
+              4.999999999999999,
+              9.0
+            ]
+          ],
+          "frame": [
+            [
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              20.0,
+              10.0,
+              9.0
+            ]
+          ],
+          "size": {
+            "expr": "0.5 mm",
+            "v": 0.5
+          }
+        }
+      },
+      "name": "Fillet1",
+      "suppressed": false
+    },
+    {
+      "id": 9,
+      "kind": {
+        "hole": {
+          "at": [
+            [
+              5.0,
+              5.0,
+              5.0
+            ]
+          ],
+          "body": 3,
+          "depth": null,
+          "diameter": null,
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "extra": null,
+          "fit": "normal",
+          "head_angle": null,
+          "head_depth": null,
+          "head_diameter": null,
+          "left": false,
+          "modeled": false,
+          "shape": "simple",
+          "thread": "M3x0.5",
+          "tip_angle": null
+        }
+      },
+      "name": "Hole1",
+      "suppressed": false
+    },
+    {
+      "id": 10,
+      "kind": {
+        "sketch": {
+          "constraints": {
+            "10": {
+              "kind": "horizontal",
+              "refs": [
+                9
+              ]
+            },
+            "12": {
+              "kind": "vertical",
+              "refs": [
+                11
+              ]
+            },
+            "6": {
+              "kind": "horizontal",
+              "refs": [
+                5
+              ]
+            },
+            "8": {
+              "kind": "vertical",
+              "refs": [
+                7
+              ]
+            }
+          },
+          "entities": {
+            "11": {
+              "a": 4,
+              "b": 1,
+              "construction": false,
+              "type": "line"
+            },
+            "5": {
+              "a": 1,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            },
+            "7": {
+              "a": 3,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            },
+            "9": {
+              "a": 2,
+              "b": 4,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 13,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              30.0,
+              0.0
+            ],
+            "2": [
+              34.0,
+              6.0
+            ],
+            "3": [
+              34.0,
+              0.0
+            ],
+            "4": [
+              30.0,
+              6.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Rim",
+      "suppressed": false
+    },
+    {
+      "id": 11,
+      "kind": {
+        "revolve": {
+          "angle": {
+            "expr": "360 deg",
+            "v": 360.0
+          },
+          "axis": "y",
+          "op": "new",
+          "profiles": [
+            [
+              5,
+              7,
+              9,
+              11
+            ]
+          ],
+          "sketch": 10
+        }
+      },
+      "name": "Revolve1",
+      "suppressed": false
+    },
+    {
+      "id": 12,
+      "kind": {
+        "primitive": {
+          "op": "new",
+          "position": [
+            {
+              "expr": "-30 mm",
+              "v": -30.0
+            },
+            {
+              "expr": "-5 mm",
+              "v": -5.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            }
+          ],
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "shape": {
+            "box": {
+              "depth": {
+                "expr": "10 mm",
+                "v": 10.0
+              },
+              "height": {
+                "expr": "10 mm",
+                "v": 10.0
+              },
+              "width": {
+                "expr": "10 mm",
+                "v": 10.0
+              }
+            }
+          }
+        }
+      },
+      "name": "Box1",
+      "suppressed": false
+    },
+    {
+      "id": 13,
+      "kind": {
+        "primitive": {
+          "op": "new",
+          "position": [
+            {
+              "expr": "-50 mm",
+              "v": -50.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            }
+          ],
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "shape": {
+            "cylinder": {
+              "diameter": {
+                "expr": "6 mm",
+                "v": 6.0
+              },
+              "height": {
+                "expr": "20 mm",
+                "v": 20.0
+              }
+            }
+          }
+        }
+      },
+      "name": "Cylinder1",
+      "suppressed": false
+    },
+    {
+      "id": 14,
+      "kind": {
+        "thread": {
+          "body": 13,
+          "extra": null,
+          "face": [
+            -47.0,
+            0.0,
+            10.0
+          ],
+          "frame": [
+            [
+              -53.0,
+              -3.0,
+              0.0
+            ],
+            [
+              -47.0,
+              3.0,
+              20.0
+            ]
+          ],
+          "left": false,
+          "length": null,
+          "offset": null,
+          "thread": "M6x1"
+        }
+      },
+      "name": "Thread1",
+      "suppressed": false
+    },
+    {
+      "id": 15,
+      "kind": {
+        "shell": {
+          "body": 12,
+          "faces": [
+            [
+              -25.0,
+              0.0,
+              10.0
+            ]
+          ],
+          "frame": [
+            [
+              -30.0,
+              -5.0,
+              0.0
+            ],
+            [
+              -20.0,
+              5.0,
+              10.0
+            ]
+          ],
+          "thickness": {
+            "expr": "1 mm",
+            "v": 1.0
+          }
+        }
+      },
+      "name": "Shell1",
+      "suppressed": false
+    },
+    {
+      "id": 16,
+      "kind": {
+        "text": {
+          "align": "left",
+          "angle": {
+            "expr": "0 deg",
+            "v": 0.0
+          },
+          "body": null,
+          "depth": {
+            "expr": "1 mm",
+            "v": 1.0
+          },
+          "face": null,
+          "frame": null,
+          "height": {
+            "expr": "6 mm",
+            "v": 6.0
+          },
+          "op": "new",
+          "plane": {
+            "origin": [
+              0.0,
+              30.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "spacing": {
+            "expr": "0 mm",
+            "v": 0.0
+          },
+          "text": "FR",
+          "x": {
+            "expr": "0 mm",
+            "v": 0.0
+          },
+          "y": {
+            "expr": "0 mm",
+            "v": 0.0
+          }
+        }
+      },
+      "name": "Text1",
+      "suppressed": false
+    },
+    {
+      "id": 17,
+      "kind": {
+        "import": "AAAAAAAAAAAAAAAAAAAgQQAAAAAAAAAAAAAAAAAAIEEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIEEAAAAAAAAgQQAAAAAAAAAA"
+      },
+      "name": "scan",
+      "suppressed": false
+    },
+    {
+      "id": 18,
+      "kind": {
+        "transform": {
+          "body": 17,
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "scale": {
+            "expr": "1",
+            "v": 1.0
+          },
+          "translate": [
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            },
+            {
+              "expr": "50 mm",
+              "v": 50.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            }
+          ]
+        }
+      },
+      "name": "Transform1",
+      "suppressed": false
+    },
+    {
+      "id": 19,
+      "kind": {
+        "primitive": {
+          "op": "new",
+          "position": [
+            {
+              "expr": "-30 mm",
+              "v": -30.0
+            },
+            {
+              "expr": "-5 mm",
+              "v": -5.0
+            },
+            {
+              "expr": "8 mm",
+              "v": 8.0
+            }
+          ],
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "shape": {
+            "box": {
+              "depth": {
+                "expr": "4 mm",
+                "v": 4.0
+              },
+              "height": {
+                "expr": "4 mm",
+                "v": 4.0
+              },
+              "width": {
+                "expr": "4 mm",
+                "v": 4.0
+              }
+            }
+          }
+        }
+      },
+      "name": "Box2",
+      "suppressed": false
+    },
+    {
+      "id": 20,
+      "kind": {
+        "combine": {
+          "keep_tools": false,
+          "op": "join",
+          "target": 12,
+          "tools": [
+            19
+          ]
+        }
+      },
+      "name": "Combine1",
+      "suppressed": false
+    },
+    {
+      "id": 21,
+      "kind": {
+        "primitive": {
+          "op": "new",
+          "position": [
+            {
+              "expr": "-30 mm",
+              "v": -30.0
+            },
+            {
+              "expr": "-5 mm",
+              "v": -5.0
+            },
+            {
+              "expr": "20 mm",
+              "v": 20.0
+            }
+          ],
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "shape": {
+            "box": {
+              "depth": {
+                "expr": "10 mm",
+                "v": 10.0
+              },
+              "height": {
+                "expr": "10 mm",
+                "v": 10.0
+              },
+              "width": {
+                "expr": "10 mm",
+                "v": 10.0
+              }
+            }
+          }
+        }
+      },
+      "name": "Box3",
+      "suppressed": false
+    },
+    {
+      "id": 22,
+      "kind": {
+        "split": {
+          "body": 21,
+          "plane": {
+            "origin": "XZ"
+          }
+        }
+      },
+      "name": "Split1",
+      "suppressed": false
+    },
+    {
+      "id": 23,
+      "kind": {
+        "remove": {
+          "bodies": [
+            21
+          ]
+        }
+      },
+      "name": "Remove1",
+      "suppressed": false
+    },
+    {
+      "id": 24,
+      "kind": {
+        "component": {
+          "placement": {
+            "rotate": [
+              {
+                "expr": "0 deg",
+                "v": 0.0
+              },
+              {
+                "expr": "0 deg",
+                "v": 0.0
+              },
+              {
+                "expr": "0 deg",
+                "v": 0.0
+              }
+            ],
+            "translate": [
+              {
+                "expr": "0 mm",
+                "v": 0.0
+              },
+              {
+                "expr": "0 mm",
+                "v": 0.0
+              },
+              {
+                "expr": "20 mm",
+                "v": 20.0
+              }
+            ]
+          },
+          "visible": true
+        }
+      },
+      "name": "Bracket",
+      "suppressed": false
+    },
+    {
+      "id": 25,
+      "kind": {
+        "primitive": {
+          "op": "new",
+          "position": [
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            },
+            {
+              "expr": "-20 mm",
+              "v": -20.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            }
+          ],
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "shape": {
+            "sphere": {
+              "diameter": {
+                "expr": "5 mm",
+                "v": 5.0
+              }
+            }
+          }
+        }
+      },
+      "name": "Sphere1",
+      "owner": 24,
+      "suppressed": false
+    }
+  ],
+  "format": "ferrender",
+  "hidden_bodies": [],
+  "next_id": 26,
+  "params": [
+    {
+      "expr": "20 mm",
+      "name": "width"
+    }
+  ],
+  "units": "mm",
+  "version": 8
+}
