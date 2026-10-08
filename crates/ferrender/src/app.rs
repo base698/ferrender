@@ -11,14 +11,9 @@ use serde_json::json;
 
 use crate::ai::Assistant;
 use crate::bridge::Bridge;
-use crate::config::Config;
+use crate::config::{Appearance, Config};
 use crate::recovery::{Found, Recovery};
-use crate::{panels, view};
-
-pub const BG_VIEW: Color32 = Color32::from_rgb(250, 250, 251);
-pub const BG_PANEL: Color32 = Color32::from_rgb(243, 244, 246);
-pub const BG_BAR: Color32 = Color32::from_rgb(236, 237, 240);
-pub const ACCENT: Color32 = Color32::from_rgb(0, 104, 214);
+use crate::{panels, theme, view};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -640,6 +635,7 @@ pub struct App {
     pub recover: Vec<Found>,
     pub ai: Assistant,
     pub config: Config,
+    native_theme: crate::native_theme::NativeTheme,
     pub ctx: Context,
     title: String,
 }
@@ -651,7 +647,10 @@ pub const PRINT_ALLOWANCE: f64 = 0.2;
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> App {
-        setup_style(&cc.egui_ctx);
+        let (config, config_error) = if cfg!(test) { (Config::default(), None) } else { Config::load() };
+        setup_style(&cc.egui_ctx, config.appearance);
+        let native_theme = crate::native_theme::NativeTheme::new(&cc.egui_ctx);
+        theme::apply(&cc.egui_ctx, config.appearance, native_theme.current());
         let gpu = match &cc.wgpu_render_state {
             Some(rs) => {
                 rs.renderer.write().callback_resources.insert(crate::gpu::Gpu::new(&rs.device, rs.target_format));
@@ -659,7 +658,6 @@ impl App {
             }
             None => false,
         };
-        let (config, config_error) = if cfg!(test) { (Config::default(), None) } else { Config::load() };
         let mut app = App {
             session: Session::default(),
             cam: Camera::iso(),
@@ -710,6 +708,7 @@ impl App {
             recover: Vec::new(),
             ai: Assistant::default(),
             config,
+            native_theme,
             ctx: cc.egui_ctx.clone(),
             title: String::new(),
         };
@@ -721,6 +720,14 @@ impl App {
         }
         app.recover = app.recovery.as_ref().map_or(Vec::new(), Recovery::found);
         app
+    }
+
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.config.appearance = appearance;
+        theme::apply(&self.ctx, appearance, self.native_theme.current());
+        if !cfg!(test) && let Err(error) = self.config.save() {
+            self.toast(format!("Appearance changed for this window, but couldn't be saved. {error}"));
+        }
     }
 
     /// Opens an unsaved design left by an app that did not close.
@@ -1970,21 +1977,11 @@ impl App {
     }
 }
 
-fn setup_style(ctx: &Context) {
+fn setup_style(ctx: &Context, appearance: Appearance) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
-    // Light whatever the system says: the viewport and sketch colours are drawn for it.
-    ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::light());
-    ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
-    ctx.set_theme(egui::Theme::Light);
-    ctx.all_styles_mut(|s| {
-        s.visuals.panel_fill = BG_PANEL;
-        s.visuals.window_fill = Color32::from_rgb(250, 250, 251);
-        s.visuals.selection.bg_fill = Color32::from_rgb(190, 220, 252);
-        s.visuals.selection.stroke.color = Color32::from_rgb(20, 60, 120);
-        s.spacing.item_spacing = egui::vec2(6.0, 5.0);
-    });
+    theme::setup(ctx, appearance);
 }
 
 impl eframe::App for App {
@@ -1998,6 +1995,12 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
+        theme::apply(&ctx, self.config.appearance, self.native_theme.current());
+        ui.set_style(ctx.global_style());
+        // Native appearance can change without a window event while it has an override.
+        if !cfg!(test) && self.config.appearance == Appearance::System {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
 
         // Commands from the MCP server and the assistant run here, on the UI thread.
         if let Some(bridge) = self.bridge.take() {
@@ -2032,22 +2035,23 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
         }
 
-        let bar = egui::Frame::new().fill(BG_BAR).inner_margin(egui::Margin::symmetric(10, 4));
+        let colors = theme::Palette::from_ctx(&ctx);
+        let bar = egui::Frame::new().fill(colors.bar).inner_margin(egui::Margin::symmetric(10, 4));
         egui::Panel::top("menu").frame(bar).show(ui, |ui| panels::menu_bar(self, ui));
-        let bar = egui::Frame::new().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(10, 6));
+        let bar = egui::Frame::new().fill(colors.panel).inner_margin(egui::Margin::symmetric(10, 6));
         egui::Panel::top("toolbar").frame(bar).show(ui, |ui| panels::toolbar(self, ui));
-        let bar = egui::Frame::new().fill(BG_BAR).inner_margin(egui::Margin::symmetric(10, 3));
+        let bar = egui::Frame::new().fill(colors.bar).inner_margin(egui::Margin::symmetric(10, 3));
         egui::Panel::bottom("status").frame(bar).show(ui, |ui| {
             panels::status(self, ui);
             if let Some(error) = self.recovery.as_ref().and_then(Recovery::error) {
-                ui.colored_label(Color32::from_rgb(196, 40, 40), "Recovery unavailable — save your work. Retrying…").on_hover_text(error);
+                ui.colored_label(colors.error, "Recovery unavailable — save your work. Retrying…").on_hover_text(error);
             }
         });
-        let bar = egui::Frame::new().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(10, 6));
+        let bar = egui::Frame::new().fill(colors.panel).inner_margin(egui::Margin::symmetric(10, 6));
         egui::Panel::bottom("timeline").frame(bar).show(ui, |ui| panels::timeline(self, ui));
-        let side = egui::Frame::new().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(8, 8));
+        let side = egui::Frame::new().fill(colors.panel).inner_margin(egui::Margin::symmetric(8, 8));
         egui::Panel::left("browser").frame(side).exact_size(230.0).resizable(false).show(ui, |ui| panels::browser(self, ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG_VIEW)).show(ui, |ui| view::viewport(self, ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(colors.background)).show(ui, |ui| view::viewport(self, ui));
         panels::windows(self, &ctx);
 
         if let Some((msg, until)) = &self.toast {

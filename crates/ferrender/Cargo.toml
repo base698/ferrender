@@ -1,13 +1,13 @@
 [package]
 name = "ferrender"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 
 [dependencies]
 eframe = "0.36.2"
 egui = "0.36.2"
 egui-phosphor = "0.14.0"
-fr-core = { version = "0.2.0", path = "../fr-core" }
+fr-core = { version = "0.2.1", path = "../fr-core" }
 glam = "0.34.1"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -17,6 +17,16 @@ ureq = "3.4.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSAppearance", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+async-io = "2.6.0"
+futures-lite = "2.6.1"
+zbus = "5.19.0"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36.2", features = ["wgpu", "eframe"] }

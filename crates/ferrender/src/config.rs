@@ -33,9 +33,19 @@ impl Default for BridgeCfg {
 pub const DEFAULT_PORT: u16 = 47821;
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub appearance: Appearance,
     pub ai: Ai,
     pub bridge: BridgeCfg,
 }
@@ -105,6 +115,20 @@ fn atomic_private_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_defaults_to_system_and_round_trips_without_losing_other_settings() {
+        let old: Config = toml::from_str("[ai]\nmodel = 'custom-model'\n[bridge]\nport = 42\nenabled = false").unwrap();
+        assert_eq!(old.appearance, Appearance::System);
+        for appearance in [Appearance::System, Appearance::Light, Appearance::Dark] {
+            let config = Config { appearance, ..old.clone() };
+            let decoded: Config = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+            assert_eq!(decoded.appearance, appearance);
+            assert_eq!(decoded.ai.model, "custom-model");
+            assert_eq!(decoded.bridge.port, 42);
+            assert!(!decoded.bridge.enabled);
+        }
+    }
 
     #[test]
     fn old_config_keeps_bridge_enabled_and_new_setting_can_disable_it() {

@@ -7,12 +7,9 @@ use fr_core::{Axis, CKind, FeatureKind, Id, Kind, Op, Plane, Unit, threads};
 use serde_json::json;
 
 use crate::ai::Who;
-use crate::app::{ACCENT, Action, App, Dialog, Mode, Tool};
-use crate::view;
-
-const DIM: Color32 = Color32::from_rgb(110, 116, 128);
-const BAD: Color32 = Color32::from_rgb(196, 40, 40);
-const GOOD: Color32 = Color32::from_rgb(34, 150, 70);
+use crate::app::{Action, App, Dialog, Mode, Tool};
+use crate::config::Appearance;
+use crate::{theme::Palette, view};
 
 fn cmd(key: &str) -> String {
     if cfg!(target_os = "macos") { format!("\u{2318}{key}") } else { format!("Ctrl+{key}") }
@@ -31,6 +28,7 @@ fn item(app: &mut App, ui: &mut Ui, label: &str, shortcut: &str, a: Action) {
 }
 
 pub fn menu_bar(app: &mut App, ui: &mut Ui) {
+    let colors = Palette::from_ctx(ui.ctx());
     ui.horizontal(|ui| {
         ui.menu_button("File", |ui| {
             item(app, ui, "New", &cmd("N"), Action::New);
@@ -102,6 +100,18 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             ui.checkbox(&mut app.opts.grid, "Grid");
             ui.checkbox(&mut app.opts.constraints, "Constraints");
             ui.checkbox(&mut app.opts.dimensions, "Dimensions");
+            ui.separator();
+            ui.menu_button("Appearance", |ui| {
+                let mut choice = app.config.appearance;
+                for (value, label) in [(Appearance::System, "System"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")] {
+                    if ui.radio_value(&mut choice, value, label).clicked() {
+                        app.set_appearance(choice);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.label("System follows your OS appearance.");
+            });
         });
         ui.menu_button("Help", |ui| {
             item(app, ui, "About Ferrender", "", Action::About);
@@ -111,39 +121,42 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
                 let ctx = ui.ctx().clone();
                 app.run(&ctx, Action::Assistant);
             }
-            ui.label(RichText::new(format!("{}{}", app.doc_name(), if app.session.dirty { "*" } else { "" })).color(DIM));
+            ui.label(RichText::new(format!("{}{}", app.doc_name(), if app.session.dirty { "*" } else { "" })).color(colors.muted));
         });
     });
 }
 
 /// A toolbar button: an icon over a caption.
 fn big(ui: &mut Ui, glyph: &str, label: &str, selected: bool, tip: &str) -> egui::Response {
+    let colors = Palette::from_ctx(ui.ctx());
     let font = FontId::proportional(11.0);
-    let w = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), DIM).size().x.max(34.0) + 12.0;
+    let w = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), colors.muted).size().x.max(34.0) + 12.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
-    let fill = if selected { Color32::from_rgb(205, 226, 250) } else if resp.hovered() { Color32::from_rgb(226, 229, 235) } else { Color32::TRANSPARENT };
-    ui.painter().rect(rect, 4.0, fill, if selected { Stroke::new(1.0, ACCENT) } else { Stroke::NONE }, StrokeKind::Inside);
-    let ink = if ui.is_enabled() { Color32::from_rgb(40, 44, 54) } else { Color32::from_rgb(170, 174, 182) };
+    let fill = if selected { colors.selection } else if resp.hovered() { colors.hover } else { Color32::TRANSPARENT };
+    ui.painter().rect(rect, 4.0, fill, if selected { Stroke::new(1.0, colors.accent) } else { Stroke::NONE }, StrokeKind::Inside);
+    let ink = if ui.is_enabled() { colors.ink } else { colors.disabled };
     ui.painter().text(rect.center_top() + vec2(0.0, 15.0), Align2::CENTER_CENTER, glyph, FontId::proportional(22.0), ink);
     ui.painter().text(rect.center_bottom() - vec2(0.0, 8.0), Align2::CENTER_CENTER, label, font, ink);
     resp.on_hover_text(tip)
 }
 
 fn group(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+    let colors = Palette::from_ctx(ui.ctx());
     ui.vertical(|ui| {
         ui.horizontal(|ui| add(ui));
         let (r, _) = ui.allocate_exact_size(vec2(ui.min_rect().width(), 11.0), Sense::hover());
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, title, FontId::proportional(9.5), DIM);
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, title, FontId::proportional(9.5), colors.muted);
     });
     ui.separator();
 }
 
 fn constraint_button(app: &mut App, ui: &mut Ui, kind: CKind) {
+    let colors = Palette::from_ctx(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 4.0, Color32::from_rgb(226, 229, 235));
+        ui.painter().rect_filled(rect, 4.0, colors.hover);
     }
-    view::constraint_icon(ui.painter(), rect.shrink(3.0), kind, Color32::from_rgb(40, 44, 54));
+    view::constraint_icon(ui.painter(), rect.shrink(3.0), kind, colors.ink);
     let name = kind.name();
     if resp.on_hover_text(format!("{}{}: select {}, then click.", name[..1].to_uppercase(), &name[1..], kind.needs())).clicked() {
         let ctx = ui.ctx().clone();
@@ -157,6 +170,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
 }
 
 fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
+    let colors = Palette::from_ctx(ui.ctx());
     let ctx = ctx.clone();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -226,8 +240,8 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             let (rect, resp) = ui.allocate_exact_size(vec2(84.0, 58.0), Sense::click());
-            ui.painter().text(rect.center_top() + vec2(0.0, 20.0), Align2::CENTER_CENTER, icon::CHECK_CIRCLE, FontId::proportional(32.0), GOOD);
-            ui.painter().text(rect.center_bottom() - vec2(0.0, 9.0), Align2::CENTER_CENTER, "FINISH SKETCH", FontId::proportional(10.0), Color32::from_rgb(40, 44, 54));
+            ui.painter().text(rect.center_top() + vec2(0.0, 20.0), Align2::CENTER_CENTER, icon::CHECK_CIRCLE, FontId::proportional(32.0), colors.good);
+            ui.painter().text(rect.center_bottom() - vec2(0.0, 9.0), Align2::CENTER_CENTER, "FINISH SKETCH", FontId::proportional(10.0), colors.ink);
             if resp.on_hover_text("Leave the sketch and return to the model").clicked() {
                 app.run(&ctx, Action::FinishSketch);
             }
@@ -302,17 +316,18 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
 }
 
 pub fn status(app: &mut App, ui: &mut Ui) {
+    let colors = Palette::from_ctx(ui.ctx());
     ui.horizontal(|ui| {
         match app.sketch() {
             Some((id, _)) => {
                 let name = app.doc().feature(id).map_or(String::new(), |f| f.name.clone());
                 ui.label(RichText::new(format!("Editing {name}")).strong());
                 if !app.report.ok {
-                    ui.colored_label(BAD, "Constraints conflict");
+                    ui.colored_label(colors.error, "Constraints conflict");
                 } else if app.report.dof == 0 {
-                    ui.colored_label(GOOD, "Fully constrained");
+                    ui.colored_label(colors.good, "Fully constrained");
                 } else {
-                    ui.label(RichText::new(format!("{} degree{} of freedom", app.report.dof, if app.report.dof == 1 { "" } else { "s" })).color(ACCENT));
+                    ui.label(RichText::new(format!("{} degree{} of freedom", app.report.dof, if app.report.dof == 1 { "" } else { "s" })).color(colors.accent));
                 }
             }
             None => {
@@ -324,17 +339,17 @@ pub fn status(app: &mut App, ui: &mut Ui) {
                     let u = app.doc().units;
                     let size = b.mesh.bbox().map_or(glam::DVec3::ZERO, |(lo, hi)| hi - lo) / u.mm();
                     let n = |v: f64| fr_core::units::trim_num(v, 3);
-                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", b.name, if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.tris.len())).color(DIM));
+                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", b.name, if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.tris.len())).color(colors.muted));
                 }
                 if let Some(f) = &app.sel_face
                     && let Some(b) = app.session.built.body(f.body)
                 {
                     let u = app.doc().units;
-                    ui.label(RichText::new(format!("{} face of {}, {} {}\u{b2}", if f.plane.is_some() { "Flat" } else { "Curved" }, b.name, fr_core::units::trim_num(f.area / u.mm().powi(2), 3), u.name())).color(DIM));
+                    ui.label(RichText::new(format!("{} face of {}, {} {}\u{b2}", if f.plane.is_some() { "Flat" } else { "Curved" }, b.name, fr_core::units::trim_num(f.area / u.mm().powi(2), 3), u.name())).color(colors.muted));
                 }
                 let errors = app.session.built.errors.len();
                 if errors > 0 {
-                    ui.colored_label(BAD, format!("{errors} feature{} failed; hover it in the timeline", if errors == 1 { "" } else { "s" }));
+                    ui.colored_label(colors.error, format!("{errors} feature{} failed; hover it in the timeline", if errors == 1 { "" } else { "s" }));
                 }
             }
         }
@@ -348,9 +363,9 @@ pub fn status(app: &mut App, ui: &mut Ui) {
             if unit != app.doc().units {
                 let _ = app.execute(&json!({"op": "set_units", "units": unit.name()}));
             }
-            ui.label(RichText::new("Units").color(DIM));
+            ui.label(RichText::new("Units").color(colors.muted));
             if let Some(b) = &app.bridge {
-                ui.label(RichText::new(format!("MCP channel {}", b.port)).color(DIM)).on_hover_text("Private local connection for AI clients running as your user. Connect with `ferrender mcp`.");
+                ui.label(RichText::new(format!("MCP channel {}", b.port)).color(colors.muted)).on_hover_text("Private local connection for AI clients running as your user. Connect with `ferrender mcp`.");
                 ui.separator();
             }
         });
@@ -398,6 +413,7 @@ fn feature_menu(app: &mut App, ui: &mut Ui, id: Id, suppressed: bool) {
 
 /// Moving the marker is only a preview. Rebuild once, on a primary-button drop.
 fn marker(app: &mut App, ui: &mut Ui) {
+    let colors = Palette::from_ctx(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(vec2(12.0, 24.0), Sense::hover());
     // Keep the interaction ID stable even when the marker changes its timeline slot.
     let sense = if app.timeline.busy() { Sense::hover() } else { Sense::drag() };
@@ -424,7 +440,7 @@ fn marker(app: &mut App, ui: &mut Ui) {
         }
     }
     let hot = !app.timeline.busy() && (resp.hovered() || app.timeline.preview.is_some());
-    let color = if app.timeline.busy() { DIM } else if hot { ACCENT } else { Color32::from_rgb(70, 74, 84) };
+    let color = if app.timeline.busy() { colors.muted } else if hot { colors.accent } else { colors.ink };
     let x = app.timeline.preview.map_or(rect.center().x, |(count, _)| {
         if count == 0 { app.chips.first().map_or(rect.center().x, |c| c.left() - 4.0) }
         else { app.chips.get(count - 1).map_or(rect.center().x, |c| c.right() + 4.0) }
@@ -439,12 +455,13 @@ fn marker(app: &mut App, ui: &mut Ui) {
 }
 
 pub fn timeline(app: &mut App, ui: &mut Ui) {
+    let colors = Palette::from_ctx(ui.ctx());
     egui::ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("TIMELINE").size(10.0).color(DIM));
+            ui.label(RichText::new("TIMELINE").size(10.0).color(colors.muted));
             let features: Vec<(Id, String, &'static str, bool)> = app.doc().features.iter().map(|f| (f.id, f.name.clone(), feature_icon(&f.kind), f.suppressed)).collect();
             if features.is_empty() {
-                ui.label(RichText::new("Features appear here in the order they were made. Start with New Sketch.").color(DIM));
+                ui.label(RichText::new("Features appear here in the order they were made. Start with New Sketch.").color(colors.muted));
             }
             let (active, total) = (app.doc().active(), features.len());
             let mut chips = Vec::new();
@@ -454,7 +471,7 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
                 }
                 let error = app.session.built.errors.get(&id).cloned();
                 let off = suppressed || i >= active;
-                let color = if error.is_some() { BAD } else if off { Color32::from_rgb(170, 174, 182) } else { Color32::from_rgb(40, 44, 54) };
+                let color = if error.is_some() { colors.error } else if off { colors.disabled } else { colors.ink };
                 let chosen = app.mode == Mode::Sketch(id) || app.sel_feature == Some(id);
                 let resp = ui.add(egui::Button::new(RichText::new(format!("{glyph} {name}")).color(color)).selected(chosen));
                 chips.push(resp.rect);
@@ -484,7 +501,7 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
             }
             if app.timeline.busy() {
                 ui.spinner();
-                ui.label(RichText::new("Updating model…").color(DIM));
+                ui.label(RichText::new("Updating model…").color(colors.muted));
             }
             app.chips = chips;
         });
@@ -492,11 +509,13 @@ pub fn timeline(app: &mut App, ui: &mut Ui) {
 }
 
 fn eye(ui: &mut Ui, visible: bool) -> bool {
-    ui.add(egui::Button::new(RichText::new(if visible { icon::EYE } else { icon::EYE_SLASH }).color(if visible { Color32::from_rgb(40, 44, 54) } else { DIM })).frame(false)).on_hover_text("Show or hide").clicked()
+    let colors = Palette::from_ctx(ui.ctx());
+    ui.add(egui::Button::new(RichText::new(if visible { icon::EYE } else { icon::EYE_SLASH }).color(if visible { colors.ink } else { colors.muted })).frame(false)).on_hover_text("Show or hide").clicked()
 }
 
 pub fn browser(app: &mut App, ui: &mut Ui) {
-    ui.label(RichText::new("BROWSER").size(10.0).color(DIM));
+    let colors = Palette::from_ctx(ui.ctx());
+    ui.label(RichText::new("BROWSER").size(10.0).color(colors.muted));
     ui.add_space(2.0);
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.label(RichText::new(format!("{} {}", icon::CUBE, app.doc_name())).strong());
@@ -518,7 +537,7 @@ pub fn browser(app: &mut App, ui: &mut Ui) {
         egui::CollapsingHeader::new(format!("{} Sketches", icon::FOLDER)).default_open(true).show(ui, |ui| {
             let list: Vec<(Id, String, bool)> = app.doc().sketches().map(|(f, s)| (f.id, f.name.clone(), s.visible)).collect();
             if list.is_empty() {
-                ui.label(RichText::new("None yet").color(DIM));
+                ui.label(RichText::new("None yet").color(colors.muted));
             }
             for (id, name, visible) in list {
                 ui.horizontal(|ui| {
@@ -538,7 +557,7 @@ pub fn browser(app: &mut App, ui: &mut Ui) {
         egui::CollapsingHeader::new(format!("{} Bodies", icon::FOLDER)).default_open(true).show(ui, |ui| {
             let list: Vec<(Id, String, bool)> = app.session.built.bodies.iter().map(|b| (b.id, b.name.clone(), !app.doc().hidden_bodies.contains(&b.id))).collect();
             if list.is_empty() {
-                ui.label(RichText::new("None yet").color(DIM));
+                ui.label(RichText::new("None yet").color(colors.muted));
             }
             for (id, name, visible) in list {
                 ui.horizontal(|ui| {
@@ -556,6 +575,7 @@ pub fn browser(app: &mut App, ui: &mut Ui) {
 
 /// A size box with its evaluated result or error next to it.
 fn value_row(app: &App, ui: &mut Ui, label: &str, text: &mut String, kind: Kind) {
+    let colors = Palette::from_ctx(ui.ctx());
     ui.label(label);
     ui.add(egui::TextEdit::singleline(text).desired_width(110.0).hint_text(match kind {
         Kind::Length => "10 mm, $d, d = 5",
@@ -564,8 +584,8 @@ fn value_row(app: &App, ui: &mut Ui, label: &str, text: &mut String, kind: Kind)
     }));
     let rhs = text.split_once('=').map_or(text.as_str(), |p| p.1);
     match app.doc().value(rhs, kind) {
-        Ok(v) => ui.label(RichText::new(format!("= {}{}", app.doc().show(&fr_core::Value { expr: String::new(), v: v.v }, kind), if kind == Kind::Length { format!(" {}", app.doc().units.name()) } else { String::new() })).color(DIM)),
-        Err(e) => ui.label(RichText::new(icon::WARNING).color(BAD)).on_hover_text(e),
+        Ok(v) => ui.label(RichText::new(format!("= {}{}", app.doc().show(&fr_core::Value { expr: String::new(), v: v.v }, kind), if kind == Kind::Length { format!(" {}", app.doc().units.name()) } else { String::new() })).color(colors.muted)),
+        Err(e) => ui.label(RichText::new(icon::WARNING).color(colors.error)).on_hover_text(e),
     };
     ui.end_row();
 }
@@ -582,9 +602,10 @@ fn op_row(ui: &mut Ui, op: &mut Op, allowed: &[Op]) {
 
 /// OK and Cancel, with the preview's error if there is one.
 fn confirm(app: &mut App, ui: &mut Ui, ok: &str) {
+    let colors = Palette::from_ctx(ui.ctx());
     let error = app.preview.as_ref().and_then(|p| p.2.clone());
     if let Some(e) = &error {
-        ui.colored_label(BAD, e);
+        ui.colored_label(colors.error, e);
     }
     ui.horizontal(|ui| {
         if ui.add_enabled(error.is_none(), egui::Button::new(ok)).clicked() {
@@ -598,10 +619,11 @@ fn confirm(app: &mut App, ui: &mut Ui, ok: &str) {
 
 /// A catalog thread chooser, grouped by family. `fits` narrows it to the sizes worth offering.
 fn thread_row(ui: &mut Ui, thread: &mut String, fits: impl Fn(&threads::ThreadSpec) -> bool) {
+    let colors = Palette::from_ctx(ui.ctx());
     ui.label("Thread");
     egui::ComboBox::from_id_salt("thread").width(110.0).selected_text(if thread.is_empty() { "choose" } else { thread.as_str() }).show_ui(ui, |ui| {
         for family in [threads::Family::Metric, threads::Family::Unified] {
-            ui.label(RichText::new(family.label()).color(DIM).small());
+            ui.label(RichText::new(family.label()).color(colors.muted).small());
             for t in threads::CATALOG.iter().filter(|t| t.family == family && fits(t)) {
                 ui.selectable_value(thread, t.name.to_owned(), t.name);
             }
@@ -615,6 +637,7 @@ fn dialog_window(app: &App, title: &str) -> egui::Window<'static> {
 }
 
 fn dialogs(app: &mut App, ctx: &Context) {
+    let colors = Palette::from_ctx(ctx);
     match app.dialog.clone() {
         Dialog::None => {}
         Dialog::PointCoordinates(mut d) => {
@@ -631,7 +654,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 });
                 ui.label("Accepts units and parameters, such as $height / 2.");
                 ui.label("Creates X and Y dimensions. Edit these dimensions to move the point.");
-                if let Some(error) = &d.error { ui.colored_label(egui::Color32::RED, error); }
+                if let Some(error) = &d.error { ui.colored_label(colors.error, error); }
                 app.dialog = Dialog::PointCoordinates(d.clone());
                 ui.horizontal(|ui| {
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -659,7 +682,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         }
                     }
                 });
-                ui.label(RichText::new("or click a flat face of a body.").color(DIM));
+                ui.label(RichText::new("or click a flat face of a body.").color(colors.muted));
                 ui.horizontal(|ui| {
                     ui.label("Offset");
                     ui.add(egui::TextEdit::singleline(&mut app.plane_offset).desired_width(90.0).hint_text("0 mm")).on_hover_text("Distance from the plane or face, for a sketch above or below it");
@@ -681,7 +704,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     ui.label("Profiles");
                     ui.label(match (f.profiles.len(), &f.face) {
                         (_, Some(_)) => RichText::new("1 face"),
-                        (0, None) => RichText::new("click in the viewport").color(ACCENT),
+                        (0, None) => RichText::new("click in the viewport").color(colors.accent),
                         (n, None) => RichText::new(format!("{n} selected")),
                     });
                     ui.end_row();
@@ -721,7 +744,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 });
                 if f.face.is_some() && f.op == Op::Join {
                     let inward = app.doc().value(&f.text, Kind::Length).is_ok_and(|v| v.v < 0.0);
-                    ui.label(RichText::new(if inward { "A negative distance pushes the face in and cuts." } else { "Pulls the face out. A negative distance pushes it in and cuts." }).color(DIM));
+                    ui.label(RichText::new(if inward { "A negative distance pushes the face in and cuts." } else { "Pulls the face out. A negative distance pushes it in and cuts." }).color(colors.muted));
                 }
                 app.dialog = Dialog::Feature(f);
                 confirm(app, ui, "OK");
@@ -740,7 +763,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     }
                     value_row(app, ui, "Scale", &mut t.scale, Kind::Scalar);
                 });
-                ui.label(RichText::new("Scales about the origin, then rotates, then moves.").color(DIM));
+                ui.label(RichText::new("Scales about the origin, then rotates, then moves.").color(colors.muted));
                 app.dialog = Dialog::Transform(t);
                 confirm(app, ui, "OK");
             });
@@ -750,10 +773,10 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 let name = |id: Id| app.session.built.body(id).map_or("?".to_owned(), |b| b.name.clone());
                 egui::Grid::new("combine").num_columns(2).show(ui, |ui| {
                     ui.label("Target");
-                    ui.label(c.target.map_or(RichText::new("click a body").color(ACCENT), |t| RichText::new(name(t))));
+                    ui.label(c.target.map_or(RichText::new("click a body").color(colors.accent), |t| RichText::new(name(t))));
                     ui.end_row();
                     ui.label("Tools");
-                    ui.label(if c.tools.is_empty() { RichText::new(if c.target.is_some() { "click bodies" } else { "\u{2014}" }).color(ACCENT) } else { RichText::new(c.tools.iter().map(|t| name(*t)).collect::<Vec<_>>().join(", ")) });
+                    ui.label(if c.tools.is_empty() { RichText::new(if c.target.is_some() { "click bodies" } else { "\u{2014}" }).color(colors.accent) } else { RichText::new(c.tools.iter().map(|t| name(*t)).collect::<Vec<_>>().join(", ")) });
                     ui.end_row();
                     op_row(ui, &mut c.op, &[Op::Join, Op::Cut, Op::Intersect]);
                     ui.label("");
@@ -805,7 +828,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         value_row(app, ui, if p.kind == 0 { "Angle" } else { "Spacing" }, &mut p.text, if p.kind == 0 { Kind::Angle } else { Kind::Length });
                     }
                 });
-                ui.label(RichText::new("Axes and planes are the model's, through the origin.").color(DIM));
+                ui.label(RichText::new("Axes and planes are the model's, through the origin.").color(colors.muted));
                 app.dialog = Dialog::Pattern(p);
                 confirm(app, ui, "OK");
             });
@@ -815,7 +838,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 egui::Grid::new("blend").num_columns(3).show(ui, |ui| {
                     ui.label("Edges");
                     ui.label(match b.edges.len() {
-                        0 => RichText::new("click edges in the viewport").color(ACCENT),
+                        0 => RichText::new("click edges in the viewport").color(colors.accent),
                         n => RichText::new(format!("{n} selected")),
                     });
                     ui.end_row();
@@ -833,13 +856,13 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 egui::Grid::new("shell").num_columns(3).show(ui, |ui| {
                     ui.label("Open faces");
                     ui.label(match sh.faces.len() {
-                        0 => RichText::new("click faces in the viewport").color(ACCENT),
+                        0 => RichText::new("click faces in the viewport").color(colors.accent),
                         n => RichText::new(format!("{n} selected")),
                     });
                     ui.end_row();
                     value_row(app, ui, "Wall", &mut sh.text, Kind::Length);
                 });
-                ui.label(RichText::new("The wall is measured inward from the outside.").color(DIM));
+                ui.label(RichText::new("The wall is measured inward from the outside.").color(colors.muted));
                 app.dialog = Dialog::Shell(sh);
                 confirm(app, ui, "OK");
             });
@@ -850,7 +873,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 egui::Grid::new("hole").num_columns(3).show(ui, |ui| {
                     ui.label("Position");
                     ui.label(match h.at.len() {
-                        0 => RichText::new("click a flat face").color(ACCENT),
+                        0 => RichText::new("click a flat face").color(colors.accent),
                         1 => RichText::new("1 hole"),
                         n => RichText::new(format!("{n} holes")),
                     });
@@ -929,7 +952,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         Some((major, pitch)) => format!("Threaded {} with a {} pitch", len(major), len(pitch)),
                         None => format!("Drilled {}", len(sizes.diameter)),
                     };
-                    ui.label(RichText::new(format!("{bore}{head}")).color(DIM));
+                    ui.label(RichText::new(format!("{bore}{head}")).color(colors.muted));
                 }
                 app.dialog = Dialog::Hole(h);
                 confirm(app, ui, "OK");
@@ -939,11 +962,11 @@ fn dialogs(app: &mut App, ctx: &Context) {
             dialog_window(app, if t.editing.is_some() { "Edit Text / Emboss" } else { "Text / Emboss" }).show(ctx, |ui| {
                 ui.set_max_width(380.0);
                 if t.editing.is_some() {
-                    ui.label(RichText::new("Later features are hidden while editing this text.").small().color(DIM));
+                    ui.label(RichText::new("Later features are hidden while editing this text.").small().color(colors.muted));
                 }
                 ui.label("Text");
                 ui.add(egui::TextEdit::singleline(&mut t.text).desired_width(340.0).char_limit(128).hint_text("Enter text"));
-                ui.label(RichText::new("Sans Bold · up to 128 characters").small().color(DIM));
+                ui.label(RichText::new("Sans Bold · up to 128 characters").small().color(colors.muted));
                 ui.separator();
                 egui::Grid::new("text_placement").num_columns(2).show(ui, |ui| {
                     ui.label("Place on");
@@ -958,7 +981,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     ui.label("Face");
                     ui.label(match t.body {
                         Some(id) => RichText::new(app.doc().feature(id).map_or("Selected flat face", |f| f.name.as_str())),
-                        None => RichText::new("click a flat face in the viewport").color(ACCENT),
+                        None => RichText::new("click a flat face in the viewport").color(colors.accent),
                     });
                     ui.end_row();
                     ui.label("Operation");
@@ -985,7 +1008,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     value_row(app, ui, "Y offset", &mut t.y, Kind::Length);
                     value_row(app, ui, "Angle", &mut t.angle, Kind::Angle);
                 });
-                ui.label(RichText::new("Offsets and alignment use the baseline at the origin or clicked point. Flat solid faces only; curved wrapping is not available.").small().color(DIM));
+                ui.label(RichText::new("Offsets and alignment use the baseline at the origin or clicked point. Flat solid faces only; curved wrapping is not available.").small().color(colors.muted));
                 app.dialog = Dialog::Text(t);
                 confirm(app, ui, "OK");
             });
@@ -995,7 +1018,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 egui::Grid::new("thread").num_columns(3).show(ui, |ui| {
                     ui.label("On");
                     ui.label(match t.found {
-                        None => RichText::new("click a rod or a hole").color(ACCENT),
+                        None => RichText::new("click a rod or a hole").color(colors.accent),
                         Some((across, internal)) => RichText::new(format!("{} {} {}", fr_core::units::fmt_len(across, app.doc().units), app.doc().units.name(), if internal { "hole" } else { "rod" })),
                     });
                     ui.end_row();
@@ -1023,9 +1046,9 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     (true, _) => "The rod will be turned down to this thread's size.",
                     _ => "A hole of any size is remade to suit the thread;\na rod must be at least the thread's size across.",
                 })
-                .color(DIM));
+                .color(colors.muted));
                 if t.found.is_some() {
-                    ui.label(RichText::new(if t.extra.trim().is_empty() { "No allowance: the exact size. Printed, it will not turn\nin another thread made the same way." } else { "The allowance is room to turn when printed.\nClear it for the exact size." }).color(DIM));
+                    ui.label(RichText::new(if t.extra.trim().is_empty() { "No allowance: the exact size. Printed, it will not turn\nin another thread made the same way." } else { "The allowance is room to turn when printed.\nClear it for the exact size." }).color(colors.muted));
                 }
                 app.dialog = Dialog::Thread(t);
                 confirm(app, ui, "OK");
@@ -1039,7 +1062,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     ui.label(format!("{}  {}", i + 1, p.label));
                 }
                 if m.picks.len() < 2 {
-                    ui.label(RichText::new(if m.picks.is_empty() { "click a point, an edge or a face" } else { "click a second one" }).color(ACCENT));
+                    ui.label(RichText::new(if m.picks.is_empty() { "click a point, an edge or a face" } else { "click a second one" }).color(colors.accent));
                 }
                 if let Some(r) = m.result {
                     ui.separator();
@@ -1062,8 +1085,8 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         }
                         let d = r.to - r.from;
                         for (axis, v) in [("X", d.x), ("Y", d.y), ("Z", d.z)] {
-                            ui.label(RichText::new(format!("\u{394}{axis}")).color(DIM));
-                            ui.label(RichText::new(len(v.abs())).color(DIM));
+                            ui.label(RichText::new(format!("\u{394}{axis}")).color(colors.muted));
+                            ui.label(RichText::new(len(v.abs())).color(colors.muted));
                             ui.end_row();
                         }
                     });
@@ -1088,7 +1111,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         ui.selectable_value(&mut unit, u, u.name());
                     }
                 });
-                ui.label(RichText::new(if unit == Unit::Mm { "Slicers read STL as millimetres, so this prints at true size." } else { "Most slicers assume millimetres; tell yours the file is in these units." }).color(DIM));
+                ui.label(RichText::new(if unit == Unit::Mm { "Slicers read STL as millimetres, so this prints at true size." } else { "Most slicers assume millimetres; tell yours the file is in these units." }).color(colors.muted));
                 app.dialog = Dialog::Export(unit);
                 ui.horizontal(|ui| {
                     if ui.button("Export\u{2026}").clicked() {
@@ -1159,6 +1182,7 @@ fn sketch_palette(app: &mut App, ctx: &Context) {
 }
 
 fn section(app: &mut App, ctx: &Context) {
+    let colors = Palette::from_ctx(ctx);
     if !app.show_section {
         return;
     }
@@ -1181,18 +1205,19 @@ fn section(app: &mut App, ctx: &Context) {
             }
         });
         ui.checkbox(&mut s.flip, "Show the other side");
-        ui.label(RichText::new("Cut faces are hatched. This only changes the view, not the model.").color(DIM));
+        ui.label(RichText::new("Cut faces are hatched. This only changes the view, not the model.").color(colors.muted));
     });
     app.show_section = open;
 }
 
 fn parameters(app: &mut App, ctx: &Context) {
+    let colors = Palette::from_ctx(ctx);
     if !app.show_params {
         return;
     }
     let mut open = true;
     egui::Window::new("Parameters").open(&mut open).resizable(false).default_pos(app.vp.left_top() + vec2(14.0, 14.0)).show(ctx, |ui| {
-        ui.label(RichText::new("Use a parameter in any size box as $name. Changing one rebuilds everything that uses it.").color(DIM));
+        ui.label(RichText::new("Use a parameter in any size box as $name. Changing one rebuilds everything that uses it.").color(colors.muted));
         let rows: Vec<(String, String, String)> = app.doc().params.iter().map(|p| (p.name.clone(), p.expr.clone(), app.doc().show_param(&p.name))).collect();
         egui::Grid::new("params").num_columns(4).striped(true).show(ui, |ui| {
             ui.label(RichText::new("Name").strong());
@@ -1216,7 +1241,7 @@ fn parameters(app: &mut App, ctx: &Context) {
                         app.toast(e);
                     }
                 }
-                ui.label(RichText::new(value).color(DIM));
+                ui.label(RichText::new(value).color(colors.muted));
                 if ui.small_button(icon::TRASH).on_hover_text("Delete").clicked()
                     && let Err(e) = app.execute(&json!({"op": "delete_parameter", "name": name}))
                 {
@@ -1242,6 +1267,7 @@ fn parameters(app: &mut App, ctx: &Context) {
 }
 
 fn assistant(app: &mut App, ctx: &Context) {
+    let colors = Palette::from_ctx(ctx);
     if !app.ai.open {
         return;
     }
@@ -1266,26 +1292,26 @@ fn assistant(app: &mut App, ctx: &Context) {
                     app.toast(e);
                 }
             }
-            ui.label(RichText::new(format!("Saved to {}", crate::config::Config::path().display())).color(DIM).small());
+            ui.label(RichText::new(format!("Saved to {}", crate::config::Config::path().display())).color(colors.muted).small());
             return;
         }
         egui::ScrollArea::vertical().max_height(ui.available_height() - 74.0).auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
             if ai.log.is_empty() {
-                ui.label(RichText::new("Describe a part, or a change to this one. For example: \u{201c}a 60 by 40 mm plate, 5 mm thick, with a 6 mm hole near each corner\u{201d}.").color(DIM));
+                ui.label(RichText::new("Describe a part, or a change to this one. For example: \u{201c}a 60 by 40 mm plate, 5 mm thick, with a 6 mm hole near each corner\u{201d}.").color(colors.muted));
             }
             for (who, text) in &ai.log {
                 match who {
                     Who::User => ui.label(RichText::new(text).strong()),
                     Who::Assistant => ui.label(text),
-                    Who::Action => ui.label(RichText::new(format!("{} {text}", icon::GEAR)).color(DIM).small()),
-                    Who::Error => ui.colored_label(BAD, text),
+                    Who::Action => ui.label(RichText::new(format!("{} {text}", icon::GEAR)).color(colors.muted).small()),
+                    Who::Error => ui.colored_label(colors.error, text),
                 };
                 ui.add_space(3.0);
             }
             if ai.busy() {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("Working\u{2026}").color(DIM));
+                    ui.label(RichText::new("Working\u{2026}").color(colors.muted));
                 });
             }
         });
@@ -1301,7 +1327,7 @@ fn assistant(app: &mut App, ctx: &Context) {
             if ui.add_enabled(!ai.busy(), egui::Button::new("New Chat")).clicked() {
                 ai.clear();
             }
-            ui.label(RichText::new(app.config.model()).color(DIM).small());
+            ui.label(RichText::new(app.config.model()).color(colors.muted).small());
         });
     });
     ai.open = open;
@@ -1346,6 +1372,7 @@ fn view_buttons(app: &mut App, ctx: &Context) {
 
 /// Unsaved designs left behind by a crash, offered when the app starts.
 fn recover(app: &mut App, ctx: &Context) {
+    let colors = Palette::from_ctx(ctx);
     if app.recover.is_empty() {
         return;
     }
@@ -1356,7 +1383,7 @@ fn recover(app: &mut App, ctx: &Context) {
         egui::Grid::new("recover").num_columns(4).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
             for f in app.recover.clone() {
                 ui.label(RichText::new(f.name()).strong()).on_hover_text(f.path.as_ref().map_or("Never saved".to_owned(), |p| p.display().to_string()));
-                ui.label(RichText::new(f.age()).color(DIM));
+                ui.label(RichText::new(f.age()).color(colors.muted));
                 if ui.button("Recover").on_hover_text("Open it here. It stays unsaved until you save it.").clicked() {
                     app.recover(&f);
                 }
@@ -1379,11 +1406,12 @@ fn recover(app: &mut App, ctx: &Context) {
 
 /// Unlike notifications, a failed open/import must survive a slow native picker.
 fn file_error(app: &mut App, ctx: &Context) {
+    let colors = Palette::from_ctx(ctx);
     let Some(error) = app.file_error.clone() else { return };
     egui::Modal::new("file_error".into()).show(ctx, |ui| {
         ui.set_width(460.0);
         ui.heading(&error.title);
-        ui.label(RichText::new(error.path.display().to_string()).color(DIM));
+        ui.label(RichText::new(error.path.display().to_string()).color(colors.muted));
         ui.separator();
         egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| { ui.label(&error.message); });
         ui.add_space(6.0);

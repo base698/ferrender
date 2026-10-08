@@ -144,7 +144,7 @@ impl Editor {
                 } else if self.image.is_some() {
                     calibrate = ui.button("Calibrate from Two Points…").clicked();
                 }
-                if let Some(error) = &self.error { ui.colored_label(Color32::from_rgb(190, 35, 35), error); }
+                if let Some(error) = &self.error { ui.colored_label(crate::theme::Palette::from_ctx(ui.ctx()).error, error); }
                 ui.horizontal(|ui| {
                     apply = ui.add_enabled(self.image.is_some(), egui::Button::new(if measured { "Calibrate and Apply" } else { "Apply" })).clicked();
                     cancel = ui.button("Cancel").clicked();
@@ -185,15 +185,22 @@ impl Editor {
 
     pub fn paint_calibration(&self, painter: &Painter, plane: Plane, camera: Camera, rect: Rect, cursor: Option<DVec2>) {
         let Some(points) = &self.calibration else { return };
-        let color = Color32::from_rgb(210, 55, 30);
+        let color = crate::theme::choose(painter.ctx(), Color32::from_rgb(210, 55, 30), Color32::from_rgb(255, 157, 115));
+        let halo = crate::theme::Palette::from_ctx(painter.ctx()).panel;
         let screen = |p| project(plane, camera, rect, p);
         for (index, point) in points.iter().enumerate() {
             let p = screen(*point);
+            // Two-tone targets remain visible on both the viewport and arbitrary image pixels.
+            painter.circle_stroke(p, 6.0, Stroke::new(4.0, halo));
             painter.circle_stroke(p, 6.0, Stroke::new(2.0, color));
-            painter.text(p + vec2(10.0, -9.0), egui::Align2::LEFT_BOTTOM, format!("{}", index + 1), egui::FontId::proportional(14.0), color);
+            let text = painter.layout_no_wrap(format!("{}", index + 1), egui::FontId::proportional(14.0), color);
+            let label = Rect::from_min_size(p + vec2(9.0, -11.0 - text.size().y), text.size() + vec2(4.0, 4.0));
+            painter.rect_filled(label, 2.0, halo);
+            painter.galley(label.min + vec2(2.0, 2.0), text, color);
         }
         if let Some(first) = points.first()
             && let Some(second) = points.get(1).copied().or(cursor) {
+            painter.line_segment([screen(*first), screen(second)], Stroke::new(3.5, halo));
             painter.line_segment([screen(*first), screen(second)], Stroke::new(1.5, color));
         }
     }

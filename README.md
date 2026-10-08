@@ -69,7 +69,7 @@ Every screenshot here is the real app, driven and rendered offscreen by the test
       <br>
       <sub>The one sketch behind the block. Every <code>fx:</code> is a formula: the circle sits at <code>w / 2</code>, <code>d / 2</code>.</sub>
       <h3>Dimensions that are formulas</h3>
-      Draw roughly, then say what you mean: horizontal, tangent, equal, 30 from that edge. The status bar counts the freedom left, and the sketch turns black when nothing can move. Position dimensions and geometric constraints preserve your intent; a conflicting edit is refused.
+      Draw roughly, then say what you mean: horizontal, tangent, equal, 30 from that edge. The status bar counts the freedom left and confirms when the sketch is fully constrained. Position dimensions and geometric constraints preserve your intent; a conflicting edit is refused.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/typed.jpg" alt="A rectangle being drawn from the origin with two small boxes above it, Width holding w = 48 with a lock and Height being typed as 0.75 in" width="100%">
@@ -211,6 +211,8 @@ It is early, and smaller than what it imitates: no assemblies or joints, no loft
 ## Sketching improvements in 0.2
 
 The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](docs/SKETCHING_0.2.md) for the controls, limits, and checks. The [30 mm bishop tutorial](BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](docs/tutorials/BISHOP_0.1.md) is preserved.
+
+Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System follows the OS, and your selection is remembered across launches. See the [appearance guide and manual test plan](docs/APPEARANCE.md).
 
 ## Get started
 

@@ -12,6 +12,7 @@ use glam::{DVec2, DVec3};
 use serde_json::json;
 
 use crate::app::{Action, App, Dialog, Mode, Tool};
+use crate::config::Appearance;
 use crate::recovery::Recovery;
 
 type H<'a> = Harness<'a, App>;
@@ -24,6 +25,8 @@ fn out_dir() -> PathBuf {
 
 fn harness<'a>() -> H<'a> {
     let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).wgpu().build_eframe(|cc| App::new(cc, None));
+    // Existing pixel checks exercise Light, independently of the test host's desktop.
+    h.state_mut().set_appearance(Appearance::Light);
     h.run_steps(3);
     h
 }
@@ -1080,7 +1083,117 @@ fn typed_sizes_while_drawing_and_measure() {
 
 /// These command-boundary regressions need no GPU or native window.
 fn state_harness<'a>() -> H<'a> {
-    Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_eframe(|cc| App::new(cc, None))
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_eframe(|cc| App::new(cc, None));
+    h.state_mut().set_appearance(Appearance::Light);
+    h.step();
+    h
+}
+
+#[test]
+fn appearance_follows_live_system_events_and_manual_overrides() {
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_eframe(|cc| App::new(cc, None));
+    assert_eq!(h.state().config.appearance, Appearance::System, "new installations follow the OS");
+    // kittest forces its own theme after App::new; restore the app's selection.
+    h.state_mut().set_appearance(Appearance::System);
+    h.input_mut().system_theme = None;
+    h.run_steps(2);
+    assert_eq!(h.ctx.theme(), egui::Theme::Light, "a desktop that cannot report its theme uses the Light fallback");
+
+    for theme in [egui::Theme::Dark, egui::Theme::Light, egui::Theme::Dark] {
+        h.input_mut().system_theme = Some(theme);
+        h.run_steps(2);
+        assert_eq!(h.ctx.theme() == egui::Theme::Dark, theme == egui::Theme::Dark, "System follows each OS change without restarting");
+        assert_eq!(h.state().config.appearance, Appearance::System);
+    }
+
+    for (appearance, dark) in [(Appearance::Light, false), (Appearance::Dark, true)] {
+        h.state_mut().set_appearance(appearance);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            h.input_mut().system_theme = Some(theme);
+            h.run_steps(2);
+            assert_eq!(h.ctx.theme() == egui::Theme::Dark, dark, "a manual appearance overrides OS events");
+            assert_eq!(h.state().config.appearance, appearance);
+        }
+    }
+
+    h.input_mut().system_theme = Some(egui::Theme::Light);
+    h.step();
+    h.state_mut().set_appearance(Appearance::System);
+    h.run_steps(2);
+    assert_eq!(h.ctx.theme(), egui::Theme::Light, "returning to System immediately uses the current OS appearance");
+}
+
+#[test]
+fn appearance_menu_changes_theme_without_editing_or_rebuilding_the_design() {
+    let mut h = state_harness();
+    plate(&mut h);
+    h.state_mut().session.dirty = false;
+    let document = h.state().doc().clone();
+    let session = &h.state().session;
+    let original = (session.rev, session.edits, session.dirty, volume(&h), h.state().cam);
+
+    for (label, appearance, dark) in [("Dark", Appearance::Dark, true), ("Light", Appearance::Light, false), ("System", Appearance::System, true)] {
+        h.input_mut().system_theme = Some(egui::Theme::Dark);
+        h.get_by_label("View").click();
+        h.run_steps(2);
+        h.get_by_label_contains("Appearance").click();
+        h.run_steps(2);
+        h.get_by_label(label).click();
+        h.run_steps(3);
+        assert_eq!(h.state().config.appearance, appearance);
+        assert_eq!(h.ctx.theme() == egui::Theme::Dark, dark);
+        assert_eq!(h.state().doc(), &document, "appearance is an app setting, not a document edit");
+        let session = &h.state().session;
+        assert_eq!((session.rev, session.edits, session.dirty, volume(&h), h.state().cam), original);
+    }
+}
+
+#[test]
+fn appearance_renders_sketch_dialog_and_model_in_both_themes() {
+    let mut h = harness();
+    h.state_mut().opts.grid = false;
+    h.state_mut().create_sketch(Plane::XY);
+    h.state_mut().execute(&json!({"op":"add_geometry", "items":[
+        {"type":"rect", "from":[0,0], "to":[40,20]},
+        {"type":"circle", "center":[10,10], "radius":4}
+    ]})).unwrap();
+    h.state_mut().fit();
+    h.run_steps(3);
+    run(&mut h, Action::PointCoordinates);
+    for (name, appearance, dark) in [("light", Appearance::Light, false), ("dark", Appearance::Dark, true)] {
+        h.state_mut().set_appearance(appearance);
+        let img = save(&mut h, &format!("appearance-{name}-sketch-dialog.png"));
+        h.get_by_label("Place Point");
+        assert_eq!(h.ctx.theme() == egui::Theme::Dark, dark);
+        let sample = h.state().vp.left_top() + egui::vec2(25.0, 100.0);
+        let bg = img.get_pixel(sample.x as u32, sample.y as u32).0;
+        let expected = crate::theme::Palette::from_ctx(&h.ctx).background.to_array();
+        assert_eq!(bg, expected, "{name} viewport must use the current palette");
+        let edge = at(&h, 20.0, 0.0);
+        let visible = (-3..=3).any(|dy| (-3..=3).any(|dx| {
+            let p = img.get_pixel((edge.x as i32 + dx) as u32, (edge.y as i32 + dy) as u32).0;
+            (0..3).any(|i| p[i].abs_diff(bg[i]) > 60)
+        }));
+        assert!(visible, "sketch edges must contrast with the {name} background");
+    }
+
+    let mut h = harness();
+    h.state_mut().opts.grid = false;
+    plate(&mut h);
+    for gpu in [true, false] {
+        h.state_mut().gpu = gpu;
+        for (name, appearance) in [("light", Appearance::Light), ("dark", Appearance::Dark)] {
+            h.state_mut().set_appearance(appearance);
+            let backend = if gpu { "gpu" } else { "cpu" };
+            let img = save(&mut h, &format!("appearance-{name}-{backend}-model.png"));
+            let point = crate::view::to_screen(h.state(), DVec3::new(20.0, 10.0, 10.0));
+            let body = img.get_pixel(point.x as u32, point.y as u32).0;
+            let bg = crate::theme::Palette::from_ctx(&h.ctx).background.to_array();
+            assert!((0..3).any(|i| body[i].abs_diff(bg[i]) > 60), "the shaded solid must remain visible in {name}/{backend}: {body:?} vs {bg:?}");
+            let sample = h.state().vp.left_top() + egui::vec2(25.0, 100.0);
+            assert_eq!(img.get_pixel(sample.x as u32, sample.y as u32).0, bg, "{backend} must leave the current viewport background visible");
+        }
+    }
 }
 
 #[test]

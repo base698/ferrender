@@ -11,16 +11,45 @@ use fr_core::sketch::{Constraint, Ref};
 use fr_core::{Axis, Body, CKind, Document, Geom, Id, Kind, ORIGIN, Plane, Sketch, solver};
 use glam::{DVec2, DVec3};
 
-use crate::app::{ACCENT, App, BG_VIEW, Dialog, Drag, Face, Mode, Picked, Snap, Tool, Typed};
+use crate::app::{App, Dialog, Drag, Face, Mode, Picked, Snap, Tool, Typed};
 use fr_core::measure::Item;
-use crate::gpu;
+use crate::{gpu, theme};
 
-const INK: Color32 = Color32::from_rgb(34, 38, 46);
-const SKETCH: Color32 = Color32::from_rgb(0, 104, 214);
-const SKETCH_DIM: Color32 = Color32::from_rgb(96, 146, 214);
-const CONSTRUCTION: Color32 = Color32::from_rgb(204, 128, 36);
-const SELECTED: Color32 = Color32::from_rgb(0, 168, 255);
-const DIM_INK: Color32 = Color32::from_rgb(70, 74, 84);
+/// Recomputed from the active theme each frame, including when the OS changes it.
+/// Neutral body materials stay the same; both renderers composite them over this view.
+struct ViewColors {
+    ink: Color32,
+    sketch: Color32,
+    sketch_dim: Color32,
+    construction: Color32,
+    selected: Color32,
+    dim_ink: Color32,
+    accent: Color32,
+    paper: Color32,
+    fixed: Color32,
+    gap: Color32,
+    error: Color32,
+}
+
+impl ViewColors {
+    fn new(ctx: &egui::Context) -> Self {
+        let palette = theme::Palette::from_ctx(ctx);
+        let choose = |light, dark| theme::choose(ctx, light, dark);
+        Self {
+            ink: palette.ink,
+            sketch: palette.accent,
+            sketch_dim: choose(Color32::from_rgb(96, 146, 214), Color32::from_rgb(115, 160, 218)),
+            construction: choose(Color32::from_rgb(204, 128, 36), Color32::from_rgb(238, 175, 83)),
+            selected: choose(Color32::from_rgb(0, 168, 255), Color32::from_rgb(74, 205, 255)),
+            dim_ink: choose(Color32::from_rgb(70, 74, 84), Color32::from_rgb(203, 211, 224)),
+            accent: palette.accent,
+            paper: palette.panel,
+            fixed: choose(Color32::from_rgb(150, 60, 200), Color32::from_rgb(205, 148, 250)),
+            gap: choose(Color32::from_rgb(225, 119, 15), Color32::from_rgb(255, 176, 72)),
+            error: palette.error,
+        }
+    }
+}
 
 /// The bodies as last sent to the renderer.
 #[derive(Default)]
@@ -30,6 +59,7 @@ pub struct Scene {
     verts: Arc<Vec<f32>>,
     bounds: Option<(DVec3, DVec3)>,
     /// Software-rendered fallback, with what it was rendered for.
+    /// Its background is transparent, so appearance changes do not invalidate it.
     cpu: Option<((u64, Camera, [usize; 2], Option<Id>), TextureHandle)>,
 }
 
@@ -213,11 +243,12 @@ fn extrude_arrow(app: &App) -> Option<Arrow> {
 }
 
 fn draw_arrow(app: &App, painter: &Painter, a: &Arrow, hot: bool) {
-    let color = if hot { SELECTED } else { ACCENT };
+    let colors = ViewColors::new(painter.ctx());
+    let color = if hot { colors.selected } else { colors.accent };
     let d = (a.tip - a.base).normalized();
     painter.line_segment([a.base, a.tip - d * 12.0], Stroke::new(if hot { 4.0 } else { 3.0 }, color));
-    painter.add(Shape::convex_polygon(vec![a.tip + d * 6.0, a.tip - d * 12.0 + d.rot90() * 8.0, a.tip - d * 12.0 - d.rot90() * 8.0], color, Stroke::new(1.0, Color32::WHITE)));
-    painter.circle(a.base, 3.5, Color32::WHITE, Stroke::new(1.5, color));
+    painter.add(Shape::convex_polygon(vec![a.tip + d * 6.0, a.tip - d * 12.0 + d.rot90() * 8.0, a.tip - d * 12.0 - d.rot90() * 8.0], color, Stroke::new(1.0, colors.paper)));
+    painter.circle(a.base, 3.5, colors.paper, Stroke::new(1.5, color));
     let unit = app.doc().units;
     label(painter, a.tip + d * 26.0, &format!("{} {}", fr_core::units::fmt_len(a.dist, unit), unit.name()), color, None);
 }
@@ -307,7 +338,7 @@ fn draw_grid(app: &App, painter: &Painter) {
     if app.opts.grid && (hi - lo).max_element() * app.cam.scale < 30_000.0 {
         let step = grid_step(app);
         for major in [false, true] {
-            let stroke = Stroke::new(1.0, if major { Color32::from_rgb(214, 218, 225) } else { Color32::from_rgb(233, 235, 240) });
+            let stroke = Stroke::new(1.0, if major { theme::choose(painter.ctx(), Color32::from_rgb(214, 218, 225), Color32::from_rgb(67, 75, 88)) } else { theme::choose(painter.ctx(), Color32::from_rgb(233, 235, 240), Color32::from_rgb(43, 49, 60)) });
             let s = if major { step * 10.0 } else { step };
             let mut x = (lo.x / s).floor() * s;
             while x <= hi.x {
@@ -325,7 +356,7 @@ fn draw_grid(app: &App, painter: &Painter) {
     painter.line_segment([px(DVec2::new(0.0, lo.y)), px(DVec2::new(0.0, hi.y))], Stroke::new(1.2, Color32::from_rgb(92, 184, 100)));
     if app.sketch().is_none() {
         let reach = rect.size().max_elem() as f64 / app.cam.scale;
-        painter.line_segment([to_screen(app, DVec3::ZERO), to_screen(app, DVec3::Z * reach)], Stroke::new(1.2, Color32::from_rgb(86, 124, 226)));
+        painter.line_segment([to_screen(app, DVec3::ZERO), to_screen(app, DVec3::Z * reach)], Stroke::new(1.2, theme::choose(painter.ctx(), Color32::from_rgb(86, 124, 226), Color32::from_rgb(124, 157, 255))));
     }
 }
 
@@ -461,7 +492,7 @@ fn fill(app: &App, painter: &Painter, sk: &Sketch, p: &Profile, color: Color32) 
 fn label(painter: &Painter, at: Pos2, text: &str, color: Color32, outline: Option<Color32>) -> Rect {
     let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(12.5), color);
     let r = Rect::from_center_size(at, galley.size() + vec2(8.0, 4.0));
-    painter.rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(255, 255, 255, 235));
+    painter.rect_filled(r, 3.0, theme::Palette::from_ctx(painter.ctx()).panel);
     if let Some(c) = outline {
         painter.rect_stroke(r, 3.0, Stroke::new(1.2, c), StrokeKind::Outside);
     }
@@ -529,6 +560,7 @@ fn draw_dimension(app: &App, painter: &Painter, sk: &Sketch, c: &Constraint, awa
 /// Draws a sketch. For the sketch being edited this also draws points,
 /// constraint badges and dimensions, and collects their click targets.
 fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: Hit, labels: &mut Vec<(Rect, Id)>) {
+    let colors = ViewColors::new(painter.ctx());
     let solved = app.report.ok && app.report.dof == 0;
     let picked = |id: Id| app.sel.contains(&id) || app.dim_refs.contains(&id);
     if active {
@@ -540,14 +572,14 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
         let pts = path(app, sk, *id);
         let hot = active && (picked(*id) || hover == Hit::Entity(*id));
         let color = match (active, hot, e.construction) {
-            (_, true, _) => SELECTED,
-            (_, _, true) => CONSTRUCTION,
+            (_, true, _) => colors.selected,
+            (_, _, true) => colors.construction,
             // Projected from the model, and fixed.
-            (true, _, _) if sk.fixed.contains(id) || sk.ent_points(*id).iter().all(|p| sk.fixed.contains(p)) => Color32::from_rgb(150, 60, 200),
-            (true, _, _) if app.report.bad.contains(id) => Color32::from_rgb(214, 48, 48),
-            (true, _, _) if solved => INK,
-            (true, _, _) => SKETCH,
-            _ => SKETCH_DIM,
+            (true, _, _) if sk.fixed.contains(id) || sk.ent_points(*id).iter().all(|p| sk.fixed.contains(p)) => colors.fixed,
+            (true, _, _) if app.report.bad.contains(id) => colors.error,
+            (true, _, _) if solved => colors.ink,
+            (true, _, _) => colors.sketch,
+            _ => colors.sketch_dim,
         };
         let stroke = Stroke::new(if hot { 3.0 } else if active { 1.8 } else { 1.3 }, color);
         if e.construction {
@@ -562,7 +594,7 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
     if app.opts.gaps && let Some((_, _, ends)) = &app.gap_cache {
         for id in ends {
             if let Some(p) = sk.points.get(id) {
-                painter.circle_stroke(on_screen(app, sk, *p), 8.0, Stroke::new(2.0, Color32::from_rgb(225, 119, 15)));
+                painter.circle_stroke(on_screen(app, sk, *p), 8.0, Stroke::new(2.0, colors.gap));
             }
         }
     }
@@ -572,9 +604,9 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
             && (picked(*id) || [a,b,c,d].iter().any(|p| picked(*p)))
         {
             let pts: Vec<Pos2> = [a,b,c,d].iter().map(|p| on_screen(app, sk, sk.pos(*p))).collect();
-            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0, SELECTED), 4.0, 4.0));
+            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0, colors.selected), 4.0, 4.0));
             for (i, at) in pts.iter().enumerate() {
-                painter.text(*at + vec2(-10.0, -12.0), Align2::CENTER_CENTER, (i+1).to_string(), FontId::proportional(11.0), SKETCH);
+                painter.text(*at + vec2(-10.0, -12.0), Align2::CENTER_CENTER, (i+1).to_string(), FontId::proportional(11.0), colors.sketch);
             }
         }
     }
@@ -582,10 +614,10 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
         let at = on_screen(app, sk, *p);
         let hot = picked(*id) || hover == Hit::Point(*id);
         if *id == ORIGIN {
-            painter.circle(at, 5.0, Color32::WHITE, Stroke::new(1.5, INK));
-            painter.circle_filled(at, 2.2, if hot { SELECTED } else { INK });
+            painter.circle(at, 5.0, colors.paper, Stroke::new(1.5, colors.ink));
+            painter.circle_filled(at, 2.2, if hot { colors.selected } else { colors.ink });
         } else {
-            painter.circle(at, if hot { 4.5 } else { 3.2 }, if hot { SELECTED } else { Color32::WHITE }, Stroke::new(1.3, if solved { INK } else { SKETCH }));
+            painter.circle(at, if hot { 4.5 } else { 3.2 }, if hot { colors.selected } else { colors.paper }, Stroke::new(1.3, if solved { colors.ink } else { colors.sketch }));
         }
     }
 
@@ -622,8 +654,8 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
                 let at = mid + n * 14.0 + dir * ((i as f32 - (list.len() - 1) as f32 / 2.0) * 18.0);
                 let r = Rect::from_center_size(at, Vec2::splat(15.0));
                 let hot = app.sel.contains(cid) || hover == Hit::Label(*cid);
-                painter.rect(r, 3.0, Color32::from_rgba_unmultiplied(255, 255, 255, 240), Stroke::new(1.0, if hot { SELECTED } else { Color32::from_rgb(176, 182, 192) }), StrokeKind::Outside);
-                constraint_icon(painter, r.shrink(1.5), *kind, if hot { SELECTED } else { DIM_INK });
+                painter.rect(r, 3.0, colors.paper, Stroke::new(1.0, if hot { colors.selected } else { theme::Palette::from_ctx(painter.ctx()).disabled }), StrokeKind::Outside);
+                constraint_icon(painter, r.shrink(1.5), *kind, if hot { colors.selected } else { colors.dim_ink });
                 labels.push((r.expand(1.0), *cid));
             }
         }
@@ -632,8 +664,8 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
         for (cid, c) in &sk.constraints {
             let hot = app.sel.contains(cid) || hover == Hit::Label(*cid);
             let bad = app.report.bad.contains(cid);
-            let color = if bad { Color32::from_rgb(214, 48, 48) } else if hot { ACCENT } else { DIM_INK };
-            if let Some(r) = draw_dimension(app, painter, sk, c, centre, color, hot.then_some(SELECTED)) {
+            let color = if bad { colors.error } else if hot { colors.accent } else { colors.dim_ink };
+            if let Some(r) = draw_dimension(app, painter, sk, c, centre, color, hot.then_some(colors.selected)) {
                 labels.push((r, *cid));
             }
         }
@@ -654,6 +686,7 @@ fn toggle(list: &mut Vec<Id>, id: Id, add: bool) {
 }
 
 fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, sk: &Sketch, hover: Hit) {
+    let colors = ViewColors::new(painter.ctx());
     let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
     if resp.drag_started_by(PointerButton::Primary) && !ui.input(|i| i.modifiers.alt || i.key_down(egui::Key::Space)) {
         let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or_default();
@@ -690,7 +723,7 @@ fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
             (Drag::Radius(id), Some(t)) => vec![(*id, DVec2::new(sk.curve(*id).map_or(1.0, |c| c.0.distance(t)).max(1e-3), 0.0))],
             (Drag::Box(start), _) => {
                 let r = Rect::from_two_pos(*start, pos);
-                painter.rect(r, 0.0, Color32::from_rgba_unmultiplied(0, 120, 255, 26), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+                painter.rect(r, 0.0, Color32::from_rgba_unmultiplied(0, 120, 255, 26), Stroke::new(1.0, colors.accent), StrokeKind::Inside);
                 vec![]
             }
             _ => vec![],
@@ -813,6 +846,7 @@ fn arc_points(c: DVec2, s: DVec2, e: DVec2) -> Vec<DVec2> {
 }
 
 fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sk: &Sketch) {
+    let colors = ViewColors::new(painter.ctx());
     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     let tool = app.tool;
     let from = (tool == Tool::Line && app.clicks.len() == 1).then(|| app.clicks[0].p);
@@ -855,11 +889,11 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
         (s.point, s.on) = (None, None);
     }
     let px = |p: DVec2| on_screen(app, sk, p);
-    let stroke = Stroke::new(1.6, if app.opts.construction { CONSTRUCTION } else { SKETCH });
+    let stroke = Stroke::new(1.6, if app.opts.construction { colors.construction } else { colors.sketch });
     let unit = app.doc().units;
     let len = |mm: f64| format!("{} {}", fr_core::units::fmt_len(mm, unit), unit.name());
     let note = |at: Pos2, text: String| {
-        label(painter, at + vec2(0.0, -18.0), &text, DIM_INK, None);
+        label(painter, at + vec2(0.0, -18.0), &text, colors.dim_ink, None);
     };
     let c = &app.clicks;
     // Where the size boxes go, and what each would be if left to the pointer.
@@ -932,14 +966,14 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     // Show what the click will attach to.
     let at = px(s.p);
     if s.point.is_some() {
-        painter.rect_stroke(Rect::from_center_size(at, Vec2::splat(11.0)), 1.0, Stroke::new(1.6, SELECTED), StrokeKind::Outside);
+        painter.rect_stroke(Rect::from_center_size(at, Vec2::splat(11.0)), 1.0, Stroke::new(1.6, colors.selected), StrokeKind::Outside);
     } else if s.on.is_some() {
-        painter.line_segment([at - vec2(5.0, 5.0), at + vec2(5.0, 5.0)], Stroke::new(1.6, SELECTED));
-        painter.line_segment([at - vec2(5.0, -5.0), at + vec2(5.0, -5.0)], Stroke::new(1.6, SELECTED));
+        painter.line_segment([at - vec2(5.0, 5.0), at + vec2(5.0, 5.0)], Stroke::new(1.6, colors.selected));
+        painter.line_segment([at - vec2(5.0, -5.0), at + vec2(5.0, -5.0)], Stroke::new(1.6, colors.selected));
     } else if s.h || s.v {
         let r = Rect::from_center_size(at + vec2(16.0, 16.0), Vec2::splat(15.0));
-        painter.rect(r, 3.0, Color32::WHITE, Stroke::new(1.0, SELECTED), StrokeKind::Outside);
-        constraint_icon(painter, r.shrink(1.5), if s.h { CKind::Horizontal } else { CKind::Vertical }, SELECTED);
+        painter.rect(r, 3.0, colors.paper, Stroke::new(1.0, colors.selected), StrokeKind::Outside);
+        constraint_icon(painter, r.shrink(1.5), if s.h { CKind::Horizontal } else { CKind::Vertical }, colors.selected);
     }
     // The size boxes: type a size to hold it, Tab to the next box, Enter to place the shape.
     let mut place = false;
@@ -950,12 +984,12 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
             egui::Frame::popup(ui.style()).inner_margin(4.0).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (i, text) in t.fields.iter_mut().enumerate() {
-                        ui.label(RichText::new(names[i]).small().color(DIM_INK));
+                        ui.label(RichText::new(names[i]).small().color(colors.dim_ink));
                         // Empty, the box shows the size the pointer gives, and typing replaces it.
                         let r = ui.add(egui::TextEdit::singleline(text).id(egui::Id::new(("typed-size", i))).desired_width(74.0).hint_text(len(live[i])));
                         if !text.is_empty() {
                             let held = sizes.get(i).copied().flatten().is_some();
-                            ui.label(RichText::new(if held { egui_phosphor::regular::LOCK_SIMPLE } else { egui_phosphor::regular::WARNING }).color(if held { SELECTED } else { Color32::from_rgb(196, 40, 40) }));
+                            ui.label(RichText::new(if held { egui_phosphor::regular::LOCK_SIMPLE } else { egui_phosphor::regular::WARNING }).color(if held { colors.selected } else { colors.error }));
                         }
                         if r.clicked() {
                             t.active = i;
@@ -1019,7 +1053,7 @@ fn value_box(app: &mut App, ui: &Ui) {
             }
             if let Some(e) = &edit.error {
                 ui.set_max_width(240.0);
-                ui.colored_label(Color32::from_rgb(196, 40, 40), e);
+                ui.colored_label(theme::Palette::from_ctx(ui.ctx()).error, e);
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 cancel = true;
@@ -1207,6 +1241,7 @@ fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: Option<Id>) -> Optio
 }
 
 fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
+    let colors = ViewColors::new(painter.ctx());
     let doc = app.session.doc.clone();
     let dlg_sketch = match &app.dialog {
         Dialog::Feature(f) => f.sketch,
@@ -1240,14 +1275,14 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
                     && let Some((a, b)) = Document::axis_line(sk, f.axis)
                 {
                     let d = (b - a).normalize_or(DVec2::X) * (app.vp.size().max_elem() as f64 / app.cam.scale);
-                    painter.extend(Shape::dashed_line(&[on_screen(app, sk, a - d), on_screen(app, sk, a + d)], Stroke::new(1.6, Color32::from_rgb(214, 60, 160)), 10.0, 4.0));
+                    painter.extend(Shape::dashed_line(&[on_screen(app, sk, a - d), on_screen(app, sk, a + d)], Stroke::new(1.6, theme::choose(painter.ctx(), Color32::from_rgb(214, 60, 160), Color32::from_rgb(244, 124, 208))), 10.0, 4.0));
                 }
             }
             if let Some(face) = &f.face
                 && let Some(plane) = face.plane
             {
                 for ring in &face.loops {
-                    painter.add(Shape::closed_line(ring.iter().map(|p| to_screen(app, plane.to_world(*p))).collect(), Stroke::new(2.6, SELECTED)));
+                    painter.add(Shape::closed_line(ring.iter().map(|p| to_screen(app, plane.to_world(*p))).collect(), Stroke::new(2.6, colors.selected)));
                 }
             }
             if let Some(a) = extrude_arrow(app) {
@@ -1308,11 +1343,11 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
             let over = hover.and_then(|p| pick_edge(app, p, b.body));
             if let Some(body) = b.body.and_then(|id| app.session.built.body(id)) {
                 for e in body.edges.iter().filter(|e| b.edges.iter().any(|p| path_dist3(e, *p) < 1e-4)) {
-                    draw_edge(app, painter, e, SELECTED, 4.0);
+                    draw_edge(app, painter, e, colors.selected, 4.0);
                 }
             }
             if let Some((_, line)) = &over {
-                draw_edge(app, painter, line, ACCENT, 3.0);
+                draw_edge(app, painter, line, colors.accent, 3.0);
             }
             if let (Some(_), Some((body, line))) = (clicked, over) {
                 if b.body != Some(body) {
@@ -1334,7 +1369,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
         Dialog::Shell(mut sh) => {
             for (_, f) in &sh.faces {
                 for ring in &f.outline {
-                    painter.add(Shape::closed_line(ring.iter().map(|p| to_screen(app, *p)).collect(), Stroke::new(3.0, SELECTED)));
+                    painter.add(Shape::closed_line(ring.iter().map(|p| to_screen(app, *p)).collect(), Stroke::new(3.0, colors.selected)));
                 }
             }
             if let Some(pos) = clicked
@@ -1361,9 +1396,9 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
         Dialog::Hole(mut h) => {
             for at in &h.at {
                 let c = to_screen(app, *at);
-                painter.circle_stroke(c, 5.0, Stroke::new(2.0, SELECTED));
-                painter.line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], Stroke::new(1.0, SELECTED));
-                painter.line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], Stroke::new(1.0, SELECTED));
+                painter.circle_stroke(c, 5.0, Stroke::new(2.0, colors.selected));
+                painter.line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], Stroke::new(1.0, colors.selected));
+                painter.line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], Stroke::new(1.0, colors.selected));
             }
             if let Some(pos) = clicked {
                 // A click on a hole that is already there takes it away again.
@@ -1408,20 +1443,20 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
                 }
             };
             for p in &m.picks {
-                show(p, SELECTED, 3.0);
+                show(p, colors.selected, 3.0);
             }
             let over = hover.and_then(|p| pick_item(app, &doc, p));
             if let Some(p) = &over {
-                show(p, ACCENT, 2.0);
+                show(p, colors.accent, 2.0);
             }
             if let Some(r) = m.result {
                 let (a, b) = (to_screen(app, r.from), to_screen(app, r.to));
-                painter.line_segment([a, b], Stroke::new(1.5, DIM_INK));
+                painter.line_segment([a, b], Stroke::new(1.5, colors.dim_ink));
                 for end in [a, b] {
-                    painter.circle_filled(end, 3.0, DIM_INK);
+                    painter.circle_filled(end, 3.0, colors.dim_ink);
                 }
                 let u = app.doc().units;
-                label(painter, a + (b - a) / 2.0 + vec2(0.0, -14.0), &format!("{} {}", fr_core::units::fmt_len(r.apart.unwrap_or(r.distance), u), u.name()), DIM_INK, Some(DIM_INK));
+                label(painter, a + (b - a) / 2.0 + vec2(0.0, -14.0), &format!("{} {}", fr_core::units::fmt_len(r.apart.unwrap_or(r.distance), u), u.name()), colors.dim_ink, Some(colors.dim_ink));
             }
             if let (Some(_), Some(p)) = (clicked, over) {
                 // A third pick starts a new measurement.
@@ -1436,19 +1471,19 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
         Dialog::Text(_) => {
             if let Some(origin) = app.text_baseline() {
                 let at = to_screen(app, origin);
-                painter.line_segment([at - vec2(6.0, 0.0), at + vec2(6.0, 0.0)], Stroke::new(2.0, SELECTED));
-                painter.line_segment([at - vec2(0.0, 6.0), at + vec2(0.0, 6.0)], Stroke::new(2.0, SELECTED));
+                painter.line_segment([at - vec2(6.0, 0.0), at + vec2(6.0, 0.0)], Stroke::new(2.0, colors.selected));
+                painter.line_segment([at - vec2(0.0, 6.0), at + vec2(0.0, 6.0)], Stroke::new(2.0, colors.selected));
             }
             if let Some(face) = hover.and_then(|pos| pick_face(app, pos)) {
                 for ring in &face.outline {
-                    painter.add(Shape::closed_line(ring.iter().map(|q| to_screen(app, *q)).collect(), Stroke::new(2.0, ACCENT)));
+                    painter.add(Shape::closed_line(ring.iter().map(|q| to_screen(app, *q)).collect(), Stroke::new(2.0, colors.accent)));
                 }
                 if clicked.is_some() && let Err(e) = app.text_on_face(face) { app.toast(e); }
             }
         }
         Dialog::Thread(mut t) => {
             if let Some(at) = t.face {
-                painter.circle_stroke(to_screen(app, at), 5.0, Stroke::new(2.0, SELECTED));
+                painter.circle_stroke(to_screen(app, at), 5.0, Stroke::new(2.0, colors.selected));
             }
             if let Some(pos) = clicked
                 && let Some((id, at, _)) = pick_body(app, &app.session.built, pos)
@@ -1481,11 +1516,11 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
                 if let (Some((_, c)), Ok(kind)) = (app.pattern_at.filter(|c| c.0 == key), p.pattern(&doc)) {
                     let places = fr_core::doc::Pattern { source, kind }.placements().unwrap_or_default();
                     let mut at = to_screen(app, c);
-                    painter.circle(at, 5.0, Color32::WHITE, Stroke::new(2.0, ACCENT));
+                    painter.circle(at, 5.0, colors.paper, Stroke::new(2.0, colors.accent));
                     for place in places {
                         let next = to_screen(app, place.point(c));
-                        painter.line_segment([at, next], Stroke::new(1.5, ACCENT));
-                        painter.circle(next, 5.0, ACCENT, Stroke::new(1.5, Color32::WHITE));
+                        painter.line_segment([at, next], Stroke::new(1.5, colors.accent));
+                        painter.circle(next, 5.0, colors.accent, Stroke::new(1.5, colors.paper));
                         at = next;
                     }
                 }
@@ -1543,7 +1578,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         navigate(app, ui, &resp);
     }
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, BG_VIEW);
+    painter.rect_filled(rect, 0.0, theme::Palette::from_ctx(ui.ctx()).background);
     if let Some((_, sk)) = app.sketch() {
         let plane = sk.plane;
         let image = app.reference_editor.calibration_image().or(sk.reference.as_ref()).cloned();
@@ -1575,5 +1610,5 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         _ => "Drag to orbit, Shift-drag or middle-drag to pan, scroll to zoom. Click a face to select it.",
     };
     let hint = app.reference_editor.calibration_hint().unwrap_or(hint);
-    painter.text(rect.left_bottom() + vec2(12.0, -10.0), Align2::LEFT_BOTTOM, hint, FontId::proportional(12.5), Color32::from_rgb(110, 116, 128));
+    painter.text(rect.left_bottom() + vec2(12.0, -10.0), Align2::LEFT_BOTTOM, hint, FontId::proportional(12.5), theme::Palette::from_ctx(ui.ctx()).muted);
 }

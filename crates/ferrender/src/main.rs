@@ -5,9 +5,11 @@ mod build_info;
 mod config;
 mod gpu;
 mod mcp;
+mod native_theme;
 mod panels;
 mod recovery;
 mod reference;
+mod theme;
 mod timeline;
 mod view;
 

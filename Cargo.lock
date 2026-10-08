@@ -1235,21 +1235,27 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "ferrender"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
+ "async-io",
  "eframe",
  "egui",
  "egui-phosphor",
  "egui_kittest",
  "fr-core",
+ "futures-lite",
  "glam",
  "image",
  "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "rfd",
  "serde",
  "serde_json",
  "toml",
  "ureq",
+ "zbus",
 ]
 
 [[package]]
@@ -1332,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "fr-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "cadrum",
