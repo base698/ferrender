@@ -60,9 +60,11 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "New Sketch", "", Action::NewSketch);
             item(app, ui, "Finish Sketch", "", Action::FinishSketch);
             ui.separator();
-            for (label, key, tool) in [("Select", "S", Tool::Select), ("Line", "L", Tool::Line), ("Rectangle", "R", Tool::Rect), ("Circle", "C", Tool::Circle), ("Arc", "A", Tool::Arc), ("Point", "P", Tool::Point), ("Dimension", "D", Tool::Dimension)] {
+            for (label, key, tool) in [("Select", "S", Tool::Select), ("Line", "L", Tool::Line), ("Rectangle", "R", Tool::Rect), ("Circle", "C", Tool::Circle), ("Arc", "A", Tool::Arc), ("3-Point Arc", "", Tool::Arc3), ("Tangent Arc", "", Tool::TangentArc), ("Spline", "", Tool::Spline), ("Point", "P", Tool::Point), ("Dimension", "D", Tool::Dimension)] {
                 item(app, ui, label, key, Action::Tool(tool));
             }
+            item(app, ui, "Point Coordinates…", "", Action::PointCoordinates);
+            item(app, ui, "Reference Image…", "", Action::ReferenceImage);
             item(app, ui, "Toggle Construction", "X", Action::Construction);
             ui.separator();
             item(app, ui, "Polygon", "", Action::Tool(Tool::Polygon));
@@ -165,6 +167,9 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                     (icon::RECTANGLE, "Rectangle", Tool::Rect, "Two-point rectangle (R)"),
                     (icon::CIRCLE, "Circle", Tool::Circle, "Centre and radius circle (C)"),
                     (icon::CIRCLE_NOTCH, "Arc", Tool::Arc, "Centre, start and end arc (A)"),
+                    (icon::CIRCLE_NOTCH, "3-Point Arc", Tool::Arc3, "Arc through start, middle and end points"),
+                    (icon::CIRCLE_NOTCH, "Tangent Arc", Tool::TangentArc, "Continue a selected line or arc smoothly"),
+                    (icon::BEZIER_CURVE, "Spline", Tool::Spline, "Curve through four editable fit points"),
                     (icon::DOT_OUTLINE, "Point", Tool::Point, "Point (P)"),
                     (icon::POLYGON, "Polygon", Tool::Polygon, "Regular polygon; set the sides in the Sketch Palette"),
                     (icon::STACK_SIMPLE, "Project", Tool::Project, "Copy the outline of a body's face into the sketch"),
@@ -612,6 +617,38 @@ fn dialog_window(app: &App, title: &str) -> egui::Window<'static> {
 fn dialogs(app: &mut App, ctx: &Context) {
     match app.dialog.clone() {
         Dialog::None => {}
+        Dialog::PointCoordinates(mut d) => {
+            dialog_window(app, "Point Coordinates").show(ctx, |ui| {
+                ui.label(if d.point.is_some() { "Edit the selected point" } else { "Place a point by its coordinates" });
+                ui.label("Coordinates are on the sketch plane; XZ uses Y for world height.");
+                egui::Grid::new("point-coordinates").show(ui, |ui| {
+                    ui.label("X");
+                    ui.add(egui::TextEdit::singleline(&mut d.x).id_source("point-x").desired_width(160.0));
+                    ui.end_row();
+                    ui.label("Y");
+                    ui.add(egui::TextEdit::singleline(&mut d.y).id_source("point-y").desired_width(160.0));
+                    ui.end_row();
+                });
+                ui.label("Accepts units and parameters, such as $height / 2.");
+                ui.label("Creates X and Y dimensions. Edit these dimensions to move the point.");
+                if let Some(error) = &d.error { ui.colored_label(egui::Color32::RED, error); }
+                app.dialog = Dialog::PointCoordinates(d.clone());
+                ui.horizontal(|ui| {
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.button(if d.point.is_some() { "Apply Coordinates" } else { "Place Point" }).clicked() || enter {
+                        if app.apply_point_coordinates(&d) {
+                            if d.point.is_some() { app.dialog = Dialog::None; }
+                            else { d.error = None; app.dialog = Dialog::PointCoordinates(d.clone()); }
+                        } else {
+                            d.error = app.toast.as_ref().map(|t| t.0.clone());
+                            app.dialog = Dialog::PointCoordinates(d.clone());
+                        }
+                    }
+                    if ui.button("New Point").clicked() { app.open_point_coordinates(None); }
+                    if ui.button("Close").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) { app.dialog = Dialog::None; }
+                });
+            });
+        }
         Dialog::PickPlane => {
             dialog_window(app, "New Sketch").show(ctx, |ui| {
                 ui.label("Sketch on a plane:");
@@ -1089,7 +1126,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
 }
 
 fn sketch_palette(app: &mut App, ctx: &Context) {
-    if app.sketch().is_none() {
+    if app.sketch().is_none() || matches!(app.dialog, Dialog::PointCoordinates(_)) || app.reference_editor.is_open() || app.reference_editor.is_calibrating() {
         return;
     }
     dialog_window(app, "Sketch Palette").show(ctx, |ui| {
@@ -1102,6 +1139,12 @@ fn sketch_palette(app: &mut App, ctx: &Context) {
         ui.checkbox(&mut app.opts.snap_grid, "Snap to Grid");
         ui.checkbox(&mut app.opts.constraints, "Show Constraints");
         ui.checkbox(&mut app.opts.dimensions, "Show Dimensions");
+        ui.checkbox(&mut app.opts.gaps, "Highlight Open Ends").on_hover_text("Orange rings mark open outline endpoints. Join endpoints to close a profile.");
+        if app.opts.gaps && let Some((_, _, ends)) = &app.gap_cache {
+            ui.label(format!("{} open outline endpoints", ends.len()));
+        }
+        if ui.button("Point Coordinates…").clicked() { app.run(ctx, Action::PointCoordinates); }
+        if ui.button("Reference Image…").clicked() { app.run(ctx, Action::ReferenceImage); }
         ui.horizontal(|ui| {
             if ui.button("Look At").on_hover_text("Face the sketch plane").clicked()
                 && let Mode::Sketch(id) = app.mode
@@ -1381,6 +1424,16 @@ fn about(app: &mut App, ctx: &Context) {
 }
 
 pub fn windows(app: &mut App, ctx: &Context) {
+    let mut editor = std::mem::take(&mut app.reference_editor);
+    if editor.sketch_id().is_some_and(|id| app.mode != Mode::Sketch(id)) { editor.cancel(); }
+    let was_calibrating = editor.is_calibrating();
+    let change = editor.show(ctx, app.doc());
+    if !was_calibrating && editor.is_calibrating() { app.fit_pending = true; }
+    app.reference_editor = editor;
+    if let Some(change) = change && app.mode == Mode::Sketch(change.sketch) {
+        if app.sketch_edit(|sk, _| { sk.reference = change.image; Ok(()) }) { app.fit_pending = true; }
+    }
+
     view_buttons(app, ctx);
     dialogs(app, ctx);
     sketch_palette(app, ctx);

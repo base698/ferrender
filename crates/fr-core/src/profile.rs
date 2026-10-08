@@ -34,6 +34,7 @@ pub enum Seg {
     Arc(DVec2, DVec2, DVec2),
     /// Centre and radius.
     Circle(DVec2, f64),
+    Spline([DVec2; 4]),
 }
 
 impl Seg {
@@ -41,6 +42,7 @@ impl Seg {
         match self {
             Seg::Line(a, b) => Seg::Line(b, a),
             Seg::Arc(a, m, b) => Seg::Arc(b, m, a),
+            Seg::Spline([a,b,c,d]) => Seg::Spline([d,c,b,a]),
             c => c,
         }
     }
@@ -114,7 +116,7 @@ struct Face {
     path: Vec<Seg>,
 }
 
-pub fn profiles(sk: &Sketch) -> Vec<Profile> {
+pub(crate) fn point_nodes(sk: &Sketch) -> BTreeMap<Id, Id> {
     // Points that coincide act as one node.
     let ids: Vec<Id> = sk.points.keys().copied().collect();
     let index: BTreeMap<Id, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
@@ -133,7 +135,15 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
             }
         }
     }
-    let mut node = |id: Id| find(&mut uf, index[&id]);
+    ids.iter().map(|id| (*id, ids[find(&mut uf, index[id])])).collect()
+
+}
+
+pub fn profiles(sk: &Sketch) -> Vec<Profile> {
+    let ids: Vec<Id> = sk.points.keys().copied().collect();
+    let index: BTreeMap<Id, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let nodes = point_nodes(sk);
+    let node = |id: Id| index[&nodes[&id]];
 
     struct Edge {
         id: Id,
@@ -151,22 +161,27 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
         let (a, b) = match e.geom {
             Geom::Line { a, b } => (node(a), node(b)),
             Geom::Arc { s, e, .. } => (node(s), node(e)),
+            Geom::Spline { a,d,.. } => (node(a),node(d)),
             Geom::Circle { .. } => (0, 0),
         };
         let mut pts = sk.polyline(*id);
+        if pts.len() < 2 { continue; }
         if a != b {
             // Ends are taken from the shared node, so neighbouring pieces meet exactly.
             let seg = match e.geom {
                 Geom::Line { .. } => Seg::Line(sk.points[&ids[a]], sk.points[&ids[b]]),
+                Geom::Spline { b:fit_b,c:fit_c,.. } => Seg::Spline([sk.points[&ids[a]],sk.pos(fit_b),sk.pos(fit_c),sk.points[&ids[b]]]),
                 _ => Seg::Arc(sk.points[&ids[a]], pts[pts.len() / 2], sk.points[&ids[b]]),
             };
             edges.push(Edge { id: *id, a, b, pts, seg });
         } else if !matches!(e.geom, Geom::Line { .. }) {
             pts.pop();
-            if signed_area(&pts).abs() > 1e-9
-                && let Some((c, r)) = sk.curve(*id)
-            {
-                let path = vec![Seg::Circle(c, r)];
+            if signed_area(&pts).abs() > 1e-9 {
+                let seg = match e.geom {
+                    Geom::Spline { a,b,c,d } => Seg::Spline([a,b,c,d].map(|p| sk.pos(p))),
+                    _ => { let Some((c,r)) = sk.curve(*id) else { continue }; Seg::Circle(c,r) },
+                };
+                let path = vec![if signed_area(&pts) < 0.0 { pts.reverse(); seg.reversed() } else { seg }];
                 faces.push(Face { poly: pts.clone(), edges: vec![*id], comp: next_comp, path: path.clone() });
                 hulls.push((next_comp, pts, path));
                 next_comp += 1;

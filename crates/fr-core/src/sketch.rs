@@ -73,6 +73,16 @@ pub enum Geom {
     Circle { c: Id, r: f64 },
     /// Counter-clockwise from `s` to `e` around `c`.
     Arc { c: Id, s: Id, e: Id },
+    /// Native interpolating B-spline through four editable fit points.
+    Spline { a: Id, b: Id, c: Id, d: Id },
+}
+
+/// Extra construction intent for arcs drawn without a centre.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArcGuide {
+    Through { point: Id },
+    Tangent { source: Id, start: Id },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -102,10 +112,12 @@ pub enum CKind {
     Radius,
     Diameter,
     Angle,
+    PositionX,
+    PositionY,
 }
 
 impl CKind {
-    pub const ALL: [CKind; 16] = [
+    pub const ALL: [CKind; 18] = [
         CKind::Coincident,
         CKind::Horizontal,
         CKind::Vertical,
@@ -122,6 +134,8 @@ impl CKind {
         CKind::Radius,
         CKind::Diameter,
         CKind::Angle,
+        CKind::PositionX,
+        CKind::PositionY,
     ];
 
     pub fn name(self) -> &'static str {
@@ -142,6 +156,8 @@ impl CKind {
             CKind::Radius => "radius",
             CKind::Diameter => "diameter",
             CKind::Angle => "angle",
+            CKind::PositionX => "position_x",
+            CKind::PositionY => "position_y",
         }
     }
 
@@ -152,7 +168,7 @@ impl CKind {
     /// The kind of value a dimension carries; `None` for geometric constraints.
     pub fn value_kind(self) -> Option<Kind> {
         match self {
-            CKind::Distance | CKind::Radius | CKind::Diameter => Some(Kind::Length),
+            CKind::Distance | CKind::Radius | CKind::Diameter | CKind::PositionX | CKind::PositionY => Some(Kind::Length),
             CKind::Angle => Some(Kind::Angle),
             _ => None,
         }
@@ -173,6 +189,7 @@ impl CKind {
             CKind::Distance => "a line, two points, a point and a line, or two lines",
             CKind::Radius | CKind::Diameter => "a circle or arc",
             CKind::Angle => "two lines",
+            CKind::PositionX | CKind::PositionY => "one point",
         }
     }
 }
@@ -191,6 +208,7 @@ pub enum Ref {
     Point,
     Line,
     Curve,
+    Spline,
 }
 
 /// Copied sketch geometry, as it travels through the clipboard.
@@ -199,6 +217,8 @@ pub struct Clip {
     pub points: Vec<(Id, DVec2)>,
     pub entities: Vec<(Id, Entity)>,
     pub constraints: Vec<Constraint>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arc_guides: BTreeMap<Id, ArcGuide>,
 }
 
 impl Clip {
@@ -225,6 +245,10 @@ pub struct Sketch {
     /// Points and circles projected from the model, which the solver leaves alone.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub fixed: BTreeSet<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<crate::reference::ReferenceImage>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arc_guides: BTreeMap<Id, ArcGuide>,
 }
 
 fn yes() -> bool {
@@ -240,7 +264,7 @@ pub fn seg_dist(p: DVec2, a: DVec2, b: DVec2) -> f64 {
 
 impl Sketch {
     pub fn new(plane: Plane) -> Sketch {
-        Sketch { plane, points: BTreeMap::from([(ORIGIN, DVec2::ZERO)]), entities: BTreeMap::new(), constraints: BTreeMap::new(), next: 1, visible: true, fixed: BTreeSet::new() }
+        Sketch { plane, points: BTreeMap::from([(ORIGIN, DVec2::ZERO)]), entities: BTreeMap::new(), constraints: BTreeMap::new(), next: 1, visible: true, fixed: BTreeSet::new(), reference: None, arc_guides: BTreeMap::new() }
     }
 
     fn id(&mut self) -> Id {
@@ -298,7 +322,7 @@ impl Sketch {
         if self.points.contains_key(&id) {
             return Some(Ref::Point);
         }
-        self.entities.get(&id).map(|e| if matches!(e.geom, Geom::Line { .. }) { Ref::Line } else { Ref::Curve })
+        self.entities.get(&id).map(|e| match e.geom { Geom::Line { .. } => Ref::Line, Geom::Spline { .. } => Ref::Spline, _ => Ref::Curve })
     }
 
     /// Checks that `refs` suit `kind` and puts them in canonical order.
@@ -322,6 +346,7 @@ impl Sketch {
             CKind::Fix => pat == [P] || pat == [L],
             CKind::Distance => pat == [L] || pat == [P, P] || pat == [P, L] || pat == [L, L],
             CKind::Radius | CKind::Diameter => pat == [C],
+            CKind::PositionX | CKind::PositionY => pat == [P],
         };
         let ids: Vec<Id> = r.iter().map(|x| x.1).collect();
         if !ok || (ids.len() == 2 && ids[0] == ids[1]) {
@@ -348,7 +373,12 @@ impl Sketch {
         match self.entities.get(&id).map(|e| e.geom) {
             Some(Geom::Line { a, b }) => vec![a, b],
             Some(Geom::Circle { c, .. }) => vec![c],
-            Some(Geom::Arc { c, s, e }) => vec![c, s, e],
+            Some(Geom::Arc { c, s, e }) => {
+                let mut points = vec![c,s,e];
+                if let Some(ArcGuide::Through { point }) = self.arc_guides.get(&id) { points.push(*point); }
+                points
+            },
+            Some(Geom::Spline { a, b, c, d }) => vec![a, b, c, d],
             None => vec![],
         }
     }
@@ -358,7 +388,7 @@ impl Sketch {
         match self.entities.get(&id)?.geom {
             Geom::Circle { c, r } => Some((self.pos(c), r)),
             Geom::Arc { c, s, .. } => Some((self.pos(c), self.pos(c).distance(self.pos(s)))),
-            Geom::Line { .. } => None,
+            Geom::Line { .. } | Geom::Spline { .. } => None,
         }
     }
 
@@ -386,6 +416,7 @@ impl Sketch {
         let Some(e) = self.entities.get(&id) else { return vec![] };
         match e.geom {
             Geom::Line { a, b } => vec![self.pos(a), self.pos(b)],
+            Geom::Spline { a, b, c, d } => spline_polyline([a,b,c,d].map(|p| self.pos(p))),
             Geom::Circle { c, r } => {
                 let c = self.pos(c);
                 (0..=CIRCLE_SEGS).map(|i| c + DVec2::from_angle((i % CIRCLE_SEGS) as f64 / CIRCLE_SEGS as f64 * std::f64::consts::TAU) * r).collect()
@@ -434,12 +465,15 @@ impl Sketch {
         let (pts, ents) = (&self.points, &self.entities);
         self.fixed.retain(|i| pts.contains_key(i) || ents.contains_key(i));
         self.constraints.retain(|_, c| c.refs.iter().all(|r| pts.contains_key(r) || ents.contains_key(r)));
+        self.prune_arc_guides();
     }
 
     /// The current size of what a dimension on `refs` would measure (mm or degrees).
     pub fn measure(&self, kind: CKind, refs: &[Id]) -> f64 {
         let perp = |p: DVec2, l: (DVec2, DVec2)| ((l.1 - l.0).perp_dot(p - l.0) / (l.1 - l.0).length().max(1e-12)).abs();
         match (kind, refs) {
+            (CKind::PositionX, [p]) => self.pos(*p).x,
+            (CKind::PositionY, [p]) => self.pos(*p).y,
             (CKind::Radius, [e]) => self.curve(*e).map_or(0.0, |c| c.1),
             (CKind::Diameter, [e]) => self.curve(*e).map_or(0.0, |c| c.1 * 2.0),
             (CKind::Angle, [a, b]) => match (self.line(*a), self.line(*b)) {
@@ -471,6 +505,10 @@ impl Sketch {
         Clip {
             points: pts.iter().map(|p| (*p, self.pos(*p))).collect(),
             constraints: self.constraints.values().filter(|c| c.kind != CKind::Fix && c.refs.iter().all(has)).cloned().collect(),
+            arc_guides: self.arc_guides.iter().filter(|(id,guide)| ents.iter().any(|e| e.0 == **id) && match guide {
+                ArcGuide::Through { .. } => true,
+                ArcGuide::Tangent { source,.. } => ents.iter().any(|e| e.0 == *source),
+            }).map(|(id,guide)| (*id,*guide)).collect(),
             entities: ents,
         }
     }
@@ -488,10 +526,18 @@ impl Sketch {
                 Geom::Line { a, b } => Geom::Line { a: m(&map, a), b: m(&map, b) },
                 Geom::Circle { c, r } => Geom::Circle { c: m(&map, c), r },
                 Geom::Arc { c, s, e } => Geom::Arc { c: m(&map, c), s: m(&map, s), e: m(&map, e) },
+                Geom::Spline { a,b,c,d } => Geom::Spline { a:m(&map,a),b:m(&map,b),c:m(&map,c),d:m(&map,d) },
             };
             let id = self.add(geom, e.construction);
             map.insert(*old, id);
             out.push(id);
+        }
+        for (arc,guide) in &clip.arc_guides {
+            let guide = match *guide {
+                ArcGuide::Through { point } => ArcGuide::Through { point: m(&map,point) },
+                ArcGuide::Tangent { source,start } => ArcGuide::Tangent { source:m(&map,source),start:m(&map,start) },
+            };
+            self.arc_guides.insert(m(&map,*arc),guide);
         }
         // Points that belong to a pasted entity come along with it; the rest
         // were copied on their own and are selected directly.
@@ -499,7 +545,12 @@ impl Sketch {
         out.extend(clip.points.iter().map(|(old, _)| map[old]).filter(|p| !owned.contains(p)));
         for c in &clip.constraints {
             let id = self.id();
-            self.constraints.insert(id, Constraint { kind: c.kind, refs: c.refs.iter().map(|r| m(&map, *r)).collect(), value: c.value.clone() });
+            let mut value = c.value.clone();
+            if let Some(v) = &mut value {
+                let shift = match c.kind { CKind::PositionX => offset.x, CKind::PositionY => offset.y, _ => 0.0 };
+                if shift != 0.0 { v.expr = format!("({}) + ({shift} mm)", v.expr); v.v += shift; }
+            }
+            self.constraints.insert(id, Constraint { kind: c.kind, refs: c.refs.iter().map(|r| m(&map, *r)).collect(), value });
         }
         out
     }
@@ -509,23 +560,40 @@ impl Sketch {
     pub fn translate(&mut self, ids: &[Id], by: DVec2) {
         let stuck = |sk: &Sketch, p: Id| p == ORIGIN || sk.fixed.contains(&p);
         let mut pts: BTreeSet<Id> = ids.iter().copied().filter(|i| self.points.contains_key(i) && !stuck(self, *i)).collect();
-        for id in ids {
+        let mut rebound = BTreeMap::new();
+        let ids: BTreeSet<Id> = ids.iter().copied().collect();
+        for id in &ids {
             for p in self.ent_points(*id) {
                 if !stuck(self, p) {
                     pts.insert(p);
                     continue;
                 }
-                let free = self.add_point(self.pos(p) + by);
+                let free = *rebound.entry(p).or_insert_with(|| self.add_point(self.pos(p) + by));
                 let swap = |x: &mut Id| {
                     if *x == p {
                         *x = free;
                     }
                 };
+                if let Some(guide) = self.arc_guides.get_mut(id) {
+                    match guide {
+                        ArcGuide::Through { point } => swap(point),
+                        ArcGuide::Tangent { start,.. } => swap(start),
+                    }
+                }
                 match &mut self.entities.get_mut(id).unwrap().geom {
                     Geom::Line { a, b } => [a, b].into_iter().for_each(swap),
                     Geom::Circle { c, .. } => swap(c),
                     Geom::Arc { c, s, e } => [c, s, e].into_iter().for_each(swap),
+                    Geom::Spline { a,b,c,d } => [a,b,c,d].into_iter().for_each(swap),
                 }
+            }
+        }
+        self.prune_arc_guides();
+        for constraint in self.constraints.values_mut().filter(|c| c.refs.len() == 1 && pts.contains(&c.refs[0])) {
+            let delta = match constraint.kind { CKind::PositionX => by.x, CKind::PositionY => by.y, _ => 0.0 };
+            if delta != 0.0 && let Some(value) = &mut constraint.value {
+                value.expr = format!("({}) + ({delta} mm)", value.expr);
+                value.v += delta;
             }
         }
         for p in pts {
@@ -544,5 +612,219 @@ impl Sketch {
             any = true;
         }
         any.then_some((lo, hi))
+    }
+}
+
+/// The circumcentre, translated before solving to avoid cancellation far from the origin.
+pub fn arc3_center(start: DVec2, through: DVec2, end: DVec2) -> Result<DVec2, String> {
+    if [start, through, end].iter().any(|p| !p.is_finite()) { return Err("arc points must be finite".into()); }
+    let (u, v) = (through - start, end - start);
+    let cross = u.perp_dot(v);
+    if u.length() < 1e-6 || v.length() < 1e-6 || through.distance(end) < 1e-6 || cross.abs() < 1e-9 * u.length() * v.length() {
+        return Err("a three-point arc needs three distinct points that are not on one line".into());
+    }
+    let centre = start + (v.perp() * -u.length_squared() + u.perp() * v.length_squared()) / (2.0 * cross);
+    if !centre.is_finite() || !centre.as_vec2().is_finite() { return Err("the arc centre is out of range".into()); }
+    Ok(centre)
+}
+
+/// Centre of an arc leaving `start` along `tangent` and arriving at `end`.
+pub fn tangent_arc_center(start: DVec2, tangent: DVec2, end: DVec2) -> Result<DVec2, String> {
+    let t = tangent.try_normalize().filter(|t| t.is_finite()).ok_or("the source has no usable tangent")?;
+    let d = end - start;
+    let den = 2.0 * d.dot(t.perp());
+    if !start.is_finite() || !end.is_finite() || d.length() < 1e-6 || den.abs() < 1e-9 * d.length() {
+        return Err("move the arc end away from the start and its tangent line".into());
+    }
+    let centre = start + t.perp() * (d.length_squared() / den);
+    if !centre.is_finite() || !centre.as_vec2().is_finite() { return Err("the arc centre is out of range".into()); }
+    Ok(centre)
+}
+
+pub(crate) fn validate_spline_points(points: [DVec2; 4]) -> Result<(), String> {
+    if points.iter().any(|p| !p.is_finite() || !p.as_vec2().is_finite()) { return Err("spline points must be finite and representable".into()); }
+    if points.windows(2).any(|p| p[0].distance(p[1]) < 1e-6) {
+        return Err("neighbouring spline fit points must be distinct".into());
+    }
+    Ok(())
+}
+
+fn spline_edge(points: [DVec2; 4]) -> Result<cadrum::Edge, String> {
+    validate_spline_points(points)?;
+    let points = points.map(|p| cadrum::DVec3::new(p.x, p.y, 0.0));
+    cadrum::Edge::bspline(points.iter(), cadrum::BSplineEnd::NotAKnot).map_err(|e| format!("the spline could not be made: {e}"))
+}
+
+/// Preview the same interpolating curve used by the solid kernel, with a bounded cache.
+/// Invalid transient edits return an empty curve instead of a misleading straight-line substitute.
+pub fn spline_polyline(points: [DVec2; 4]) -> Vec<DVec2> {
+    type Entry = ([u64; 8], Vec<DVec2>);
+    thread_local! { static CACHE: std::cell::RefCell<std::collections::VecDeque<Entry>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) }; }
+    let key = std::array::from_fn(|i| points[i / 2][i % 2].to_bits());
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(i) = cache.iter().position(|e| e.0 == key) {
+            let entry = cache.remove(i).unwrap();
+            let result = entry.1.clone();
+            cache.push_back(entry);
+            return result;
+        }
+        let result: Vec<_> = spline_edge(points).map(|edge| edge.approximation_segments(cadrum::Tessellation {
+            deflection_linear: 0.0005, deflection_angular: 0.1, relative_linear: true,
+        }).into_iter().map(|p| DVec2::new(p.x, p.y)).collect()).unwrap_or_default();
+        if cache.len() == 128 { cache.pop_front(); }
+        cache.push_back((key, result.clone()));
+        result
+    })
+}
+
+impl Sketch {
+    pub fn add_spline(&mut self, points: [Id; 4], construction: bool) -> Result<Id, String> {
+        if points.iter().any(|p| !self.points.contains_key(p)) { return Err("a spline fit point is missing".into()); }
+        spline_edge(points.map(|p| self.pos(p)))?;
+        let [a,b,c,d] = points;
+        Ok(self.add(Geom::Spline { a,b,c,d }, construction))
+    }
+
+    pub fn add_arc3(&mut self, start: Id, through: Id, end: Id, construction: bool) -> Result<Id, String> {
+        if [start,through,end].iter().any(|p| !self.points.contains_key(p)) { return Err("an arc point is missing".into()); }
+        let centre = arc3_center(self.pos(start), self.pos(through), self.pos(end))?;
+        let c = self.add_point(centre);
+        let (s,e) = if (self.pos(through)-self.pos(start)).perp_dot(self.pos(end)-self.pos(start)) > 0.0 { (start,end) } else { (end,start) };
+        let arc = self.add(Geom::Arc { c,s,e }, construction);
+        self.arc_guides.insert(arc,ArcGuide::Through { point:through });
+        Ok(arc)
+    }
+
+    /// Tangent pointing out of an endpoint, extending a line or circular arc.
+    pub fn endpoint_tangent(&self, entity: Id, endpoint: Id) -> Option<DVec2> {
+        let direction = match self.entities.get(&entity)?.geom {
+            Geom::Line { a,b } if endpoint == a => self.pos(a)-self.pos(b),
+            Geom::Line { a,b } if endpoint == b => self.pos(b)-self.pos(a),
+            Geom::Arc { c,s,.. } if endpoint == s => -(self.pos(s)-self.pos(c)).perp(),
+            Geom::Arc { c,e,.. } if endpoint == e => (self.pos(e)-self.pos(c)).perp(),
+            _ => return None,
+        };
+        direction.try_normalize()
+    }
+
+    pub fn add_tangent_arc(&mut self, source: Id, start: Id, end: Id, construction: bool) -> Result<Id, String> {
+        if !self.points.contains_key(&end) { return Err("the arc end is missing".into()); }
+        let tangent = self.endpoint_tangent(source,start).ok_or("choose the endpoint of a line or circular arc")?;
+        let centre = tangent_arc_center(self.pos(start),tangent,self.pos(end))?;
+        let c = self.add_point(centre);
+        let (s,e) = if (self.pos(start)-centre).perp().dot(tangent) > 0.0 { (start,end) } else { (end,start) };
+        let arc = self.add(Geom::Arc { c,s,e }, construction);
+        self.add_constraint(CKind::Tangent, &[source,arc], None)?;
+        self.arc_guides.insert(arc,ArcGuide::Tangent { source,start });
+        Ok(arc)
+    }
+
+    /// Set signed sketch coordinates as persistent, editable dimensions.
+    /// Call inside a document transaction and solve afterwards to reject conflicts atomically.
+    pub fn set_point_coordinates(&mut self, point: Id, x: Value, y: Value) -> Result<(), String> {
+        if !self.points.contains_key(&point) { return Err("the point is missing".into()); }
+        if point == ORIGIN || self.fixed.contains(&point) || self.constraints.values().any(|c| c.kind == CKind::Fix && (c.refs == [point] || c.refs.iter().any(|id| self.ent_points(*id).contains(&point)))) {
+            return Err("a fixed point cannot be positioned; remove its Fix constraint first".into());
+        }
+        let pos = DVec2::new(x.v,y.v);
+        if !pos.is_finite() || !pos.as_vec2().is_finite() { return Err("point coordinates must be finite and representable".into()); }
+        for (kind,value) in [(CKind::PositionX,x),(CKind::PositionY,y)] {
+            if let Some(existing) = self.constraints.values_mut().find(|c| c.kind == kind && c.refs == [point]) { existing.value = Some(value); }
+            else { self.add_constraint(kind, &[point], Some(value))?; }
+        }
+        self.points.insert(point,pos);
+        Ok(())
+    }
+
+    /// Endpoints of drawn outlines that have only one incident segment.
+    /// Coordinate coincidence and explicit point coincidence use the profile closure tolerance.
+    pub fn open_endpoints(&self) -> Vec<Id> {
+        let nodes = crate::profile::point_nodes(self);
+        let mut degree = BTreeMap::<Id, usize>::new();
+        let mut endpoint_ids = BTreeSet::new();
+        for e in self.entities.values().filter(|e| !e.construction) {
+            let pair = match e.geom {
+                Geom::Line { a,b } => [a,b], Geom::Arc { s,e,.. } => [s,e], Geom::Spline { a,d,.. } => [a,d],
+                Geom::Circle { .. } => continue,
+            };
+            for p in pair { *degree.entry(nodes[&p]).or_default() += 1; endpoint_ids.insert(p); }
+        }
+        endpoint_ids.into_iter().filter(|p| degree.get(&nodes[p]) == Some(&1)).collect()
+    }
+}
+
+impl Sketch {
+    /// Drop construction intent whose supporting geometry or tangent constraint was removed.
+    pub(crate) fn prune_arc_guides(&mut self) {
+        let valid: Vec<Id> = self.arc_guides.iter().filter_map(|(id,guide)| {
+            let Some(Geom::Arc { s,e,.. }) = self.entities.get(id).map(|e| e.geom) else { return Some(*id) };
+            let valid = match guide {
+                ArcGuide::Through { point } => self.points.contains_key(point),
+                ArcGuide::Tangent { source,start } => (*start == s || *start == e)
+                    && self.endpoint_tangent(*source,*start).is_some()
+                    && self.constraints.values().any(|c| c.kind == CKind::Tangent && c.refs.contains(id) && c.refs.contains(source)),
+            };
+            (!valid).then_some(*id)
+        }).collect();
+        for id in valid { self.arc_guides.remove(&id); }
+    }
+
+    /// Topological order of construction dependencies, without recursive stack growth.
+    pub(crate) fn arc_guide_order(&self) -> Result<Vec<Id>, String> {
+        let mut ordered = Vec::new();
+        let mut done = BTreeSet::new();
+        for root in self.arc_guides.keys().copied() {
+            let mut path = Vec::new();
+            let mut visited = BTreeSet::new();
+            let mut at = root;
+            while !done.contains(&at) {
+                if !visited.insert(at) { return Err("tangent arc guides contain a dependency cycle".into()); }
+                path.push(at);
+                match self.arc_guides[&at] {
+                    ArcGuide::Tangent { source,.. } if self.arc_guides.contains_key(&source) => at = source,
+                    _ => break,
+                }
+            }
+            for id in path.into_iter().rev() { done.insert(id); ordered.push(id); }
+        }
+        Ok(ordered)
+    }
+
+    /// Start the nonlinear solve near the analytic construction, especially when a
+    /// through point crosses the chord or a tangent end crosses its source line.
+    pub(crate) fn seed_guided_arcs(&mut self, fixed: &BTreeSet<Id>) {
+        for constraint in self.constraints.values() {
+            if let [point] = constraint.refs.as_slice() && !fixed.contains(point)
+                && let Some(value) = &constraint.value && let Some(p) = self.points.get_mut(point) {
+                match constraint.kind { CKind::PositionX => p.x = value.v, CKind::PositionY => p.y = value.v, _ => {} }
+            }
+        }
+        for arc in self.arc_guide_order().unwrap_or_default() {
+            let guide = self.arc_guides[&arc];
+            let Some(Geom::Arc { c,s,e }) = self.entities.get(&arc).map(|e| e.geom) else { continue };
+            if !fixed.contains(&c) {
+                let centre = match guide {
+                    ArcGuide::Through { point } => arc3_center(self.pos(s),self.pos(point),self.pos(e)).ok(),
+                    ArcGuide::Tangent { source,start } => self.endpoint_tangent(source,start).and_then(|t| tangent_arc_center(self.pos(start),t,self.pos(if start == s { e } else { s })).ok()),
+                };
+                if let Some(centre) = centre { self.points.insert(c,centre); }
+            }
+            self.orient_guided_arc(arc);
+        }
+    }
+
+    fn orient_guided_arc(&mut self, id: Id) {
+        let Some(Geom::Arc { c,s,e }) = self.entities.get(&id).map(|e| e.geom) else { return };
+        let flip = match self.arc_guides[&id] {
+            ArcGuide::Through { point } => (self.pos(point)-self.pos(s)).perp_dot(self.pos(e)-self.pos(s)) < 0.0,
+            ArcGuide::Tangent { source,start } => self.endpoint_tangent(source,start).zip(self.endpoint_tangent(id,start)).is_some_and(|(a,b)| a.dot(b) > 0.0),
+        };
+        if flip { self.entities.get_mut(&id).unwrap().geom = Geom::Arc { c,s:e,e:s }; }
+    }
+
+    /// Arc storage is CCW; keep the intended side after fit-point or tangent-end edits.
+    pub(crate) fn orient_guided_arcs(&mut self) {
+        for id in self.arc_guide_order().unwrap_or_default() { self.orient_guided_arc(id); }
     }
 }

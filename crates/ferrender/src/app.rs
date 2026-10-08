@@ -34,6 +34,9 @@ pub enum Tool {
     Rect,
     Circle,
     Arc,
+    Arc3,
+    TangentArc,
+    Spline,
     Point,
     Dimension,
     Polygon,
@@ -47,8 +50,9 @@ impl Tool {
     /// Clicks needed to place one of these.
     pub fn clicks(self) -> usize {
         match self {
-            Tool::Line | Tool::Rect | Tool::Circle | Tool::Polygon => 2,
-            Tool::Arc => 3,
+            Tool::Line | Tool::Rect | Tool::Circle | Tool::Polygon | Tool::TangentArc => 2,
+            Tool::Arc | Tool::Arc3 => 3,
+            Tool::Spline => 4,
             Tool::Point => 1,
             Tool::Select | Tool::Dimension | Tool::Trim | Tool::Project => 0,
         }
@@ -66,6 +70,15 @@ impl Tool {
             (Tool::Arc, 0) => "Click the arc's centre.",
             (Tool::Arc, 1) => "Click where the arc starts.",
             (Tool::Arc, _) => "Click where the arc ends.",
+            (Tool::Arc3, 0) => "Click the arc's start point.",
+            (Tool::Arc3, 1) => "Click a point the arc passes through.",
+            (Tool::Arc3, _) => "Click the arc's end point.",
+            (Tool::TangentArc, 0) => "Click a line or arc endpoint. At a junction, select the source edge first.",
+            (Tool::TangentArc, _) => "Click the new endpoint; the arc stays tangent to its source.",
+            (Tool::Spline, 0) => "Click the spline's start point.",
+            (Tool::Spline, 1) => "Click the first interior fit point.",
+            (Tool::Spline, 2) => "Click the second interior fit point.",
+            (Tool::Spline, _) => "Click the spline's end point. Drag its four fit points later to refine the curve.",
             (Tool::Point, _) => "Click to place a point.",
             (Tool::Polygon, 0) => "Click the polygon's centre. Set the number of sides in the Sketch Palette.",
             (Tool::Polygon, _) => "Click to place a corner.",
@@ -295,10 +308,19 @@ pub struct CombineDlg {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct PointCoordsDlg {
+    pub point: Option<Id>,
+    pub x: String,
+    pub y: String,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Dialog {
     None,
     /// Waiting for a plane or a flat face to sketch on.
     PickPlane,
+    PointCoordinates(PointCoordsDlg),
     Feature(FeatureDlg),
     Transform(TransformDlg),
     Combine(CombineDlg),
@@ -498,6 +520,7 @@ pub struct Opts {
     pub snap_grid: bool,
     pub constraints: bool,
     pub dimensions: bool,
+    pub gaps: bool,
     /// Sides for the polygon tool.
     pub sides: usize,
 }
@@ -530,6 +553,8 @@ pub enum Action {
     View(&'static str),
     Fit,
     Tool(Tool),
+    PointCoordinates,
+    ReferenceImage,
     Constrain(CKind),
     Construction,
     Fillet,
@@ -588,6 +613,9 @@ pub struct App {
     pub vp: Rect,
     /// Clickable dimension labels and constraint badges from the last frame.
     pub labels: Vec<(Rect, Id)>,
+    pub gap_cache: Option<(u64, Id, Vec<Id>)>,
+    pub reference_editor: crate::reference::Editor,
+    pub reference_texture: crate::reference::TextureCache,
     pub report: solver::Report,
     pub toast: Option<(String, f64)>,
     pub file_error: Option<FileError>,
@@ -656,9 +684,12 @@ impl App {
             typed: None,
             clipboard: None,
             pastes: 0,
-            opts: Opts { construction: false, grid: true, snap_grid: false, constraints: true, dimensions: true, sides: 6 },
+            opts: Opts { construction: false, grid: true, snap_grid: false, constraints: true, dimensions: true, gaps: true, sides: 6 },
             vp: Rect::NOTHING,
             labels: Vec::new(),
+            gap_cache: None,
+            reference_editor: Default::default(),
+            reference_texture: Default::default(),
             report: solver::Report::default(),
             toast: None,
             file_error: None,
@@ -788,8 +819,11 @@ impl App {
         let r = self.session.edit(|d| {
             let mut sk = d.sketch(sid).cloned().ok_or("The sketch no longer exists.")?;
             f(&mut sk, d)?;
+            sk.validate()?;
             let report = solver::solve(&mut sk, &[]);
+            sk.validate()?;
             *d.sketch_mut(sid).unwrap() = sk;
+            fr_core::validation::document(d)?;
             if report.ok { Ok(()) } else { Err("That conflicts with the sketch's other constraints.".to_owned()) }
         });
         if let Err(e) = &r {
@@ -800,6 +834,8 @@ impl App {
     }
 
     pub fn edit_sketch(&mut self, id: Id) {
+        self.reference_editor.cancel();
+        self.reference_texture.clear();
         let Some(sk) = self.session.doc.sketch_mut(id) else { return };
         sk.visible = true;
         let (plane, bounds) = (sk.plane, sk.bbox());
@@ -820,6 +856,8 @@ impl App {
     }
 
     fn leave_sketch(&mut self) {
+        self.reference_editor.cancel();
+        self.reference_texture.clear();
         self.mode = Mode::Model;
         self.tool = Tool::Select;
         self.clicks.clear();
@@ -834,6 +872,7 @@ impl App {
             return;
         }
         self.leave_sketch();
+        self.dialog = Dialog::None;
         (self.cam.yaw, self.cam.pitch) = (Camera::iso().yaw, Camera::iso().pitch);
         self.session.rebuild();
         self.refresh();
@@ -876,6 +915,7 @@ impl App {
                 id
             }
         };
+        let selected = self.sel.clone();
         let mut last = None;
         // Sizes typed into the boxes become dimensions on what is drawn.
         let typed = self.typed.take().map_or(Vec::new(), |t| t.fields);
@@ -939,6 +979,20 @@ impl App {
                     }
                     sk.add(Geom::Arc { c: centre, s, e }, construction);
                 }
+                Tool::Arc3 => {
+                    let ids = [place(sk, &c[0]), place(sk, &c[1]), place(sk, &c[2])];
+                    sk.add_arc3(ids[0], ids[1], ids[2], construction)?;
+                }
+                Tool::TangentArc => {
+                    let start = c[0].point.ok_or("Start at an existing line or arc endpoint.")?;
+                    let source = Self::tangent_source(sk, start, &selected)?;
+                    let end = place(sk, &c[1]);
+                    sk.add_tangent_arc(source, start, end, construction)?;
+                }
+                Tool::Spline => {
+                    let ids = [place(sk, &c[0]), place(sk, &c[1]), place(sk, &c[2]), place(sk, &c[3])];
+                    sk.add_spline(ids, construction)?;
+                }
                 Tool::Point => {
                     place(sk, &c[0]);
                 }
@@ -960,6 +1014,50 @@ impl App {
         } else if !done && tool == Tool::Line {
             self.clicks.push(c[0]);
         }
+    }
+
+    pub fn tangent_source(sk: &Sketch, start: Id, selected: &[Id]) -> Result<Id, String> {
+        let candidates: Vec<Id> = sk.entities.keys().copied().filter(|id| sk.endpoint_tangent(*id, start).is_some()).collect();
+        let preferred: Vec<Id> = candidates.iter().copied().filter(|id| selected.contains(id)).collect();
+        match if preferred.len() == 1 { preferred.as_slice() } else { candidates.as_slice() } {
+            [id] => Ok(*id),
+            [] => Err("Start at an existing line or arc endpoint.".into()),
+            _ => Err("Several edges meet here. Select the source line or arc, then choose Tangent Arc.".into()),
+        }
+    }
+
+    pub fn open_point_coordinates(&mut self, point: Option<Id>) {
+        self.reference_editor.cancel();
+        let Some((_, sk)) = self.sketch() else { self.toast("Start or edit a sketch first."); return };
+        let point = point.filter(|id| sk.points.contains_key(id));
+        let value = |kind: CKind, coordinate: usize| {
+            point.and_then(|p| sk.constraints.values().find(|c| c.kind == kind && c.refs == [p]).and_then(|c| c.value.as_ref()).map(|v| v.expr.clone()))
+                .unwrap_or_else(|| format!("{} mm", point.map_or(0.0, |p| sk.pos(p)[coordinate])))
+        };
+        let d = PointCoordsDlg { point, x: value(CKind::PositionX, 0), y: value(CKind::PositionY, 1), error: None };
+        self.cancel_tool();
+        self.tool = Tool::Select;
+        self.dialog = Dialog::PointCoordinates(d);
+    }
+
+    pub fn apply_point_coordinates(&mut self, dialog: &PointCoordsDlg) -> bool {
+        let mut point = None;
+        let ok = self.sketch_edit(|sk, doc| {
+            let x = doc.enter(&dialog.x, Kind::Length)?;
+            let y = doc.enter(&dialog.y, Kind::Length)?;
+            let at = DVec2::new(x.v, y.v);
+            let p = dialog.point.unwrap_or_else(|| {
+                if at.length() < 1e-7 && (x.is_formula() || y.is_formula()) { sk.add_point(at) }
+                else { sk.point_at(at, 1e-7) }
+            });
+            if p != ORIGIN || dialog.point.is_some() { sk.set_point_coordinates(p, x, y)?; }
+            point = Some(p);
+            Ok(())
+        });
+        if ok {
+            self.sel = point.into_iter().collect();
+        }
+        ok
     }
 
     /// The size a typed box holds, in millimetres, if what is in it is a usable length.
@@ -1044,11 +1142,13 @@ impl App {
             let positive = |v: fr_core::Value| if v.v > 0.0 { Ok(v) } else { Err("Dimensions must be greater than zero.".to_owned()) };
             match &edit.target {
                 EditTarget::Existing(cid) => {
-                    let kind = sk.constraints.get(cid).and_then(|c| c.kind.value_kind()).ok_or("That dimension no longer exists.")?;
-                    sk.constraints.get_mut(cid).unwrap().value = Some(positive(d.enter(&edit.text, kind)?)?);
+                    let kind = sk.constraints.get(cid).map(|c| c.kind).ok_or("That dimension no longer exists.")?;
+                    let value = d.enter(&edit.text, kind.value_kind().ok_or("That constraint is not a dimension.")?)?;
+                    sk.constraints.get_mut(cid).unwrap().value = Some(if matches!(kind, CKind::PositionX | CKind::PositionY) { value } else { positive(value)? });
                 }
                 EditTarget::New(kind, refs) => {
-                    let v = positive(d.enter(&edit.text, kind.value_kind().unwrap())?)?;
+                    let v = d.enter(&edit.text, kind.value_kind().unwrap())?;
+                    let v = if matches!(kind, CKind::PositionX | CKind::PositionY) { v } else { positive(v)? };
                     sk.add_constraint(*kind, refs, Some(v))?;
                 }
                 EditTarget::Fillet(p) | EditTarget::Chamfer(p) => {
@@ -1058,8 +1158,11 @@ impl App {
                     sk.offset(ids, d.enter(&edit.text, Kind::Length)?)?;
                 }
             }
+            sk.validate()?;
             let report = solver::solve(&mut sk, &[]);
+            sk.validate()?;
             *d.sketch_mut(sid).unwrap() = sk;
+            fr_core::validation::document(d)?;
             if report.ok { Ok(()) } else { Err("That size conflicts with the sketch's other constraints.".to_owned()) }
         });
         match r {
@@ -1345,6 +1448,14 @@ impl App {
             let (a, b) = (sk.plane.to_world(lo), sk.plane.to_world(hi));
             bounds = Some(bounds.map_or((a.min(b), a.max(b)), |(l, h)| (l.min(a).min(b), h.max(a).max(b))));
         }
+        if let Some((_, sk)) = self.sketch()
+            && let Some(image) = self.reference_editor.calibration_image().or(sk.reference.as_ref()).filter(|i| i.visible)
+        {
+            for point in image.corners() {
+                let p = sk.plane.to_world(point);
+                bounds = Some(bounds.map_or((p,p), |(lo,hi)| (lo.min(p),hi.max(p))));
+            }
+        }
         match bounds {
             Some((lo, hi)) if self.vp.is_positive() => self.cam.fit(lo, hi, self.vp.width() as f64, self.vp.height() as f64),
             _ => (self.cam.target, self.cam.scale) = (DVec3::ZERO, 4.0),
@@ -1379,6 +1490,7 @@ impl App {
         self.rename = None;
         self.pattern_at = None;
         self.scene.invalidate();
+        self.gap_cache = None;
         self.timeline = crate::timeline::Timeline::default();
         self.file_error = None;
         self.section.on = false;
@@ -1537,6 +1649,7 @@ impl App {
                 self.dialog = Dialog::Export(Unit::Mm);
             }
             Action::Undo | Action::Redo => {
+                self.reference_editor.cancel();
                 self.cancel_tool();
                 self.dialog = Dialog::None;
                 if a == Action::Undo { self.session.undo() } else { self.session.redo() };
@@ -1598,11 +1711,26 @@ impl App {
                 }
             }
             Action::Fit => self.fit(),
+            Action::PointCoordinates => {
+                let point = self.sketch().and_then(|(_, sk)| (self.sel.len() == 1).then(|| self.sel[0]).filter(|p| sk.points.contains_key(p)));
+                self.open_point_coordinates(point);
+            }
+            Action::ReferenceImage => {
+                if let Some((sid, sk)) = self.sketch() {
+                    let editor = crate::reference::Editor::open(sid, sk.reference.as_ref());
+                    self.cancel_tool();
+                    self.tool = Tool::Select;
+                    self.dialog = Dialog::None;
+                    self.reference_editor = editor;
+                } else { self.toast("Start or edit a sketch first."); }
+            }
             Action::Tool(t) => {
                 if self.sketch().is_some() {
+                    self.reference_editor.cancel();
                     self.cancel_tool();
+                    self.dialog = Dialog::None;
                     self.tool = t;
-                    if t != Tool::Select {
+                    if !matches!(t, Tool::Select | Tool::TangentArc) {
                         self.sel.clear();
                     }
                 }
@@ -1743,6 +1871,7 @@ impl App {
                 }
             }
             Action::Cancel => {
+                if self.reference_editor.sketch_id().is_some() { self.reference_editor.cancel(); return; }
                 if self.timeline.preview.take().is_some() {
                     return;
                 }
@@ -1790,6 +1919,11 @@ impl App {
             if !(typing && k == Key::Z) && ctx.input_mut(|i| i.consume_key(m, k)) {
                 self.run(ctx, a);
             }
+        }
+        if self.reference_editor.sketch_id().is_some() || matches!(self.dialog, Dialog::PointCoordinates(_)) {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) { self.run(ctx, Action::Cancel); }
+            else if !typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F)) { self.fit(); }
+            return;
         }
         let enter = ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::Enter));
         if typing {

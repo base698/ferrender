@@ -104,10 +104,17 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
             while i < ch.len() && (ch[i].is_ascii_digit() || ch[i] == '.') {
                 i += 1;
             }
+            if i < ch.len() && matches!(ch[i], 'e' | 'E') {
+                i += 1;
+                if i < ch.len() && matches!(ch[i], '+' | '-') { i += 1; }
+                let exponent = i;
+                while i < ch.len() && ch[i].is_ascii_digit() { i += 1; }
+                if i == exponent { return Err("a scientific exponent needs digits".into()); }
+            }
             let t: String = ch[st..i].iter().collect();
-            out.push(Tok::Num(
-                t.parse().map_err(|_| format!("bad number '{t}'"))?,
-            ));
+            let number: f64 = t.parse().map_err(|_| format!("bad number '{t}'"))?;
+            if !number.is_finite() { return Err("the number is not finite".into()); }
+            out.push(Tok::Num(number));
         } else if c.is_ascii_alphabetic() || c == '_' || c == '$' {
             let st = if c == '$' { i + 1 } else { i };
             i = st;

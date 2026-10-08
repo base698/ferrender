@@ -122,6 +122,8 @@ pub fn snap(app: &App, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Sn
             return Some(s);
         }
         Hit::Entity(id) => {
+            // Spline fit points are editable; point-on-spline constraints are not supported.
+            if matches!(sk.entities[&id].geom, Geom::Spline { .. }) { return Some(s); }
             s.on = Some(id);
             s.p = match (sk.line(id), sk.curve(id)) {
                 (Some((a, b)), _) => a + (b - a) * ((raw - a).dot(b - a) / (b - a).length_squared().max(1e-12)).clamp(0.0, 1.0),
@@ -436,7 +438,7 @@ pub fn constraint_icon(p: &Painter, r: Rect, kind: CKind, color: Color32) {
             p.rect_filled(Rect::from_min_max(at(-0.45, -0.05), at(0.45, 0.6)), 1.5, color);
             p.circle_stroke(at(0.0, -0.1), u * 0.3, s);
         }
-        CKind::Distance | CKind::Radius | CKind::Diameter | CKind::Angle => {
+        CKind::Distance | CKind::Radius | CKind::Diameter | CKind::Angle | CKind::PositionX | CKind::PositionY => {
             line((-0.65, 0.0), (0.65, 0.0));
             line((-0.65, -0.4), (-0.65, 0.4));
             line((0.65, -0.4), (0.65, 0.4));
@@ -475,6 +477,11 @@ fn draw_dimension(app: &App, painter: &Painter, sk: &Sketch, c: &Constraint, awa
     let kinds: Vec<Ref> = c.refs.iter().filter_map(|r| sk.ref_kind(*r)).collect();
     let foot = |p: DVec2, l: (DVec2, DVec2)| l.0 + (l.1 - l.0) * ((p - l.0).dot(l.1 - l.0) / (l.1 - l.0).length_squared().max(1e-12));
     match c.kind {
+        CKind::PositionX | CKind::PositionY => {
+            let at = px(sk.pos(c.refs[0]));
+            let (name, offset) = if c.kind == CKind::PositionX { ("X", vec2(38.0, -20.0)) } else { ("Y", vec2(38.0, 1.0)) };
+            Some(label(painter, at + offset, &format!("{name}: {}", app.doc().show(value, Kind::Length)), color, outline))
+        }
         CKind::Distance => {
             let (a, b) = match kinds.as_slice() {
                 [Ref::Line] => sk.line(c.refs[0])?,
@@ -552,6 +559,25 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
     if !active {
         return;
     }
+    if app.opts.gaps && let Some((_, _, ends)) = &app.gap_cache {
+        for id in ends {
+            if let Some(p) = sk.points.get(id) {
+                painter.circle_stroke(on_screen(app, sk, *p), 8.0, Stroke::new(2.0, Color32::from_rgb(225, 119, 15)));
+            }
+        }
+    }
+    // Selecting a spline exposes its four interpolation points and their order.
+    for (id, e) in &sk.entities {
+        if let Geom::Spline { a, b, c, d } = e.geom
+            && (picked(*id) || [a,b,c,d].iter().any(|p| picked(*p)))
+        {
+            let pts: Vec<Pos2> = [a,b,c,d].iter().map(|p| on_screen(app, sk, sk.pos(*p))).collect();
+            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0, SELECTED), 4.0, 4.0));
+            for (i, at) in pts.iter().enumerate() {
+                painter.text(*at + vec2(-10.0, -12.0), Align2::CENTER_CENTER, (i+1).to_string(), FontId::proportional(11.0), SKETCH);
+            }
+        }
+    }
     for (id, p) in &sk.points {
         let at = on_screen(app, sk, *p);
         let hot = picked(*id) || hover == Hit::Point(*id);
@@ -581,6 +607,7 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
                 Some(Ref::Point) => (on_screen(app, sk, sk.pos(anchor)), vec2(1.0, 0.0)),
                 _ => {
                     let pts = path(app, sk, anchor);
+                    if pts.is_empty() { continue; }
                     let i = (pts.len() - 1) / 2;
                     let (a, b) = (pts[i], pts[(i + 1).min(pts.len() - 1)]);
                     (if pts.len() == 2 { a + (b - a) / 2.0 } else { a }, (b - a).normalized())
@@ -673,7 +700,7 @@ fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
         {
             let before = live.clone();
             let report = solver::solve(live, &drags);
-            if report.ok {
+            if report.ok && live.validate().is_ok() {
                 app.report = report;
             } else {
                 *live = before;
@@ -720,11 +747,12 @@ fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
             Hit::Point(id) | Hit::Entity(id) | Hit::Label(id) => toggle(&mut app.sel, id, add),
         }
     }
-    if resp.double_clicked_by(PointerButton::Primary)
-        && let Hit::Label(cid) = hover
-        && let Some(pos) = resp.interact_pointer_pos()
-    {
-        app.edit_dimension(cid, pos);
+    if resp.double_clicked_by(PointerButton::Primary) {
+        match hover {
+            Hit::Point(id) => app.open_point_coordinates(Some(id)),
+            Hit::Label(cid) => if let Some(pos) = resp.interact_pointer_pos() { app.edit_dimension(cid, pos); },
+            _ => {}
+        }
     }
 }
 
@@ -866,6 +894,39 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
         (Tool::Arc, 2) => {
             painter.add(Shape::line(arc_points(c[0].p, c[1].p, s.p).into_iter().map(px).collect(), stroke));
         }
+        (Tool::Arc3, 1) => { painter.line_segment([px(c[0].p), px(s.p)], stroke); }
+        (Tool::Arc3, 2) => {
+            let mut preview = Sketch::new(Plane::XY);
+            let a = preview.add_point(c[0].p);
+            let b = preview.add_point(c[1].p);
+            let e = preview.add_point(s.p);
+            if let Ok(id) = preview.add_arc3(a, b, e, false) {
+                painter.add(Shape::line(preview.polyline(id).into_iter().map(px).collect(), stroke));
+            }
+        }
+        (Tool::TangentArc, 1) => {
+            if let Some(start) = c[0].point
+                && let Ok(source) = App::tangent_source(sk, start, &app.sel)
+            {
+                let mut preview = sk.clone();
+                let end = preview.add_point(s.p);
+                if let Ok(id) = preview.add_tangent_arc(source, start, end, false) {
+                    painter.add(Shape::line(preview.polyline(id).into_iter().map(px).collect(), stroke));
+                }
+            }
+        }
+        (Tool::Spline, n) if n > 0 => {
+            let mut pts: Vec<DVec2> = c.iter().map(|c| c.p).collect();
+            pts.push(s.p);
+            painter.extend(Shape::dashed_line(&pts.iter().copied().map(px).collect::<Vec<_>>(), stroke, 4.0, 4.0));
+            if pts.len() == 4 {
+                let mut preview = Sketch::new(Plane::XY);
+                let ids = [preview.add_point(pts[0]), preview.add_point(pts[1]), preview.add_point(pts[2]), preview.add_point(pts[3])];
+                if let Ok(id) = preview.add_spline(ids, false) {
+                    painter.add(Shape::line(preview.polyline(id).into_iter().map(px).collect(), stroke));
+                }
+            }
+        }
         _ => {}
     }
     // Show what the click will attach to.
@@ -978,6 +1039,9 @@ fn value_box(app: &mut App, ui: &Ui) {
 
 fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id) {
     let Some(sk) = app.session.doc.sketch(sid).cloned() else { return };
+    if app.opts.gaps && app.gap_cache.as_ref().is_none_or(|(rev, cached, _)| *rev != app.session.rev || *cached != sid) {
+        app.gap_cache = Some((app.session.rev, sid, sk.open_endpoints()));
+    }
     let dim = Hit::None;
     for (f, other) in app.session.doc.sketches().filter(|(f, s)| f.id != sid && s.visible) {
         let _ = f;
@@ -988,6 +1052,16 @@ fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
     draw_sketch(app, painter, &sk, true, if matches!(app.tool, Tool::Select | Tool::Dimension | Tool::Trim) { hover } else { Hit::None }, &mut labels);
     app.labels = labels;
 
+    if app.reference_editor.sketch_id() == Some(sid) {
+        let cursor = resp.hover_pos().and_then(|p| sketch_pos(app, &sk, p));
+        app.reference_editor.paint_calibration(painter, sk.plane, app.cam, app.vp, cursor);
+        if app.reference_editor.is_calibrating() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            if resp.clicked_by(PointerButton::Primary) && let Some(p) = cursor { app.reference_editor.calibration_click(p); }
+        }
+        return;
+    }
+    if matches!(app.dialog, Dialog::PointCoordinates(_)) { return; }
     if app.value_edit.is_some() {
         // A click elsewhere confirms the box, or drops it if the value is no good.
         if resp.clicked() && !app.commit_value() {
@@ -1470,6 +1544,11 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, BG_VIEW);
+    if let Some((_, sk)) = app.sketch() {
+        let plane = sk.plane;
+        let image = app.reference_editor.calibration_image().or(sk.reference.as_ref()).cloned();
+        if let Some(image) = image && let Err(error) = app.reference_texture.paint(&painter, &image, plane, app.cam, rect) { app.toast(error); }
+    }
     draw_grid(app, &painter);
     draw_bodies(app, ui, &painter);
     match app.mode {
@@ -1495,5 +1574,6 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (_, Mode::Sketch(_)) => app.tool.hint(app.clicks.len()),
         _ => "Drag to orbit, Shift-drag or middle-drag to pan, scroll to zoom. Click a face to select it.",
     };
+    let hint = app.reference_editor.calibration_hint().unwrap_or(hint);
     painter.text(rect.left_bottom() + vec2(12.0, -10.0), Align2::LEFT_BOTTOM, hint, FontId::proportional(12.5), Color32::from_rgb(110, 116, 128));
 }

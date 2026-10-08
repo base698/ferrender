@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use glam::DVec2;
 
-use crate::sketch::{CKind, Geom, Id, ORIGIN, Ref, Sketch};
+use crate::sketch::{ArcGuide, CKind, Geom, Id, ORIGIN, Ref, Sketch};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
@@ -48,7 +48,7 @@ impl Sys<'_> {
         match self.sk.entities[&id].geom {
             Geom::Circle { c, r } => (self.p(x, c), self.ridx.get(&id).map_or(r, |i| x[*i])),
             Geom::Arc { c, s, .. } => (self.p(x, c), self.p(x, c).distance(self.p(x, s))),
-            Geom::Line { .. } => unreachable!("constraint refs are validated when added"),
+            Geom::Line { .. } | Geom::Spline { .. } => unreachable!("constraint refs are validated when added"),
         }
     }
 
@@ -126,6 +126,8 @@ impl Sys<'_> {
                 (CKind::Distance, [Ref::Point, Ref::Point]) => out.push(self.p(x, r[0]).distance(self.p(x, r[1])) - v),
                 (CKind::Distance, [Ref::Point, Ref::Line]) => out.push(perp(self.p(x, r[0]), self.line(x, r[1])).abs() - v),
                 (CKind::Distance, _) => out.push(perp(self.line(x, r[1]).0, self.line(x, r[0])).abs() - v),
+                (CKind::PositionX, _) => out.push(self.p(x, r[0]).x - v),
+                (CKind::PositionY, _) => out.push(self.p(x, r[0]).y - v),
                 (CKind::Radius, _) => out.push(self.curve(x, r[0]).1 - v),
                 (CKind::Diameter, _) => out.push(self.curve(x, r[0]).1 * 2.0 - v),
                 (CKind::Angle, _) => {
@@ -144,8 +146,10 @@ impl Sys<'_> {
             if let Geom::Arc { c, s, e } = e.geom {
                 let c = self.p(x, c);
                 out.push(c.distance(self.p(x, s)) - c.distance(self.p(x, e)));
-                if let Some(o) = owners.as_deref_mut() {
-                    o.push(*eid);
+                if let Some(o) = owners.as_deref_mut() { o.push(*eid); }
+                if let Some(ArcGuide::Through { point }) = sk.arc_guides.get(eid) {
+                    out.push(c.distance(self.p(x,s)) - c.distance(self.p(x,*point)));
+                    if let Some(o) = owners.as_deref_mut() { o.push(*eid); }
                 }
             }
             if let Some(i) = self.ridx.get(eid) {
@@ -308,6 +312,7 @@ pub fn solve(sk: &mut Sketch, drags: &[(Id, DVec2)]) -> Report {
             fixed.extend(sk.ent_points(*r));
         }
     }
+    sk.seed_guided_arcs(&fixed);
     let mut x = Vec::new();
     let (mut pidx, mut ridx) = (HashMap::new(), HashMap::new());
     for (id, p) in &sk.points {
@@ -354,5 +359,6 @@ pub fn solve(sk: &mut Sketch, drags: &[(Id, DVec2)]) -> Report {
             *r = x[i].max(1e-6);
         }
     }
+    sk.orient_guided_arcs();
     Report { ok: bad.is_empty(), dof, bad }
 }

@@ -46,7 +46,7 @@ def main():
         (stage/'LINUX-DEPENDENCIES.txt').write_text(dependencies)
     for doc in ['README.md', 'BISHOP_TUTORIAL.md', 'RELEASING.md']:
         shutil.copy2(ROOT/doc, stage/doc)
-    shutil.copytree(ROOT/'docs/images', stage/'docs/images')
+    shutil.copytree(ROOT/'docs', stage/'docs')
     (stage/'BUILD-INFO.txt').write_text(info)
     licenses = stage/'licenses'
     licenses.mkdir()

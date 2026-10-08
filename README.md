@@ -69,7 +69,7 @@ Every screenshot here is the real app, driven and rendered offscreen by the test
       <br>
       <sub>The one sketch behind the block. Every <code>fx:</code> is a formula: the circle sits at <code>w / 2</code>, <code>d / 2</code>.</sub>
       <h3>Dimensions that are formulas</h3>
-      Draw roughly, then say what you mean: horizontal, tangent, equal, 30 from that edge. The status bar counts the freedom left, and the sketch turns black when nothing can move. Twelve kinds of constraint, and a conflicting one is refused.
+      Draw roughly, then say what you mean: horizontal, tangent, equal, 30 from that edge. The status bar counts the freedom left, and the sketch turns black when nothing can move. Position dimensions and geometric constraints preserve your intent; a conflicting edit is refused.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/typed.jpg" alt="A rectangle being drawn from the origin with two small boxes above it, Width holding w = 48 with a lock and Height being typed as 0.75 in" width="100%">
@@ -193,8 +193,8 @@ been tried against the live API.
 
 | | |
 |---|---|
-| **Sketch** | Line, rectangle, circle, arc, point, polygon; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
-| **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; length, distance, radius, diameter and angle dimensions |
+| **Sketch** | Line, rectangle, circle, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
+| **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; signed X/Y position, length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
 | **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, join / cut / intersect, fillet, chamfer, shell |
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
@@ -207,6 +207,10 @@ been tried against the live API.
 
 It is early, and smaller than what it imitates: no assemblies or joints, no loft or sweep, no drawings, and the
 [limits](#limits) below are real. `TODO.md` has the list.
+
+## Sketching improvements in 0.2
+
+The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](docs/SKETCHING_0.2.md) for the controls, limits, and checks. The [30 mm bishop tutorial](BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](docs/tutorials/BISHOP_0.1.md) is preserved.
 
 ## Get started
 
@@ -252,8 +256,18 @@ Use **Help → About Ferrender** to see the version, full source commit, whether
 New Sketch, pick a plane (or click a flat face of a body). Line
 (L), Rectangle (R), Circle (C), Arc (A), Point (P). Clicks snap to existing
 points and onto lines and curves; a nearly horizontal or vertical line becomes
-exactly so. Drag anything with Select (S); it moves as far as its constraints
-allow. X toggles construction geometry.
+exactly so. **3-Point Arc** uses start, through, and end points; **Tangent Arc**
+continues from a line or arc endpoint. **Spline** passes through four editable
+fit points. **Point Coordinates…** creates a point or edits a selected one
+with signed X/Y expressions; double-click a point to reopen it. Position
+dimensions keep the coordinates attached to parameters. Drag with Select (S);
+geometry moves as far as its constraints allow. X toggles construction geometry.
+
+**Reference Image…** embeds a PNG or JPEG behind the active sketch for tracing,
+with placement, opacity, and two-point scale calibration. It contributes no
+solid geometry or STL/STEP content. **Highlight Open Ends** in the Sketch
+Palette marks unconnected outline endpoints; it does not repair them or
+certify that a crossing or self-intersecting outline is a valid profile.
 
 ### Rework
 
@@ -291,6 +305,7 @@ Every size box takes an expression:
 | `$w / 2 + 1 mm` | arithmetic with parameters (`w / 2` works too) |
 | `w = 60 mm` | defines the parameter `w` and uses it here |
 | `90 deg`, `1.57 rad` | angles |
+| `1e-6 mm`, `-2.5E+1 mm` | finite values in scientific notation |
 
 Parameters are also listed and edited under Parameters. Changing one rebuilds
 everything that uses it. Bare numbers are stored with the units they were
@@ -489,7 +504,9 @@ panel, which is saved to the config file.
 The native format is `.ferr`: one JSON file holding the units, parameters and
 the feature timeline, with every sketch's points, entities, constraints and
 dimension expressions. Bodies are not stored; they are rebuilt from the
-features on open. Imported meshes are stored inside it.
+features on open. Imported meshes and reference images are stored inside it.
+Files that use new sketch types, position dimensions, or reference images
+require a version that supports them; keep a separate copy for older builds.
 
 Unsaved changes are copied, about a second after each one, to a `recovery`
 folder beside the settings. The copy is removed when you save and when the app
@@ -548,9 +565,16 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 - Offset does not handle arcs. Pattern axes and mirror planes are the model's
   own, through the origin. Section view needs the GPU viewport and does not
   affect picking.
-- Not built yet: general helix and sweep, loft, sphere and spline items,
-  draft, copying a whole body, horizontal and vertical position dimensions.
-  See `TODO.md`.
+- The spline tool uses four fit points. Arbitrary fit-point counts, periodic
+  spline editing and spline tangent constraints are not available. Radius, Equal,
+  Offset, and Trim also do not support splines; Trim refuses sketches containing
+  them because spline intersections are not implemented. Tangent Arc starts
+  from a line or circular arc.
+- Reference images are limited to 8 MiB of source data, 4,194,304 pixels, and
+  8192 pixels per side. Calibration adjusts uniform scale; it cannot undo
+  photographic perspective distortion.
+- Not built yet: general helix and sweep, loft, sphere primitives, draft, and
+  copying a whole body. See `TODO.md`.
 
 ## Credits
 

@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 
 use crate::doc::{Document, FeatureKind};
-use crate::sketch::{Clip, Geom, Id, ORIGIN, Plane, Sketch};
+use crate::sketch::{ArcGuide, CKind, Clip, Geom, Id, ORIGIN, Plane, Sketch};
 
 const MAX_FEATURES: usize = 10_000;
 const MAX_SKETCH_ITEMS: usize = 10_000;
@@ -24,12 +24,13 @@ impl Sketch {
         if self.points.get(&ORIGIN).is_none_or(|p| *p != glam::DVec2::ZERO) {
             return Err("the sketch is missing its fixed origin".into());
         }
+        if let Some(reference) = &self.reference { reference.validate()?; }
         validate_contents(self)
     }
 }
 
 fn validate_contents(s: &Sketch) -> Result<(), String> {
-    if s.points.len() + s.entities.len() + s.constraints.len() > MAX_SKETCH_ITEMS {
+    if s.points.len() + s.entities.len() + s.constraints.len() + s.arc_guides.len() > MAX_SKETCH_ITEMS {
         return Err("the sketch has too many items (maximum 10000)".into());
     }
     let mut ids = BTreeSet::new();
@@ -48,6 +49,27 @@ fn validate_contents(s: &Sketch) -> Result<(), String> {
         if let Geom::Circle { r, .. } = ent.geom
             && (!r.is_finite() || r <= 0.0 || !(r as f32).is_finite())
         { return Err(format!("circle {id} needs a finite positive radius")); }
+    }
+    for (&id, ent) in &s.entities {
+        if let Geom::Spline { a,b,c,d } = ent.geom {
+            crate::sketch::validate_spline_points([a,b,c,d].map(|p| s.pos(p))).map_err(|e| format!("spline {id}: {e}"))?;
+        }
+    }
+    s.arc_guide_order()?;
+    for (&id,guide) in &s.arc_guides {
+        let Some(Geom::Arc { c,s:start,e:end }) = s.entities.get(&id).map(|e| e.geom) else { return Err("an arc guide refers to a missing arc".into()) };
+        match *guide {
+            ArcGuide::Through { point } => {
+                if !s.points.contains_key(&point) || [c,start,end].contains(&point) { return Err("a three-point arc needs its own through point".into()); }
+                crate::sketch::arc3_center(s.pos(start),s.pos(point),s.pos(end))?;
+            }
+            ArcGuide::Tangent { source,start:point } => {
+                if source == id || ![start,end].contains(&point) || s.endpoint_tangent(source,point).is_none()
+                    || !s.constraints.values().any(|c| c.kind == CKind::Tangent && c.refs.contains(&id) && c.refs.contains(&source)) {
+                    return Err("a tangent arc guide needs its source endpoint and tangent constraint".into());
+                }
+            }
+        }
     }
     for (&id, c) in &s.constraints {
         let canonical = s.normalize(c.kind, &c.refs).map_err(|e| format!("constraint {id}: {e}"))?;
@@ -69,7 +91,7 @@ fn validate_contents(s: &Sketch) -> Result<(), String> {
 impl Clip {
     /// Clipboard data is untrusted, even when it carries Ferrender's marker.
     pub fn validate(&self) -> Result<(), String> {
-        if self.points.len() + self.entities.len() + self.constraints.len() > MAX_SKETCH_ITEMS {
+        if self.points.len() + self.entities.len() + self.constraints.len() + self.arc_guides.len() > MAX_SKETCH_ITEMS {
             return Err("the clipboard has too many sketch items".into());
         }
         let mut ids = BTreeSet::new();
@@ -77,7 +99,7 @@ impl Clip {
             if !ids.insert(id) { return Err(format!("duplicate clipboard id {id}")); }
         }
         let next = ids.last().copied().unwrap_or(0).checked_add(1).ok_or("clipboard ids are out of range")?;
-        let mut s = Sketch { plane: Plane::XY, points: self.points.iter().copied().collect(), entities: self.entities.iter().copied().collect(), constraints: Default::default(), next, visible: true, fixed: Default::default() };
+        let mut s = Sketch { plane: Plane::XY, points: self.points.iter().copied().collect(), entities: self.entities.iter().copied().collect(), constraints: Default::default(), next, visible: true, fixed: Default::default(), reference: None, arc_guides: self.arc_guides.clone() };
         for c in &self.constraints {
             let id = s.next;
             s.next = s.next.checked_add(1).ok_or("clipboard ids are out of range")?;
@@ -92,6 +114,14 @@ impl Clip {
 pub fn document(d: &Document) -> Result<(), String> {
     if d.features.len() > MAX_FEATURES || d.params.len() > 1024 {
         return Err("the document exceeds the feature or parameter limit".into());
+    }
+    // Bound aggregate decoded image memory before validating (and decoding) any image.
+    let mut reference_pixels = 0u64;
+    for f in &d.features {
+        if let FeatureKind::Sketch(sketch) = &f.kind && let Some(image) = &sketch.reference {
+            reference_pixels += u64::from(image.pixel_width) * u64::from(image.pixel_height);
+            if reference_pixels > 16 * 1024 * 1024 { return Err("reference images exceed the document limit of 16 megapixels".into()); }
+        }
     }
     let mut names = BTreeSet::new();
     for p in &d.params {

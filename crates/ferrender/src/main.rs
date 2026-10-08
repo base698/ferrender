@@ -7,6 +7,7 @@ mod gpu;
 mod mcp;
 mod panels;
 mod recovery;
+mod reference;
 mod timeline;
 mod view;
 

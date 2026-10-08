@@ -57,9 +57,14 @@ SKETCHES
           {"type":"rect","from":[x,y],"to":[x,y]}          gets horizontal/vertical constraints; or "center":[x,y],"size":[w,h]
           {"type":"circle","center":[x,y],"radius":r}      or "diameter"
           {"type":"arc","center":[x,y],"start":[x,y],"end":[x,y]}   counter-clockwise from start to end
+          {"type":"arc3","start":[x,y],"through":[x,y],"end":[x,y]}   passes through three points, clockwise or counter-clockwise
+          {"type":"tangent_arc","source":ENTITY,"start":POINT,"end":[x,y]}   extends a line or circular arc endpoint with a persistent tangent constraint
+          {"type":"spline","points":[[x,y],[x,y],[x,y],[x,y]]}   native interpolating B-spline through four editable fit points
           {"type":"ngon","center":[x,y],"radius":r,"sides":6,"rotation":0}   regular polygon, corners on the radius
           {"type":"point","at":[x,y]}
    Endpoints at the same coordinates share one point, so shapes drawn end to end are closed. The sketch origin is point 0 and is fixed. Returns the new entity and point ids for each item.
+{"op":"point_coordinates","sketch":ID,"point":POINT,"x":"$width / 2","y":"-3 mm"}
+   Creates or updates signed position_x and position_y dimensions. Omit point to create a new point. Both expressions remain parametric, edits are one undo step, and conflicts leave the document unchanged. The fixed origin cannot be moved. Spline fit points use this same command; radius/tangent/equal constraints apply to circles and arcs, not spline entities.
 {"op":"add_constraint","sketch":ID,"kind":KIND,"refs":[ids],"value":V}
    geometric kinds: coincident (2 points | point+line | point+curve), horizontal / vertical (line | 2 points), parallel, perpendicular, collinear (2 lines), tangent (line+curve | 2 curves), equal (2 lines | 2 curves), midpoint (point+line), concentric (2 curves), symmetric (2 points + mirror line), fix (point | line)
    dimension kinds (need "value"): distance (line = its length | 2 points | point+line | 2 parallel lines), radius, diameter (circle or arc), angle (2 lines)
@@ -199,7 +204,9 @@ fn sketch_info(doc: &Document, id: Id) -> J {
                 Geom::Line { a, b } => json!({"type": "line", "a": a, "b": b, "length": len_out(doc, sk.pos(a).distance(sk.pos(b)))}),
                 Geom::Circle { c, r } => json!({"type": "circle", "center": c, "radius": len_out(doc, r)}),
                 Geom::Arc { c, s, e } => json!({"type": "arc", "center": c, "start": s, "end": e, "radius": len_out(doc, sk.pos(c).distance(sk.pos(s)))}),
+                Geom::Spline { a,b,c,d } => json!({"type":"spline","points":[a,b,c,d]}),
             };
+            if let Some(guide) = sk.arc_guides.get(eid) { o["arc_guide"] = json!(guide); }
             o["id"] = json!(eid);
             if e.construction {
                 o["construction"] = json!(true);
@@ -233,6 +240,7 @@ fn sketch_info(doc: &Document, id: Id) -> J {
         "degrees_of_freedom": report.dof,
         "fully_constrained": report.ok && report.dof == 0,
         "profiles": profs,
+        "open_endpoints": sk.open_endpoints(),
     })
 }
 
@@ -546,6 +554,28 @@ fn add_item(doc: &mut Document, sid: Id, item: &J, construction: bool) -> R<J> {
             pts = vec![sk.point_at(c, TOL), sk.point_at(s, TOL), sk.point_at(e, TOL)];
             ents.push(sk.add(Geom::Arc { c: pts[0], s: pts[1], e: pts[2] }, construction));
         }
+        "arc3" => {
+            let positions = [p(doc,"start")?, p(doc,"through")?, p(doc,"end")?];
+            let sk = sk_mut(doc,sid);
+            pts = positions.into_iter().map(|p| sk.point_at(p,TOL)).collect();
+            ents.push(sk.add_arc3(pts[0],pts[1],pts[2],construction)?);
+        }
+        "tangent_arc" => {
+            let source = id_of(item,"source")?;
+            let start = id_of(item,"start")?;
+            let end = p(doc,"end")?;
+            let sk = sk_mut(doc,sid);
+            let end = sk.point_at(end,TOL);
+            pts = vec![start,end];
+            ents.push(sk.add_tangent_arc(source,start,end,construction)?);
+        }
+        "spline" => {
+            let points = item["points"].as_array().filter(|p| p.len() == 4).ok_or("a spline needs four fit points")?;
+            let positions = points.iter().map(|p| xy(doc,p)).collect::<R<Vec<_>>>()?;
+            let sk = sk_mut(doc,sid);
+            pts = positions.into_iter().map(|p| sk.point_at(p,TOL)).collect();
+            ents.push(sk.add_spline([pts[0],pts[1],pts[2],pts[3]],construction)?);
+        }
         "ngon" => {
             let c = p(doc, "center")?;
             let sides = item["sides"].as_u64().filter(|n| (3..=64).contains(n)).ok_or("an ngon needs \"sides\" between 3 and 64")? as usize;
@@ -570,7 +600,9 @@ fn add_item(doc: &mut Document, sid: Id, item: &J, construction: bool) -> R<J> {
 
 /// Solves a sketch after a change, failing if its constraints now conflict.
 fn settle(doc: &mut Document, sid: Id) -> R<solver::Report> {
+    sk_mut(doc,sid).validate()?;
     let report = solver::solve(sk_mut(doc, sid), &[]);
+    sk_mut(doc,sid).validate()?;
     if report.ok { Ok(report) } else { Err("that conflicts with the sketch's other constraints".into()) }
 }
 
@@ -1166,6 +1198,20 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 let out: Vec<J> = items.iter().enumerate().map(|(i, it)| add_item(d, sid, it, construction).map_err(|e| format!("item {i}: {e}"))).collect::<R<_>>()?;
                 let report = settle(d, sid)?;
                 Ok(json!({"sketch": sid, "items": out, "degrees_of_freedom": report.dof}))
+            })
+        }
+        "point_coordinates" => {
+            let sid = sketch_id(&s.doc,c)?;
+            let point = if c["point"].is_null() { None } else { Some(id_of(c,"point")?) };
+            let (x,y) = (text_of(&c["x"])?,text_of(&c["y"])?);
+            s.edit(|d| {
+                let (x,y) = (d.enter(&x,Kind::Length)?,d.enter(&y,Kind::Length)?);
+                let sk = sk_mut(d,sid);
+                let point = point.unwrap_or_else(|| sk.add_point(DVec2::new(x.v,y.v)));
+                sk.set_point_coordinates(point,x,y)?;
+                let report = settle(d,sid)?;
+                sk_mut(d,sid).validate()?;
+                Ok(json!({"sketch":sid,"point":point,"degrees_of_freedom":report.dof}))
             })
         }
         "add_constraint" => {

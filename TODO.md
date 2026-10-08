@@ -48,9 +48,11 @@ Ordered roughly by how much each one cost.
 - [x] **Extrudes should survive that.** After the redraw every dependent extrude failed
       with "a profile it used is no longer closed", and `edit_feature` cannot repoint
       profiles, so all three extrudes were deleted and recreated.
-- [ ] **Parametric positions.** Coordinates in `add_geometry` are evaluated once and
-      forgotten. Add horizontal and vertical distance dimensions (point to point, point
-      to origin) so positions can follow parameters, and a centred-rectangle item.
+- [x] **Parametric point positions.** 0.2 adds signed X/Y position dimensions and direct
+      point-coordinate entry. Use those dimensions when a position should follow a
+      parameter; one-time coordinates in `add_geometry` are still just initial positions.
+- [ ] **Point-to-point horizontal/vertical distance dimensions.** Extend the signed
+      point-to-origin dimensions to two independently moving points.
 
 ## Copying and placing bodies
 
@@ -66,8 +68,11 @@ Ordered roughly by how much each one cost.
 - [x] **Threads.** `thread` on a rod or hole, and `hole` with `"modeled": true`. A general
       helix and sweep (springs, coils) is still not there.
 - [ ] **Loft** between profiles, for limbs, snouts and tails that change section.
-- [ ] **Sphere, ellipse and spline** sketch items or primitives. Joints, eyes and beads
+- [x] **Spline sketch items.** 0.2 adds editable curves through four fit points.
+- [ ] **Sphere and ellipse** sketch items or primitives. Joints, eyes and beads
       were faked with flat-ended cylinders.
+- [ ] **More spline controls.** Arbitrary fit-point counts, periodic splines, and tangent
+      constraints for spline endpoints.
 - [x] **Edge fillet and chamfer on solids.** Sketch corners can be rounded; body edges
       cannot.
 - [ ] **Shell** and **draft** would also help; taper only applies to a whole extrude.
@@ -106,7 +111,8 @@ proposed or noted as limits along the way and are still open.
   - [ ] Threads follow later cuts (they are overlapping shells; see README limits).
 - [ ] **T-splines / freeform surfaces** (the handle).
 - [ ] **Components and joints**: assemblies, grounding, joint limits.
-- [ ] **Reference image (canvas)** with calibrate-by-two-points.
+- [x] **Reference image (canvas)** with two-point scale calibration, placement, opacity,
+      and a PNG/JPEG embedded in the native document (0.2).
 - [ ] **Appearances**: per-body colour or material.
 
 ### Asked for or offered, not done
@@ -161,8 +167,9 @@ proposed or noted as limits along the way and are still open.
 - **Union export:** `export_stl` with `"union": true` (exact bodies only).
 - **Moving geometry:** `{"op": "move", "sketch", "ids", "by"}` keeps entity ids, so
   extrudes built on them survive.
-- **Parametric positions:** only the centred `rect` item is done; horizontal and
-  vertical distance dimensions are still open.
+- **Parametric positions:** the centred `rect` item predates 0.2; 0.2 adds signed X/Y
+  point-to-origin position dimensions and the Point Coordinates dialog. Point-to-point
+  horizontal/vertical dimensions remain open.
 - **Fillet, chamfer, shell:** `fillet_edges`, `chamfer_edges`, `shell`; edges and faces
   are listed under `topology` in `get_object_info`. Draft is still open.
 - **Docs:** the three gaps are in the reference text.

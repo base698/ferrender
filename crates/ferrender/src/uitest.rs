@@ -1452,3 +1452,185 @@ fn file_error_modal_blocks_viewport_and_shortcuts_until_dismissed() {
     click(&mut h, pos);
     assert!(h.state().sel_face.is_some(), "picking must work again after Dismiss");
 }
+
+#[test]
+fn point_coordinate_dialog_edits_dimensions_and_rejects_conflicts() {
+    let mut h = state_harness();
+    h.state_mut().create_sketch(Plane::XY);
+    run(&mut h, Action::PointCoordinates);
+    let Dialog::PointCoordinates(mut d) = h.state().dialog.clone() else { panic!("coordinate dialog") };
+    d.x = "width = 12 mm".into();
+    d.y = "-2.5e0 mm".into();
+    h.state_mut().dialog = Dialog::PointCoordinates(d);
+    h.run_steps(2);
+    h.get_by_label("Place Point").click();
+    h.run_steps(2);
+    let p = h.state().sel[0];
+    let (_, sk) = h.state().sketch().unwrap();
+    assert!(sk.pos(p).distance(DVec2::new(12.0, -2.5)) < 1e-6);
+    assert_eq!(sk.constraints.len(), 2);
+    assert!(sk.constraints.values().any(|c| c.value.as_ref().is_some_and(|v| v.expr.contains("width"))));
+    h.state_mut().open_point_coordinates(Some(p));
+    let Dialog::PointCoordinates(mut d) = h.state().dialog.clone() else { unreachable!() };
+    d.x = "$width / 2".into();
+    d.y = "1 in".into();
+    h.state_mut().dialog = Dialog::PointCoordinates(d);
+    h.run_steps(2);
+    h.get_by_label("Apply Coordinates").click();
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, Dialog::None);
+    assert!(h.state().sketch().unwrap().1.pos(p).distance(DVec2::new(6.0,25.4)) < 1e-6);
+    assert_eq!(h.state().sketch().unwrap().1.constraints.len(), 2, "updates existing dimensions");
+    run(&mut h, Action::Undo);
+    assert!(h.state().sketch().unwrap().1.pos(p).distance(DVec2::new(12.0,-2.5)) < 1e-6);
+    run(&mut h, Action::Redo);
+    let before = h.state().doc().clone();
+    h.state_mut().open_point_coordinates(Some(p));
+    let Dialog::PointCoordinates(mut d) = h.state().dialog.clone() else { unreachable!() };
+    d.x = "1e999".into();
+    assert!(!h.state_mut().apply_point_coordinates(&d));
+    assert_eq!(h.state().doc(), &before, "bad numbers leave document untouched");
+}
+
+#[test]
+fn new_curve_tools_close_profiles_and_show_editable_points() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.state_mut().cam.scale = 12.0;
+    h.state_mut().opts.dimensions = false;
+    h.run_steps(2);
+    run(&mut h, Action::Tool(Tool::Arc3));
+    for (x,y) in [(-25.0,0.0),(-20.0,8.0),(-15.0,0.0)] { let pos=at(&h,x,y); click(&mut h,pos); }
+    let (_, sk) = h.state().sketch().unwrap();
+    assert_eq!(sk.entities.len(),1);
+    assert_eq!(sk.open_endpoints().len(),2);
+    assert_eq!(sk.arc_guides.len(),1,"the through-point relationship remains editable");
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x,y) in [(-15.0,0.0),(-25.0,0.0)] { let pos=at(&h,x,y); click(&mut h,pos); }
+    assert!(h.state().sketch().unwrap().1.open_endpoints().is_empty());
+    assert_eq!(fr_core::profile::profiles(h.state().sketch().unwrap().1).len(),1);
+    run(&mut h, Action::Tool(Tool::Spline));
+    for (x,y) in [(0.0,0.0),(5.0,10.0),(10.0,5.0),(15.0,0.0)] { let pos=at(&h,x,y); click(&mut h,pos); }
+    let (_, sk) = h.state().sketch().unwrap();
+    let (spline, fit) = sk.entities.iter().find_map(|(id,e)| if let Geom::Spline {a,b,c,d}=e.geom {Some((*id,[a,b,c,d]))} else {None}).unwrap();
+    let original = sk.pos(fit[1]);
+    run(&mut h, Action::Tool(Tool::Select));
+    h.state_mut().sel=vec![spline];
+    let (from,to)=(at(&h,original.x,original.y),at(&h,original.x,original.y+3.0));
+    drag(&mut h,&[from,from+egui::vec2(0.0,-8.0),to]);
+    assert!(h.state().sketch().unwrap().1.pos(fit[1]).distance(original)>2.0);
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x,y) in [(15.0,0.0),(0.0,0.0)] { let pos=at(&h,x,y); click(&mut h,pos); }
+    run(&mut h, Action::Tool(Tool::Select));
+    h.state_mut().sel=vec![spline];
+    h.run_steps(2);
+    assert!(h.state().sketch().unwrap().1.open_endpoints().is_empty());
+    assert_eq!(fr_core::profile::profiles(h.state().sketch().unwrap().1).len(),2);
+    save(&mut h,"sketch-curves-02.png");
+}
+
+#[test]
+fn tangent_arc_clicks_preserve_the_selected_source_and_undo() {
+    let mut h=state_harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.state_mut().cam.scale=10.0;
+    h.run_steps(2);
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x,y) in [(-20.0,-10.0),(-10.0,-10.0)] { let p=at(&h,x,y); click(&mut h,p); }
+    run(&mut h, Action::Tool(Tool::Select));
+    let line=*h.state().sketch().unwrap().1.entities.keys().next().unwrap();
+    h.state_mut().sel=vec![line];
+    run(&mut h, Action::Tool(Tool::TangentArc));
+    assert_eq!(h.state().sel,vec![line]);
+    for (x,y) in [(-10.0,-10.0),(0.0,0.0)] { let p=at(&h,x,y); click(&mut h,p); }
+    let (_,sk)=h.state().sketch().unwrap();
+    assert_eq!(sk.entities.len(),2);
+    assert!(sk.constraints.values().any(|c| c.kind==CKind::Tangent));
+    assert!(h.state().report.ok);
+    run(&mut h,Action::Undo);
+    assert_eq!(h.state().sketch().unwrap().1.entities.len(),1);
+    run(&mut h,Action::Redo);
+    assert_eq!(h.state().sketch().unwrap().1.entities.len(),2);
+}
+
+#[test]
+fn reference_overlay_calibration_clicks_undo_and_portable_save() {
+    let mut h=harness();
+    h.state_mut().create_sketch(Plane::XY);
+    let mut png=std::io::Cursor::new(Vec::new());
+    let pixels=image::RgbaImage::from_fn(16,8,|x,y| {
+        if x<8 && y<4 { image::Rgba([220,20,30,255]) }
+        else if x>=8 && y<4 { image::Rgba([30,200,40,255]) }
+        else if x<8 { image::Rgba([30,60,220,255]) }
+        else { image::Rgba([230,200,30,255]) }
+    });
+    pixels.write_to(&mut png,image::ImageFormat::Png).unwrap();
+    let mut reference=fr_core::reference::ReferenceImage::from_bytes("tracing-test.png",png.get_ref(),20.0).unwrap();
+    reference.origin=DVec2::new(-20.0,-20.0);
+    reference.opacity=0.8;
+    assert!(h.state_mut().sketch_edit(|sk,_|{sk.reference=Some(reference);Ok(())}));
+    h.state_mut().fit();
+    h.run_steps(2);
+    let image=save(&mut h,"reference-overlay-02.png");
+    // Top-left source quadrant must remain red (the image must not be vertically flipped).
+    let red=at(&h,-15.25,-12.6);
+    let pixel=image.get_pixel(red.x.round() as u32,red.y.round() as u32);
+    assert!(i16::from(pixel[0])>i16::from(pixel[1])+50 && i16::from(pixel[0])>i16::from(pixel[2])+50,"top-left pixel {pixel:?}");
+    run(&mut h,Action::ReferenceImage);
+    h.get_by_label("Calibrate from Two Points…").click();
+    h.run_steps(2);
+    assert!(h.state().reference_editor.is_calibrating());
+    let a=at(&h,-20.0,-20.0); click(&mut h,a);
+    let b=at(&h,-10.0,-20.0); click(&mut h,b);
+    h.run_steps(2);
+    assert!(!h.state().reference_editor.is_calibrating());
+    h.get_by_label("Calibrate and Apply").click();
+    h.run_steps(2);
+    let (_,sk)=h.state().sketch().unwrap();
+    let calibrated=sk.reference.as_ref().unwrap();
+    assert!((calibrated.width-60.0).abs()<1e-5);
+    assert!(calibrated.origin.distance(DVec2::new(-20.0,-20.0))<1e-5);
+    let native=fr_core::io::to_json(h.state().doc());
+    assert!(native.contains("tracing-test.png"));
+    let restored=fr_core::io::from_json(&native).unwrap();
+    assert_eq!(restored,h.state().doc().clone());
+    run(&mut h,Action::Undo);
+    assert!((h.state().sketch().unwrap().1.reference.as_ref().unwrap().width-20.0).abs()<1e-5);
+    run(&mut h,Action::Redo);
+    assert!((h.state().sketch().unwrap().1.reference.as_ref().unwrap().width-60.0).abs()<1e-5);
+    run(&mut h,Action::ReferenceImage);
+    h.get_by_label("Remove Image").click();
+    h.run_steps(2);
+    assert!(h.state().sketch().unwrap().1.reference.is_none());
+    run(&mut h,Action::Undo);
+    assert!(h.state().sketch().unwrap().1.reference.is_some());
+}
+
+#[test]
+fn position_labels_accept_signed_zero_and_keep_zero_valued_parameters() {
+    let mut h=state_harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.state_mut().execute(&json!({"op":"set_parameter","name":"offset","expr":"0 mm"})).unwrap();
+    h.state_mut().open_point_coordinates(None);
+    let Dialog::PointCoordinates(mut d)=h.state().dialog.clone() else {unreachable!()};
+    d.x="$offset".into(); d.y="0 mm".into();
+    assert!(h.state_mut().apply_point_coordinates(&d));
+    let p=h.state().sel[0];
+    assert_ne!(p,fr_core::ORIGIN,"zero-valued parameter cannot be dropped by reusing fixed origin");
+    h.state_mut().execute(&json!({"op":"set_parameter","name":"offset","expr":"7 mm"})).unwrap();
+    assert!((h.state().sketch().unwrap().1.pos(p).x-7.0).abs()<1e-6);
+    let cid=*h.state().sketch().unwrap().1.constraints.iter().find(|(_,c)|c.kind==CKind::PositionX).unwrap().0;
+    for (text,expected) in [("-3 mm",-3.0),("0 mm",0.0)] {
+        h.state_mut().edit_dimension(cid,Pos2::new(500.0,500.0));
+        h.state_mut().value_edit.as_mut().unwrap().text=text.into();
+        assert!(h.state_mut().commit_value());
+        assert!((h.state().sketch().unwrap().1.pos(p).x-expected).abs()<1e-6);
+    }
+    h.state_mut().dialog=Dialog::None;
+    h.state_mut().sel=vec![p];
+    run(&mut h,Action::ReferenceImage);
+    key(&mut h,Key::Delete);
+    assert!(h.state().sketch().unwrap().1.points.contains_key(&p),"image editor must not forward Delete into the selected sketch");
+    key(&mut h,Key::Escape);
+    assert!(h.state().reference_editor.sketch_id().is_none());
+}

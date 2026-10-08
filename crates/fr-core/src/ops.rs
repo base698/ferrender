@@ -7,7 +7,7 @@ use std::f64::consts::TAU;
 use glam::{DVec2, DVec3};
 
 use crate::expr::Value;
-use crate::sketch::{CKind, Constraint, Geom, Id, ORIGIN, Sketch};
+use crate::sketch::{ArcGuide, CKind, Constraint, Geom, Id, ORIGIN, Sketch};
 
 /// A line segment or a circular arc; a circle is an arc that sweeps all the way round.
 #[derive(Clone, Copy)]
@@ -19,6 +19,7 @@ enum Shape {
 fn shape(sk: &Sketch, id: Id) -> Option<Shape> {
     match sk.entities.get(&id)?.geom {
         Geom::Line { a, b } => Some(Shape::Seg(sk.pos(a), sk.pos(b))),
+        Geom::Spline { .. } => None,
         Geom::Circle { c, r } => Some(Shape::Arc { c: sk.pos(c), r, a0: 0.0, sweep: TAU }),
         Geom::Arc { c, .. } => {
             let (a0, sweep) = sk.arc_angles(id)?;
@@ -103,7 +104,7 @@ impl Sketch {
         let t0 = s.param(click);
         let mut cuts: Vec<(f64, Id)> = Vec::new();
         for other in self.entities.keys().copied().filter(|o| *o != id) {
-            let o = shape(self, other).unwrap();
+            let o = shape(self, other).ok_or("Trim does not yet support intersections with splines. Edit their fit points instead.")?;
             for p in s.crossings(&o) {
                 let t = s.param(p);
                 if s.closed() || (1e-6..=1.0 - 1e-6).contains(&t) {
@@ -119,6 +120,9 @@ impl Sketch {
         let construction = self.entities[&id].construction;
         // What a dimension or midpoint on the entity meant no longer holds for the pieces.
         let stale = |c: &Constraint| c.refs.contains(&id) && matches!(c.kind, CKind::Distance | CKind::Midpoint | CKind::Equal | CKind::Symmetric);
+        // Trim turns a guided arc into ordinary circular pieces; its former fit
+        // point does not define either new piece. Keep that point as a sketch point.
+        self.arc_guides.remove(&id);
         let ends = self.ent_points(id);
 
         if s.closed() {
@@ -193,6 +197,7 @@ impl Sketch {
         for (old, e) in &clip.entities {
             let geom = match e.geom {
                 Geom::Line { a, b } => Geom::Line { a: map[&a], b: map[&b] },
+                Geom::Spline { a,b,c,d } => Geom::Spline { a:map[&a], b:map[&b], c:map[&c], d:map[&d] },
                 Geom::Circle { c, r } => Geom::Circle { c: map[&c], r },
                 // A reflection turns counter-clockwise into clockwise, so the ends swap.
                 Geom::Arc { c, s, e } => Geom::Arc { c: map[&c], s: map[&e], e: map[&s] },
@@ -203,6 +208,16 @@ impl Sketch {
             }
             map.insert(*old, new);
             out.push(new);
+        }
+        for (arc,guide) in &clip.arc_guides {
+            match *guide {
+                ArcGuide::Through { point } => { self.arc_guides.insert(map[arc],ArcGuide::Through { point:map[&point] }); }
+                ArcGuide::Tangent { source,start } => {
+                    let (arc,source,start) = (map[arc],map[&source],map[&start]);
+                    self.add_constraint(CKind::Tangent,&[source,arc],None)?;
+                    self.arc_guides.insert(arc,ArcGuide::Tangent { source,start });
+                }
+            }
         }
         out.extend(clip.points.iter().map(|(old, _)| map[old]).filter(|p| !ids.contains(p) && self.points.contains_key(p) && clip.entities.is_empty()));
         Ok(out)
@@ -219,7 +234,7 @@ impl Sketch {
                 _ => None,
             })
             .collect();
-        let touches_curve = self.entities.values().any(|e| !matches!(e.geom, Geom::Line { .. }) && [e.geom].iter().any(|g| matches!(g, Geom::Arc { s, e, .. } if *s == p || *e == p)));
+        let touches_curve = self.entities.values().any(|e| !matches!(e.geom, Geom::Line { .. }) && [e.geom].iter().any(|g| matches!(g, Geom::Arc { s, e, .. } if *s == p || *e == p) || matches!(g, Geom::Spline { a, d, .. } if *a == p || *d == p)));
         match lines.as_slice() {
             [a, b] if !touches_curve => Ok([*a, *b]),
             _ => Err("Pick a corner where exactly two lines meet.".into()),
@@ -280,7 +295,7 @@ impl Sketch {
                     out.push(new);
                 }
                 Some(Geom::Line { a, b }) => lines.push((*id, a, b)),
-                Some(Geom::Arc { .. }) => return Err("Offset works on lines and circles, not arcs yet.".into()),
+                Some(Geom::Arc { .. } | Geom::Spline { .. }) => return Err("Offset works on lines and circles; arcs and splines are not supported yet.".into()),
                 None => {}
             }
         }

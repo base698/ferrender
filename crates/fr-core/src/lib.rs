@@ -13,6 +13,7 @@ pub mod measure;
 pub mod mesh;
 pub mod ops;
 pub mod profile;
+pub mod reference;
 pub mod render;
 pub mod sketch;
 pub mod solver;

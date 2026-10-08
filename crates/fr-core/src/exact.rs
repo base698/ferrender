@@ -48,6 +48,7 @@ fn ring(path: &[Seg], plane: &Plane, z: f64) -> R<Vec<Edge>> {
             match *s {
                 Seg::Line(a, b) => Edge::line(at(a), at(b)),
                 Seg::Arc(a, m, b) => Edge::arc_3pts(at(a), at(m), at(b)),
+                Seg::Spline(points) => Edge::bspline(points.map(at).iter(), cadrum::BSplineEnd::NotAKnot),
                 Seg::Circle(centre, r) => Edge::circle(r, c(plane.normal())).map(|e| e.translate(at(centre))),
             }
             .map_err(|e| format!("the profile has an edge the kernel rejects: {e}"))
