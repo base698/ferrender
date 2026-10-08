@@ -147,6 +147,7 @@ pub fn document(d: &Document) -> Result<(), String> {
             FeatureKind::Sketch(s) => s.validate().map_err(|e|format!("sketch {}: {e}",f.id))?,
             FeatureKind::Import(m) => m.validate()?,
             FeatureKind::Text(t) => text(t)?,
+            FeatureKind::Pattern(p) => p.validate()?,
             _ => {}
         }
     }

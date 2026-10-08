@@ -337,8 +337,11 @@ are shown, not how big anything is.
 
 ### Model
 
-Extrude (E) and Revolve work on closed sketch profiles; click
-profiles in the viewport to add or remove them. A profile nested in another is
+Extrude (E) and Revolve work on closed sketch profiles. A sketch with one
+closed region selects it automatically; with multiple regions, click the one
+you want. A normal click replaces the selection; Shift-click adds or removes
+regions. This also applies after projecting a face: its outline remains usable
+geometry, but is never silently included with a new circle. A profile nested in another is
 a hole in it. Each can make a new body, or join, cut or intersect the bodies
 it touches. Double-click a feature in the timeline to edit it. Extrude can
 be set by dragging the arrow that stands on the profile or face (it lands
@@ -387,8 +390,13 @@ cancel. Dragging is disabled until the updated view finishes drawing.
 
 ### Pattern
 
-Repeats an extrude, revolve or imported mesh: around a world axis,
-in a row, or mirrored through an origin plane. A patterned cut cuts again at
+Repeats an extrude, revolve, standalone text or imported mesh: around an axis,
+in a row or rectangular grid, or mirrored through an origin plane. Axes belong
+to the source component. For four corners choose Linear, Count 2, and enable
+Second direction with Count 2 on another axis. Enter the distance between corner
+centers for each spacing; a negative value reverses that direction. Counts
+include the original, with at most 1000 positions in a grid. Double-click the
+pattern's timeline chip to edit both directions together. A patterned cut cuts again at
 each position; a patterned body makes more bodies. Dots in the viewport show
 where each copy will land. A cut copy that lands clear of every body is
 skipped; if they all miss, try another axis or a negative spacing.
@@ -597,8 +605,8 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
   merely cross are not split where they cross.
 - A sketch on a body's face, a projected outline and an extruded face record
   where the face was; they do not follow it if an earlier feature moves it.
-- Offset does not handle arcs. Pattern axes and mirror planes are the model's
-  own, through the origin. Section view needs the GPU viewport and does not
+- Offset does not handle arcs. Pattern axes and mirror planes use the source
+  component's frame, through its origin. Section view needs the GPU viewport and does not
   affect picking.
 - The spline tool uses four fit points. Arbitrary fit-point counts, periodic
   spline editing and spline tangent constraints are not available. Radius, Equal,

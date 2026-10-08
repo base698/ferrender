@@ -1637,15 +1637,12 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
                     f.axis = Axis::Line(l);
                     f.pick_axis = false;
                 } else if let Some((sid, p)) = over {
-                    if f.sketch != Some(sid) {
-                        f.profiles.clear();
-                    }
+                    let extend = resp.ctx.input(|i| i.modifiers.shift);
+                    if !extend || f.sketch != Some(sid) { f.profiles.clear(); }
                     f.sketch = Some(sid);
                     f.face = None;
                     match f.profiles.iter().position(|e| *e == p.edges) {
-                        Some(i) => {
-                            f.profiles.remove(i);
-                        }
+                        Some(i) => { f.profiles.remove(i); }
                         None => f.profiles.push(p.edges),
                     }
                 } else if !f.revolve
@@ -1841,15 +1838,18 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
                 }
                 if let (Some((_, c)), Ok(kind)) = (app.pattern_at.filter(|c| c.0 == key), p.pattern(&doc)) {
                     let places = fr_core::doc::Pattern { source, kind }.placements().unwrap_or_default();
-                    let mut at = to_screen(app, c);
-                    painter.circle(at, 5.0, colors.paper, Stroke::new(2.0, colors.accent));
+                    let origin = to_screen(app, c);
+                    painter.circle(origin, 5.0, colors.paper, Stroke::new(2.0, colors.accent));
                     let owner = app.doc().feature(source).map_or(0, |f| f.owner);
                     let frame = app.session.built.component_placement(owner);
+                    let mut points = vec![origin];
                     for place in places {
                         let next = to_screen(app, frame.transform_point3(place.point(frame.inverse().transform_point3(c))));
-                        painter.line_segment([at, next], Stroke::new(1.5, colors.accent));
+                        let index = points.len();
+                        let previous = if p.kind == 1 && p.second && index % p.count as usize == 0 { index - p.count as usize } else { index - 1 };
+                        painter.line_segment([points[previous], next], Stroke::new(1.5, colors.accent));
                         painter.circle(next, 5.0, colors.accent, Stroke::new(1.5, colors.paper));
-                        at = next;
+                        points.push(next);
                     }
                 }
             }
@@ -1928,8 +1928,8 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::DeleteComponent(_), _) => "Confirm deletion of the component and its contents, or cancel.",
         (Dialog::Feature(f), _) if f.pick_axis => "Click a sketch line to revolve around.",
         (Dialog::Feature(f), _) if f.pick_to => "Click the face the extrude should reach.",
-        (Dialog::Feature(f), _) if f.revolve => "Click closed sketch profiles to add or remove them.",
-        (Dialog::Feature(_), _) => "Click closed sketch profiles, or a flat face of a body. Drag the arrow to set the distance.",
+        (Dialog::Feature(f), _) if f.revolve => "Click a closed region to select it. Shift-click to add or remove regions.",
+        (Dialog::Feature(_), _) => "Click a closed region or flat face. Shift-click to add or remove regions. Drag the arrow to set the distance.",
         (Dialog::Pattern(_), _) => "The dots show where each copy will go.",
         (Dialog::Blend(_), _) => "Click edges of a body to add or remove them.",
         (Dialog::Shell(_), _) => "Click the faces to leave open.",

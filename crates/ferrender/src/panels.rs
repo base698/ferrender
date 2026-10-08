@@ -699,6 +699,8 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     }
                     op_row(ui, &mut f.op, &Op::ALL);
                 });
+                ui.label(RichText::new("Click a region to select it. Shift-click to add or remove regions.").color(colors.muted));
+                if ui.small_button("Clear profiles").clicked() { f.profiles.clear(); f.face = None; }
                 if f.face.is_some() && f.op == Op::Join {
                     let inward = app.doc().value(&f.text, Kind::Length).is_ok_and(|v| v.v < 0.0);
                     ui.label(RichText::new(if inward { "A negative distance pushes the face in and cuts." } else { "Pulls the face out. A negative distance pushes it in and cuts." }).color(colors.muted));
@@ -749,8 +751,13 @@ fn dialogs(app: &mut App, ctx: &Context) {
             });
         }
         Dialog::Pattern(mut p) => {
-            dialog_window(app, "Pattern").show(ctx, |ui| {
-                let sources: Vec<(Id, String)> = app.doc().features.iter().filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New)).map(|f| (f.id, f.name.clone())).collect();
+            dialog_window(app, if p.editing.is_some() { "Edit Pattern" } else { "Pattern" }).show(ctx, |ui| {
+                let before = p.editing.and_then(|id| app.doc().features.iter().position(|f| f.id == id)).unwrap_or(app.doc().active());
+                let owner = p.editing.and_then(|id| app.doc().feature(id).map(|f| f.owner));
+                let sources: Vec<(Id, String)> = app.doc().features.iter().take(before)
+                    .filter(|f| !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner) && owner.is_none_or(|owner| f.owner == owner))
+                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
+                    .map(|f| (f.id, format!("{} · {}", f.name, app.doc().component_name(f.owner)))).collect();
                 let shown = sources.iter().find(|s| Some(s.0) == p.source).map_or("choose".to_owned(), |s| s.1.clone());
                 egui::Grid::new("pattern").num_columns(3).show(ui, |ui| {
                     ui.label("Repeat");
@@ -767,6 +774,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                                 p.kind = i;
                                 p.text = text.into();
                                 p.axis = [2, 0, 0][i];
+                                if p.axis2 == p.axis { p.axis2 = if p.axis == 0 { 1 } else { 0 }; }
                             }
                         }
                     });
@@ -774,18 +782,40 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     ui.label(if p.kind == 2 { "Across" } else { "Axis" });
                     ui.horizontal(|ui| {
                         for (i, label) in [if p.kind == 2 { "YZ plane" } else { "X" }, if p.kind == 2 { "XZ plane" } else { "Y" }, if p.kind == 2 { "XY plane" } else { "Z" }].iter().enumerate() {
-                            ui.selectable_value(&mut p.axis, i, *label);
+                            if ui.selectable_value(&mut p.axis, i, *label).changed() && p.axis2 == p.axis {
+                                p.axis2 = if p.axis == 0 { 1 } else { 0 };
+                            }
                         }
                     });
                     ui.end_row();
                     if p.kind != 2 {
                         ui.label("Count");
-                        ui.add(egui::DragValue::new(&mut p.count).range(2..=360)).on_hover_text("Including the original");
+                        ui.add(egui::DragValue::new(&mut p.count).range(2..=if p.kind == 0 { 360 } else { 1000 })).on_hover_text("Including the original; at most 1000 positions total");
                         ui.end_row();
                         value_row(app, ui, if p.kind == 0 { "Angle" } else { "Spacing" }, &mut p.text, if p.kind == 0 { Kind::Angle } else { Kind::Length });
                     }
+                    if p.kind == 1 {
+                        ui.label("Grid");
+                        ui.checkbox(&mut p.second, "Second direction").on_hover_text("Repeat along two axes; for four corners use 2 by 2.");
+                        ui.end_row();
+                        if p.second {
+                            ui.label("Second axis");
+                            ui.horizontal(|ui| {
+                                for (axis, name) in ["X", "Y", "Z"].into_iter().enumerate().filter(|(axis, _)| *axis != p.axis) {
+                                    ui.selectable_value(&mut p.axis2, axis, name);
+                                }
+                            });
+                            ui.end_row();
+                            ui.label("Count 2");
+                            ui.add(egui::DragValue::new(&mut p.count2).range(2..=1000)).on_hover_text("Including the original; count times count 2 must be at most 1000");
+                            ui.end_row();
+                            value_row(app, ui, "Spacing 2", &mut p.text2, Kind::Length);
+                        }
+                    }
                 });
-                ui.label(RichText::new("Axes and planes are the model's, through the origin.").color(colors.muted));
+                let count = if p.kind == 2 { 2 } else { p.count as u64 * if p.kind == 1 && p.second { p.count2 as u64 } else { 1 } };
+                ui.label(RichText::new(format!("{count} positions including the original.")).color(colors.muted));
+                ui.label(RichText::new("Axes use the source component's frame. Negative spacing reverses a direction.").color(colors.muted));
                 app.dialog = Dialog::Pattern(p);
                 confirm(app, ui, "OK");
             });

@@ -5,6 +5,7 @@
 mod dimensions_v022;
 mod desktop_open;
 mod v030;
+mod project_pattern;
 
 use std::path::PathBuf;
 
@@ -170,10 +171,15 @@ fn sketch_dimension_copy_paste_and_extrude() {
     assert_eq!(sketch(&h).entities.len(), 6);
     save(&mut h, "sketch.png");
 
-    // Extrude straight from the sketch: the plate with both holes is preselected.
+    // Multiple regions need an explicit area choice, even with a single outer
+    // loop: the user may intend to extrude a circle instead of the plate.
     run(&mut h, Action::Extrude);
-    let Dialog::Feature(mut f) = h.state().dialog.clone() else { panic!("the extrude dialog should open") };
-    assert_eq!(f.profiles.len(), 1, "the outer region is preselected; the circles are its holes");
+    let Dialog::Feature(f) = &h.state().dialog else { panic!("the extrude dialog should open") };
+    assert!(f.profiles.is_empty());
+    let plate_region = at(&h, 5.0, 5.0);
+    click(&mut h, plate_region);
+    let Dialog::Feature(mut f) = h.state().dialog.clone() else { panic!("the extrude dialog should stay open") };
+    assert_eq!(f.profiles.len(), 1, "the chosen outer region keeps the circles as holes");
     f.text = "t = 8 mm".into();
     h.state_mut().dialog = Dialog::Feature(f);
     h.run_steps(2);

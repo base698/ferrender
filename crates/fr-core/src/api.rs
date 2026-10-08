@@ -12,7 +12,7 @@ use base64::Engine;
 use glam::{DVec2, DVec3};
 use serde_json::{Value as J, json};
 
-use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, Op, Pattern, PatternKind, Revolve, Session, Shell, Text, Thread, Transform};
+use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Op, Pattern, PatternKind, Revolve, Session, Shell, Text, Thread, Transform};
 use crate::measure::{self, Item};
 use crate::threads;
 use crate::exact;
@@ -110,6 +110,8 @@ FEATURES
 {"op":"create_sketch","face":{"body":BODY,"point":[x,y,z]}}   sketch on a flat face
 {"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve or import around a component-local axis through its origin; count includes the original
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":4,"spacing":V}
+{"op":"pattern","feature":ID,"type":"linear","axis":"x","count":2,"spacing":V,"axis2":"y","count2":2,"spacing2":V}
+   Optional axis2/count2/spacing2 form a rectangular grid; supply all three together, with distinct component-local axes. Each count includes the source and must be at least 2; their product is at most 1000. Spacing is between adjacent instances and can be negative; both spacings in a grid must be nonzero. Without a second direction, count is at most 1000 and zero spacing remains allowed for compatibility (coincident copies).
 {"op":"pattern","feature":ID,"type":"mirror","normal":"x"}   one reflected copy through the origin plane with that normal
 {"op":"edit_feature","feature":ID, ...}            any of distance, angle, operation, symmetric, extent, taper, axis, name, suppressed
 {"op":"delete_feature","feature":ID}
@@ -438,7 +440,14 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             let name = |a: &usize| ["x", "y", "z"].get(*a).copied().unwrap_or("?");
             match &p.kind {
                 PatternKind::Circular { axis, count, angle } => o["pattern"] = json!({"type": "circular", "axis": name(axis), "count": count, "angle": angle.expr}),
-                PatternKind::Linear { axis, count, spacing } => o["pattern"] = json!({"type": "linear", "axis": name(axis), "count": count, "spacing": spacing.expr}),
+                PatternKind::Linear { axis, count, spacing, second } => {
+                    o["pattern"] = json!({"type": "linear", "axis": name(axis), "count": count, "spacing": spacing.expr});
+                    if let Some(second) = second {
+                        o["pattern"]["axis2"] = json!(name(&second.axis));
+                        o["pattern"]["count2"] = json!(second.count);
+                        o["pattern"]["spacing2"] = json!(second.spacing.expr);
+                    }
+                },
                 PatternKind::Mirror { axis } => o["pattern"] = json!({"type": "mirror", "normal": name(axis)}),
             }
         }
@@ -1409,23 +1418,36 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         "pattern" => {
             let source = id_of(c, "feature")?;
             let axis = |key: &str, default: usize| match c[key].as_str().map(str::to_ascii_lowercase).as_deref() {
-                None => Ok(default),
+                None if c[key].is_null() => Ok(default),
+                None => Err(format!("{key} must be x, y or z")),
                 Some("x") => Ok(0),
                 Some("y") => Ok(1),
                 Some("z") => Ok(2),
                 Some(o) => Err(format!("unknown axis '{o}'; use x, y or z")),
             };
-            let count = c["count"].as_u64().unwrap_or(0) as u32;
+            let count = |key: &str| c[key].as_u64().and_then(|n|u32::try_from(n).ok()).ok_or(format!("{key} must be a positive whole number"));
+            let has_second = ["axis2", "count2", "spacing2"].iter().any(|key| !c[*key].is_null());
+            if has_second && !matches!(c["type"].as_str(), Some("linear" | "rectangular")) {
+                return Err("only linear patterns support a second direction".into());
+            }
             let kind = match c["type"].as_str() {
                 Some("circular") => PatternKind::Circular {
                     axis: axis("axis", 2)?,
-                    count,
+                    count: count("count")?,
                     angle: match &c["angle"] {
                         J::Null => s.doc.value("360", Kind::Angle)?,
                         v => s.doc.value(&text_of(v)?, Kind::Angle)?,
                     },
                 },
-                Some("linear" | "rectangular") => PatternKind::Linear { axis: axis("axis", 0)?, count, spacing: s.doc.value(&text_of(&c["spacing"]).map_err(|_| "a linear pattern needs a \"spacing\"")?, Kind::Length)? },
+                Some("linear" | "rectangular") => {
+                    let second = if has_second {
+                        if ["axis2", "count2", "spacing2"].iter().any(|key| c[*key].is_null()) {
+                            return Err("a second pattern direction needs axis2, count2 and spacing2 together".into());
+                        }
+                        Some(LinearDirection { axis: axis("axis2", 1)?, count: count("count2")?, spacing: s.doc.value(&text_of(&c["spacing2"])?, Kind::Length)? })
+                    } else { None };
+                    PatternKind::Linear { axis: axis("axis", 0)?, count: count("count")?, spacing: s.doc.value(&text_of(&c["spacing"]).map_err(|_| "a linear pattern needs a \"spacing\"")?, Kind::Length)?, second }
+                },
                 Some("mirror") => PatternKind::Mirror { axis: axis("normal", 0)? },
                 _ => return Err("pattern needs a \"type\": circular, linear or mirror".into()),
             };

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Color32, Context, Key, Modifiers, Pos2, Rect, ViewportCommand};
-use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Pattern, PatternKind, Revolve, Shell, Text, Thread, Transform};
+use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Pattern, PatternKind, LinearDirection, Revolve, Shell, Text, Thread, Transform};
 pub use fr_core::face::Face;
 use fr_core::render::Camera;
 use fr_core::sketch::Clip;
@@ -280,6 +280,7 @@ pub struct FileError {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatternDlg {
+    pub editing: Option<Id>,
     pub source: Option<Id>,
     /// 0 circular, 1 linear, 2 mirror.
     pub kind: usize,
@@ -287,6 +288,10 @@ pub struct PatternDlg {
     pub count: u32,
     /// Total angle or spacing.
     pub text: String,
+    pub second: bool,
+    pub axis2: usize,
+    pub count2: u32,
+    pub text2: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -337,13 +342,39 @@ pub enum Dialog {
 }
 
 impl PatternDlg {
-    /// The pattern the dialog describes.
+    pub fn new(source: Option<Id>) -> Self {
+        Self { editing: None, source, kind: 0, axis: 2, count: 4, text: "360 deg".into(),
+            second: false, axis2: 1, count2: 2, text2: "10 mm".into() }
+    }
+
+    fn from_feature(id: Id, pattern: &Pattern) -> Self {
+        let mut dialog = Self { editing: Some(id), ..Self::new(Some(pattern.source)) };
+        match &pattern.kind {
+            PatternKind::Circular { axis, count, angle } => {
+                dialog.axis = *axis; dialog.count = *count; dialog.text = angle.expr.clone();
+            }
+            PatternKind::Linear { axis, count, spacing, second } => {
+                dialog.kind = 1; dialog.axis = *axis; dialog.count = *count; dialog.text = spacing.expr.clone();
+                dialog.axis2 = if *axis == 0 { 1 } else { 0 };
+                if let Some(direction) = second {
+                    dialog.second = true; dialog.axis2 = direction.axis; dialog.count2 = direction.count; dialog.text2 = direction.spacing.expr.clone();
+                }
+            }
+            PatternKind::Mirror { axis } => { dialog.kind = 2; dialog.axis = *axis; }
+        }
+        dialog
+    }
+
+    /// The pattern the dialog describes, resolving any named-value entries.
     pub fn pattern(&self, d: &Document) -> Result<PatternKind, String> {
-        let text = self.text.split_once('=').map_or(self.text.as_str(), |t| t.0.trim());
-        let text = if self.text.contains('=') { format!("${}", text.trim_start_matches('$')) } else { text.to_owned() };
+        let value = |text: &str, kind| {
+            let text = text.split_once('=').map_or_else(|| text.to_owned(), |(name, _)| format!("${}", name.trim().trim_start_matches('$')));
+            d.value(&text, kind)
+        };
         Ok(match self.kind {
-            0 => PatternKind::Circular { axis: self.axis, count: self.count, angle: d.value(&text, Kind::Angle)? },
-            1 => PatternKind::Linear { axis: self.axis, count: self.count, spacing: d.value(&text, Kind::Length)? },
+            0 => PatternKind::Circular { axis: self.axis, count: self.count, angle: value(&self.text, Kind::Angle)? },
+            1 => PatternKind::Linear { axis: self.axis, count: self.count, spacing: value(&self.text, Kind::Length)?,
+                second: if self.second { Some(LinearDirection { axis: self.axis2, count: self.count2, spacing: value(&self.text2, Kind::Length)? }) } else { None } },
             _ => PatternKind::Mirror { axis: self.axis },
         })
     }
@@ -422,8 +453,18 @@ impl Dialog {
                     // Lets `name = value` in the box define a parameter first.
                     d.enter(&p.text, if p.kind == 0 { Kind::Angle } else { Kind::Length })?;
                 }
-                let kind = p.pattern(d)?;
-                Ok(d.add_feature(FeatureKind::Pattern(Pattern { source, kind })))
+                if p.kind == 1 && p.second { d.enter(&p.text2, Kind::Length)?; }
+                let pattern = Pattern { source, kind: p.pattern(d)? };
+                pattern.validate()?;
+                if let Some(id) = p.editing {
+                    let owner = d.feature(source).ok_or("The source feature no longer exists.")?.owner;
+                    let index = d.features.iter().position(|f| f.id == id).ok_or("The pattern no longer exists.")?;
+                    if !d.features.iter().take(index).any(|f| f.id == source && !f.suppressed) { return Err("Choose a source before this pattern in the timeline.".into()); }
+                    let feature = d.feature_mut(id).unwrap();
+                    if feature.owner != owner { return Err("Choose a source in the pattern's component.".into()); }
+                    feature.kind = FeatureKind::Pattern(pattern);
+                    Ok(id)
+                } else { Ok(d.add_feature(FeatureKind::Pattern(pattern))) }
             }
             Dialog::Blend(b) => {
                 let body = b.body.filter(|_| !b.edges.is_empty()).ok_or("Click the edges to blend.")?;
@@ -1404,6 +1445,7 @@ impl App {
         match &kind {
             FeatureKind::Plane(p) => { self.finish_sketch(); self.dialog = Dialog::Plane(crate::construction::PlaneDlg::from_plane(id, p)); }
             FeatureKind::Component(_) => self.move_component_dialog(id),
+            FeatureKind::Pattern(pattern) => { self.finish_sketch(); self.dialog = Dialog::Pattern(PatternDlg::from_feature(id, pattern)); }
             FeatureKind::Sketch(_) => self.edit_sketch(id),
             FeatureKind::Extrude(e) => {
                 self.finish_sketch();
@@ -1428,7 +1470,8 @@ impl App {
     }
 
     fn open_feature_dialog(&mut self, revolve: bool) {
-        // Coming straight from a sketch with one closed shape, use it.
+        // Only one closed region is unambiguous. Projected outlines and circles
+        // remain usable geometry, but must never all be extruded implicitly.
         let from = self.sketch().map(|(id, _)| id);
         let face_owner = self.sel_face.as_ref().and_then(|f| self.session.built.body(f.body)).map_or(self.doc().active_component, |b| b.component);
         let face = self.sel_face.clone().filter(|f| !revolve && from.is_none() && f.plane.is_some()).map(|f| self.local_face(f));
@@ -1441,10 +1484,8 @@ impl App {
         let mut picked = (None, Vec::new());
         if let [only] = candidates.as_slice() {
             let all = fr_core::profile::profiles(doc.sketch(*only).unwrap());
-            let outer: Vec<Vec<Id>> = all.iter().filter(|p| p.depth % 2 == 0).map(|p| p.edges.clone()).collect();
-            if all.len() == 1 || from.is_some() && !outer.is_empty() {
-                picked = (Some(*only), outer);
-            }
+            picked.0 = Some(*only); // Keep an edited, hidden sketch pickable.
+            if let [profile] = all.as_slice() { picked.1.push(profile.edges.clone()); }
         }
         if face.is_some() {
             picked = (None, Vec::new());
@@ -1966,10 +2007,12 @@ impl App {
             Action::Pattern => {
                 self.finish_sketch();
                 let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
-                let chosen = self.sel_feature.filter(|f| self.doc().feature(*f).is_some_and(|f| ok(&f.kind)));
-                let source = chosen.or(self.doc().features.iter().rfind(|f| ok(&f.kind)).map(|f| f.id));
+                let available = |f: &&fr_core::Feature| !f.suppressed && !self.session.built.errors.contains_key(&f.id) && self.session.built.components.contains_key(&f.owner) && ok(&f.kind);
+                let sources: Vec<_> = self.doc().features.iter().take(self.doc().active()).filter(available).collect();
+                let chosen = self.sel_feature.or(self.sel_body).filter(|id| sources.iter().any(|f| f.id == *id));
+                let source = chosen.or_else(|| sources.iter().rev().find(|f| f.owner == self.doc().active_component).map(|f| f.id));
                 match source {
-                    Some(_) => self.dialog = Dialog::Pattern(PatternDlg { source, kind: 0, axis: 2, count: 4, text: "360 deg".into() }),
+                    Some(_) => self.dialog = Dialog::Pattern(PatternDlg::new(source)),
                     None => self.toast("There is no extrude, revolve, standalone text or imported mesh to repeat yet."),
                 }
             }

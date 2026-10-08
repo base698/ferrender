@@ -90,14 +90,27 @@ pub struct Extrude {
     pub through_all: bool,
 }
 
-/// Where the copies of a patterned feature go. Axes are the world's: 0 = X, 1 = Y, 2 = Z.
+/// An additional direction in a rectangular pattern, in the component's frame.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinearDirection {
+    pub axis: usize,
+    /// Includes the source row or column.
+    pub count: u32,
+    pub spacing: Value,
+}
+
+/// Where copies go. Axes are component-local: 0 = X, 1 = Y, 2 = Z.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternKind {
     /// `count` copies in all, spread around an axis through the origin over `angle` degrees.
     Circular { axis: usize, count: u32, angle: Value },
-    /// `count` copies in all, `spacing` apart along an axis.
-    Linear { axis: usize, count: u32, spacing: Value },
+    /// Counts include the source. An optional second direction forms a grid.
+    Linear {
+        axis: usize, count: u32, spacing: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        second: Option<LinearDirection>,
+    },
     /// One copy, reflected through the origin plane whose normal is `axis`.
     Mirror { axis: usize },
 }
@@ -110,25 +123,75 @@ pub struct Pattern {
 }
 
 impl Pattern {
+    /// Validate bounds before allocating copies or accepting a native file.
+    pub fn validate(&self) -> Result<(), String> {
+        let axis = |axis: usize| if axis < 3 { Ok(()) } else { Err("the axis must be x, y or z".to_owned()) };
+        let expression = |value: &Value| {
+            if value.expr.len() > 4096 { Err("an expression is too long (maximum 4096 bytes)".to_owned()) } else { Ok(()) }
+        };
+        let linear = |count: u32, spacing: &Value, require_nonzero: bool| {
+            expression(spacing)?;
+            if !(2..=1000).contains(&count) {
+                return Err("each linear pattern direction needs between 2 and 1000 instances, including the source".to_owned());
+            }
+            let reach = spacing.v * f64::from(count - 1);
+            if !reach.is_finite() || !(reach as f32).is_finite() {
+                return Err("linear pattern spacing must be finite and within the supported range".to_owned());
+            }
+            if require_nonzero && spacing.v == 0. { return Err("both rectangular pattern spacings must be nonzero".to_owned()); }
+            Ok(())
+        };
+        match &self.kind {
+            PatternKind::Circular { axis: a, count, angle } => {
+                axis(*a)?;
+                expression(angle)?;
+                if !(2..=360).contains(count) { return Err("a pattern needs between 2 and 360 copies".into()); }
+                if !angle.v.is_finite() { return Err("the pattern angle must be finite".into()); }
+            }
+            PatternKind::Linear { axis: a, count, spacing, second } => {
+                axis(*a)?;
+                // Keep legacy single-direction patterns (including coincident
+                // zero-spacing copies) readable and behaviorally unchanged.
+                linear(*count, spacing, second.is_some())?;
+                if let Some(second) = second {
+                    axis(second.axis)?;
+                    if second.axis == *a { return Err("the second pattern direction must use a different axis".into()); }
+                    linear(second.count, &second.spacing, true)?;
+                    if count.checked_mul(second.count).is_none_or(|total| total > 1000) {
+                        return Err("a rectangular pattern can have at most 1000 instances total, including the source".into());
+                    }
+                }
+            }
+            PatternKind::Mirror { axis: a } => axis(*a)?,
+        }
+        Ok(())
+    }
+
     /// Where each copy goes.
     pub fn placements(&self) -> Result<Vec<Place>, String> {
+        self.validate()?;
         let unit = |axis: usize| [DVec3::X, DVec3::Y, DVec3::Z].get(axis).copied().ok_or("the axis must be x, y or z".to_owned());
         match &self.kind {
             PatternKind::Circular { axis, count, angle } => {
-                if !(2..=360).contains(count) {
-                    return Err("a pattern needs between 2 and 360 copies".into());
-                }
                 // A full turn spaces the copies evenly; a part turn puts one at each end.
                 let step = if angle.v.abs() >= 360.0 - 1e-9 { angle.v / *count as f64 } else { angle.v / (*count - 1) as f64 };
                 let u = unit(*axis)?;
                 Ok((1..*count).map(|k| Place::Turn { origin: DVec3::ZERO, axis: u, angle: (step * k as f64).to_radians() }).collect())
             }
-            PatternKind::Linear { axis, count, spacing } => {
-                if !(2..=1000).contains(count) {
-                    return Err("a pattern needs between 2 and 1000 copies".into());
-                }
+            PatternKind::Linear { axis, count, spacing, second } => {
                 let u = unit(*axis)?;
-                Ok((1..*count).map(|k| Place::Shift(u * spacing.v * k as f64)).collect())
+                let (rows, row_step) = match second {
+                    Some(second) => (second.count, unit(second.axis)? * second.spacing.v),
+                    None => (1, DVec3::ZERO),
+                };
+                let mut copies = Vec::with_capacity((*count * rows - 1) as usize);
+                for row in 0..rows {
+                    for column in 0..*count {
+                        if row == 0 && column == 0 { continue; }
+                        copies.push(Place::Shift(u * spacing.v * f64::from(column) + row_step * f64::from(row)));
+                    }
+                }
+                Ok(copies)
             }
             PatternKind::Mirror { axis } => {
                 let u = unit(*axis)?;
@@ -962,7 +1025,10 @@ impl Document {
                 }
                 FeatureKind::Pattern(p) => match &mut p.kind {
                     PatternKind::Circular { angle, .. } => set(angle, Kind::Angle),
-                    PatternKind::Linear { spacing, .. } => set(spacing, Kind::Length),
+                    PatternKind::Linear { spacing, second, .. } => {
+                        set(spacing, Kind::Length);
+                        if let Some(second) = second { set(&mut second.spacing, Kind::Length); }
+                    },
                     PatternKind::Mirror { .. } => {}
                 },
                 FeatureKind::Revolve(r) => set(&mut r.angle, Kind::Angle),
