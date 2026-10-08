@@ -36,7 +36,7 @@ pub fn pick_plane_before_face(app: &App, pos: Pos2) -> Option<Id> {
 }
 
 pub fn draw(app: &App, painter: &Painter, hover: Option<Pos2>) {
-    let picking = matches!(app.dialog, Dialog::PickPlane | Dialog::Plane(_));
+    let picking = matches!(app.dialog, Dialog::PickPlane | Dialog::Plane(_) | Dialog::Split(_)) || matches!(&app.dialog,Dialog::Primitive(d) if d.pick_surface);
     let over = if picking { hover.and_then(|p| pick_plane_before_face(app, p)) } else { None };
     let editing = if let Dialog::Plane(d) = &app.dialog { d.editing } else { None };
     for (id, p) in &app.shown().planes {

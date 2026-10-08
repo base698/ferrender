@@ -323,6 +323,8 @@ pub enum Dialog {
     None,
     Plane(crate::construction::PlaneDlg),
     Primitive(crate::primitives::PrimitiveDlg),
+    Remove(crate::body_ops_ui::RemoveDlg),
+    Split(crate::body_ops_ui::SplitDlg),
     MoveComponent(crate::components_ui::MoveDlg),
     DeleteComponent(Id),
     /// Waiting for a plane or a flat face to sketch on.
@@ -403,6 +405,8 @@ impl Dialog {
     pub fn apply(&self, d: &mut Document) -> Result<Id, String> {
         match self {
             Dialog::Plane(p) => p.apply(d),
+            Dialog::Remove(p) => p.apply(d),
+            Dialog::Split(p) => p.apply(d),
             Dialog::MoveComponent(c) => c.apply(d),
             Dialog::Feature(f) => {
                 if let (Some(face), false, None) = (&f.face, f.revolve, f.editing) {
@@ -506,7 +510,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
+        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
     }
 }
 
@@ -581,6 +585,9 @@ pub struct Opts {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     Primitive(usize),
+    RemoveBody,
+    SplitBody,
+    JoinBodies,
     Plane,
     NewComponent,
     ActivateRoot,
@@ -653,6 +660,10 @@ pub struct App {
     pub drag_value: f64,
     /// Where the Pattern dialog's source feature sits, and what that was worked out for.
     pub pattern_at: Option<((u64, Id), DVec3)>,
+    pub pattern_drag: crate::model_drag::PatternDrag,
+    pub gizmo: crate::gizmo::State,
+    pub sketch_capture: crate::sketch_capture::Capture,
+    pub body_ops_source: Option<(u64, Id, Built)>,
     /// Where the timeline's chips were drawn last frame, for dragging the roll-back marker.
     pub chips: Vec<Rect>,
     pub timeline: crate::timeline::Timeline,
@@ -743,6 +754,10 @@ impl App {
             drag: Drag::None,
             drag_value: 0.0,
             pattern_at: None,
+            pattern_drag: Default::default(),
+            gizmo: Default::default(),
+            sketch_capture: Default::default(),
+            body_ops_source: None,
             chips: Vec::new(),
             timeline: crate::timeline::Timeline::default(),
             render_queue: cc.wgpu_render_state.as_ref().map(|rs| rs.queue.clone()),
@@ -867,6 +882,10 @@ impl App {
 
     /// Brings the interface back in line after the document changed under it.
     pub fn refresh(&mut self) {
+        self.sketch_capture.clear();
+        self.gizmo.clear();
+        self.pattern_drag.clear();
+        self.body_ops_source = None;
         if self.last_active_component != 0 && self.doc().active_component == 0 && !self.session.built.components.contains_key(&self.last_active_component) {
             self.toast("The active component is unavailable at this history position. Root is now active.");
         }
@@ -953,6 +972,7 @@ impl App {
     }
 
     fn leave_sketch(&mut self) {
+        self.sketch_capture.clear();
         self.reference_editor.cancel();
         self.reference_texture.clear();
         self.reference_drag.clear();
@@ -996,6 +1016,9 @@ impl App {
 
     /// Abandons whatever the current tool was in the middle of.
     pub fn cancel_tool(&mut self) {
+        self.sketch_capture.clear();
+        self.gizmo.clear();
+        self.pattern_drag.clear();
         self.reference_drag.clear();
         self.clicks.clear();
         self.dim_refs.clear();
@@ -1449,6 +1472,8 @@ impl App {
         let shown = |v: &fr_core::Value| v.expr.clone();
         match &kind {
             FeatureKind::Plane(p) => { self.finish_sketch(); self.dialog = Dialog::Plane(crate::construction::PlaneDlg::from_plane(id, p)); }
+            FeatureKind::Remove(p) => { self.finish_sketch(); self.dialog = Dialog::Remove(crate::body_ops_ui::RemoveDlg { editing: Some(id), bodies: p.bodies.clone() }); }
+            FeatureKind::Split(p) => { self.finish_sketch(); self.dialog = Dialog::Split(crate::body_ops_ui::SplitDlg { editing: Some(id), body: Some(p.body), plane: Some(p.plane.clone()), picking_body: false }); }
             FeatureKind::Primitive(p) => { self.finish_sketch(); self.dialog = Dialog::Primitive(crate::primitives::PrimitiveDlg::from_feature(id, p)); self.fit_pending = true; }
             FeatureKind::Component(_) => self.move_component_dialog(id),
             FeatureKind::Pattern(pattern) => { self.finish_sketch(); self.dialog = Dialog::Pattern(PatternDlg::from_feature(id, pattern)); }
@@ -1590,6 +1615,7 @@ impl App {
         }
         self.prepare_text_source();
         self.prepare_plane_source();
+        crate::body_ops_ui::prepare(self);
         let text_key = match &self.dialog { Dialog::Text(t) if t.op != Op::New => t.body.map(|id| (self.session.rev, t.editing, id)), _ => None };
         if self.text_local.as_ref().map(|(key, _)| *key) != text_key {
             self.text_local = text_key.and_then(|key| self.text_source().body(key.2).and_then(|body| body.local_copy().ok()).map(|body| (key, body)));
@@ -1606,7 +1632,7 @@ impl App {
             Ok(id) => {
                 // Editing sees the feature in its original place in the timeline.
                 // Later transforms must not make a clicked face move a second time.
-                if (matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) || matches!(&self.dialog, Dialog::Plane(p) if p.editing.is_some()) || matches!(&self.dialog, Dialog::Primitive(p) if p.editing.is_some()))
+                if (matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) || matches!(&self.dialog, Dialog::Plane(p) if p.editing.is_some()) || matches!(&self.dialog, Dialog::Primitive(p) if p.editing.is_some()) || crate::body_ops_ui::editing(&self.dialog).is_some())
                     && let Some(index) = doc.features.iter().position(|f| f.id == id)
                 { doc.roll_to(index + 1); }
                 let built = doc.rebuild();
@@ -1917,7 +1943,17 @@ impl App {
                     None => self.toast("Click a body to select it first."),
                 }
             }
-            Action::Combine => {
+            Action::RemoveBody => {
+                self.finish_sketch();
+                let bodies = self.target_body().into_iter().collect();
+                self.dialog = Dialog::Remove(crate::body_ops_ui::RemoveDlg { editing: None, bodies });
+            }
+            Action::SplitBody => {
+                self.finish_sketch();
+                let body = self.target_body();
+                self.dialog = Dialog::Split(crate::body_ops_ui::SplitDlg { editing: None, body, plane: None, picking_body: body.is_none() });
+            }
+            Action::Combine | Action::JoinBodies => {
                 self.finish_sketch();
                 if self.session.built.bodies.len() < 2 {
                     self.toast("Combine needs at least two bodies.");

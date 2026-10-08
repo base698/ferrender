@@ -498,6 +498,8 @@ pub enum FeatureKind {
     Plane(ConstructionPlane),
     Component(Component),
     Primitive(crate::primitives::Primitive),
+    Remove(crate::body_ops::Remove),
+    Split(crate::body_ops::Split),
     Extrude(Extrude),
     Revolve(Revolve),
     /// A mesh brought in from a file, already in millimetres.
@@ -532,6 +534,8 @@ impl Feature {
             FeatureKind::Plane(_) => "plane",
             FeatureKind::Component(_) => "component",
             FeatureKind::Primitive(p) => p.shape.name(),
+            FeatureKind::Remove(_) => "remove",
+            FeatureKind::Split(_) => "split",
             FeatureKind::Extrude(_) => "extrude",
             FeatureKind::Revolve(_) => "revolve",
             FeatureKind::Import(_) => "import",
@@ -794,7 +798,7 @@ impl Document {
     /// Appends a feature, naming it after its type (`Sketch2`, `Extrude1`).
     pub fn add_feature(&mut self, kind: FeatureKind) -> Id {
         // Reserve every copy slot, including copies added by later pattern edits.
-        while let Some(end)=self.features.iter().filter(|f|matches!(f.kind,FeatureKind::Pattern(_)))
+        while let Some(end)=self.features.iter().filter(|f|matches!(f.kind,FeatureKind::Pattern(_)|FeatureKind::Split(_)))
             .map(|f|f.id.saturating_mul(1000)).find(|start|self.next_id>*start && self.next_id<start.saturating_add(1000)) {
             self.next_id=end.saturating_add(1000);
         }
@@ -804,6 +808,7 @@ impl Document {
             FeatureKind::Transform(t)=>Some(t.body), FeatureKind::Combine(c)=>Some(c.target),
             FeatureKind::Blend(b)=>Some(b.body), FeatureKind::Shell(s)=>Some(s.body),
             FeatureKind::Hole(h)=>Some(h.body), FeatureKind::Thread(t)=>Some(t.body), FeatureKind::Text(t)=>t.body,
+            FeatureKind::Split(s)=>Some(s.body), FeatureKind::Remove(r)=>r.bodies.first().copied(),
             _=>None,
         };
         let owner=match &kind {
@@ -1065,7 +1070,7 @@ impl Document {
                     c.placement.translate.iter_mut().for_each(|v|set(v,Kind::Length));
                     c.placement.rotate.iter_mut().for_each(|v|set(v,Kind::Angle));
                 }
-                FeatureKind::Import(_) | FeatureKind::Combine(_) => {}
+                FeatureKind::Import(_) | FeatureKind::Combine(_) | FeatureKind::Remove(_) | FeatureKind::Split(_) => {}
             }
             if let Some(e) = err {
                 built.errors.insert(f.id, e);
@@ -1140,6 +1145,26 @@ impl Document {
         let find = |bodies: &[Body], id: Id| bodies.iter().position(|b| b.id == id).ok_or("a body it used no longer exists".to_owned());
         const MESH_ONLY: &str = "this body is a mesh (imported, tapered, or combined with one); this operation needs an exact body made from a sketch, primitive or text";
         match &f.kind {
+            FeatureKind::Remove(remove) => {
+                remove.validate()?;
+                for id in &remove.bodies {find(bodies,*id)?;}
+                bodies.retain(|body|!remove.bodies.contains(&body.id));
+                Ok(())
+            }
+            FeatureKind::Split(split) => {
+                split.validate()?;
+                let index=find(bodies,split.body)?;
+                let component=bodies[index].component;
+                if component!=f.owner {return Err("the split must belong to its target body's component".into());}
+                let (plane,_)=self.plane_reference(&split.plane,context,component)?;
+                let mut pieces=crate::body_ops::pieces(&bodies[index],plane)?.into_iter();
+                bodies[index].set_exact(vec![pieces.next().ok_or("the split produced no pieces")?])?;
+                for (offset,solid) in pieces.enumerate() {
+                    *count+=1;
+                    bodies.push(Shape::Exact(vec![solid]).body(f.id*1000+offset as Id+1,format!("Body{count}"),component)?);
+                }
+                Ok(())
+            }
             FeatureKind::Text(t) if t.op != Op::New => {
                 let profiles = t.outlines()?;
                 let i = find(bodies, t.body.ok_or("select a body and flat face for the text")?)?;

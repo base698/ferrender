@@ -12,7 +12,7 @@ use crate::units::Unit;
 
 /// Written into every native file so other tools can recognise it.
 pub const FORMAT: &str = "ferrender";
-pub const FORMAT_VERSION: u32 = 7;
+pub const FORMAT_VERSION: u32 = 8;
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STL_BYTES: usize = 128 * 1024 * 1024;
 
@@ -21,7 +21,7 @@ pub fn to_json(doc: &Document) -> String {
     let o = v.as_object_mut().unwrap();
     o.insert("format".into(), FORMAT.into());
     // Keep ordinary designs readable by version-1 apps; text needs the new schema.
-    let version = if doc.features.iter().any(|f| matches!(&f.kind, crate::doc::FeatureKind::Primitive(_))) { 7 } else if doc.features.iter().any(|f| matches!(&f.kind, crate::doc::FeatureKind::Pattern(crate::doc::Pattern {kind:crate::doc::PatternKind::Linear {second:Some(_),..},..}))) { 6 } else if doc.active_component != 0 || doc.features.iter().any(|f| f.owner != 0 || matches!(&f.kind, crate::doc::FeatureKind::Plane(_) | crate::doc::FeatureKind::Component(_)) || matches!(&f.kind, crate::doc::FeatureKind::Sketch(s) if s.on.is_some())) { 5 } else if doc.features.iter().any(|f| match &f.kind {
+    let version = if doc.features.iter().any(|f| matches!(&f.kind, crate::doc::FeatureKind::Remove(_) | crate::doc::FeatureKind::Split(_))) { 8 } else if doc.features.iter().any(|f| matches!(&f.kind, crate::doc::FeatureKind::Primitive(_))) { 7 } else if doc.features.iter().any(|f| matches!(&f.kind, crate::doc::FeatureKind::Pattern(crate::doc::Pattern {kind:crate::doc::PatternKind::Linear {second:Some(_),..},..}))) { 6 } else if doc.active_component != 0 || doc.features.iter().any(|f| f.owner != 0 || matches!(&f.kind, crate::doc::FeatureKind::Plane(_) | crate::doc::FeatureKind::Component(_)) || matches!(&f.kind, crate::doc::FeatureKind::Sketch(s) if s.on.is_some())) { 5 } else if doc.features.iter().any(|f| match &f.kind {
         crate::doc::FeatureKind::Sketch(s) => s.constraints.values().any(|c| c.kind == crate::sketch::CKind::Angle && c.refs.len() == 1),
         _ => false,
     }) { 4 } else if doc.features.iter().any(|f| match &f.kind {

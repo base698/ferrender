@@ -149,18 +149,20 @@ pub fn document(d: &Document) -> Result<(), String> {
             FeatureKind::Text(t) => text(t)?,
             FeatureKind::Pattern(p) => p.validate()?,
             FeatureKind::Primitive(p) => p.validate()?,
+            FeatureKind::Remove(r) => r.validate()?,
+            FeatureKind::Split(s) => s.validate()?,
             _ => {}
         }
     }
     if !depths.contains_key(&d.active_component) {return Err("the active component does not exist".into());}
-    for f in d.features.iter().filter(|f|matches!(f.kind,FeatureKind::Pattern(_))) {
+    for f in d.features.iter().filter(|f|matches!(f.kind,FeatureKind::Pattern(_)|FeatureKind::Split(_))) {
         if let Some(start)=f.id.checked_mul(1000) {
             if ids.range(start.saturating_add(1)..=start.saturating_add(999)).next().is_some() {
-                return Err("a feature id collides with a pattern's reserved body ids".into());
+                return Err("a feature id collides with a pattern or split's reserved body ids".into());
             }
-        } else {return Err("pattern body ids are out of range".into());}
+        } else {return Err("pattern or split body ids are out of range".into());}
     }
-    // Pattern bodies reserve ids at feature_id * 1000 + copy_index.
+    // Pattern copies and split pieces reserve feature_id * 1000 + piece_index.
     if d.next_id == 0 || d.next_id > Id::MAX / 1000 - MAX_FEATURES as Id {
         return Err("the document id range is exhausted".into());
     }
@@ -185,7 +187,7 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
     };
     let body=|id:Id| -> Result<(),String> {
         if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
-        else if id>=1000 && d.feature(id/1000).is_some() {earlier(id/1000,"pattern",|k|matches!(k,FeatureKind::Pattern(_)))}
+        else if id>=1000 && d.feature(id/1000).is_some() {earlier(id/1000,"pattern or split",|k|matches!(k,FeatureKind::Pattern(_)|FeatureKind::Split(_)))}
         else {Ok(())}
     };
     let plane=|r:&PlaneRef| -> Result<(),String> {match r {
@@ -194,6 +196,14 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
         PlaneRef::Face {body:id,at,frame}=>{body(*id)?;anchor(*at,*frame)}
     }};
     match &f.kind {
+        FeatureKind::Split(s)=>{
+            body(s.body)?;plane(&s.plane)?;
+            if d.body_owner(s.body).is_some_and(|owner|owner!=f.owner) {return Err("a split must belong to its target body's component".into());}
+        },
+        FeatureKind::Remove(r)=>{
+            for id in &r.bodies {body(*id)?;}
+            if r.bodies.first().and_then(|id|d.body_owner(*id)).is_some_and(|owner|owner!=f.owner) {return Err("a remove feature must belong to its first target's component".into());}
+        },
         FeatureKind::Sketch(s)=>{if let Some(id)=s.on {earlier(id,"construction plane",|k|matches!(k,FeatureKind::Plane(_)))?;}},
         FeatureKind::Plane(p)=>match &p.kind {
             PlaneKind::Offset {base,distance}=>{

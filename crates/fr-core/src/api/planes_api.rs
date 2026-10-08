@@ -9,7 +9,7 @@ fn face_ref(s: &Session, v: &J) -> R<PlaneRef> {
     Ok(PlaneRef::Face { body, at: b.to_local(face.at), frame: s.built.frame(body) })
 }
 
-fn base(s: &Session, v: &J) -> R<PlaneRef> {
+pub(super) fn base(s: &Session, v: &J) -> R<PlaneRef> {
     if let Some(word)=v.as_str() { return match word.to_ascii_uppercase().as_str() {
         "XY"=>Ok(PlaneRef::Origin(OriginPlane::XY)), "XZ"=>Ok(PlaneRef::Origin(OriginPlane::XZ)), "YZ"=>Ok(PlaneRef::Origin(OriginPlane::YZ)),
         _=>Err("the base should be XY, XZ, YZ, a face, or a construction plane".into())

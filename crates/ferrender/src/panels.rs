@@ -86,6 +86,9 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             });
             ui.separator();
             item(app, ui, "Move / Rotate / Scale", "", Action::Transform);
+            item(app, ui, "Remove Body", "", Action::RemoveBody);
+            item(app, ui, "Split Body", "", Action::SplitBody);
+            item(app, ui, "Join Bodies", "", Action::JoinBodies);
             item(app, ui, "Combine", "", Action::Combine);
             item(app, ui, "Pattern / Mirror", "", Action::Pattern);
             ui.separator();
@@ -282,6 +285,8 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_) | Dialog::MoveComponent(_)), "Move the selected component, or move, rotate or scale a body").clicked() {
                     app.run(&ctx, Action::Transform);
                 }
+                if big(ui, icon::SPLIT_HORIZONTAL, "Split", matches!(app.dialog, Dialog::Split(_)), "Split a body with a flat face or plane").clicked() { app.run(&ctx, Action::SplitBody); }
+                if big(ui, icon::MINUS_CIRCLE, "Remove", matches!(app.dialog, Dialog::Remove(_)), "Remove a body later in history, keeping its existing copies").clicked() { app.run(&ctx, Action::RemoveBody); }
                 if big(ui, icon::UNITE, "Combine", matches!(app.dialog, Dialog::Combine(_)), "Join, cut or intersect bodies").clicked() {
                     app.run(&ctx, Action::Combine);
                 }
@@ -395,6 +400,8 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Revolve(_) => icon::ARROWS_CLOCKWISE,
         FeatureKind::Import(_) => icon::DOWNLOAD_SIMPLE,
         FeatureKind::Transform(_) => icon::ARROWS_OUT_CARDINAL,
+        FeatureKind::Remove(_) => icon::MINUS_CIRCLE,
+        FeatureKind::Split(_) => icon::SPLIT_HORIZONTAL,
         FeatureKind::Combine(_) => icon::UNITE,
         FeatureKind::Pattern(_) => icon::CIRCLES_THREE,
         FeatureKind::Blend(b) if b.chamfer => icon::ANGLE,
@@ -603,6 +610,8 @@ fn dialogs(app: &mut App, ctx: &Context) {
         Dialog::None => {}
         Dialog::Plane(d) => crate::construction::dialog(app, ctx, d),
         Dialog::Primitive(d) => crate::primitives::dialog(app, ctx, d),
+        Dialog::Remove(d) => crate::body_ops_ui::remove_dialog(app, ctx, d),
+        Dialog::Split(d) => crate::body_ops_ui::split_dialog(app, ctx, d),
         Dialog::MoveComponent(d) => crate::components_ui::move_dialog(app, ctx, d),
         Dialog::DeleteComponent(id) => crate::components_ui::delete_dialog(app, ctx, id),
         Dialog::PointCoordinates(mut d) => {
@@ -824,6 +833,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 let count = if p.kind == 2 { 2 } else { p.count as u64 * if p.kind == 1 && p.second { p.count2 as u64 } else { 1 } };
                 ui.label(RichText::new(format!("{count} positions including the original.")).color(colors.muted));
                 ui.label(RichText::new("Axes use the source component's frame. Negative spacing reverses a direction.").color(colors.muted));
+                if p.kind == 1 { ui.label("Drag a span handle to place the last copy. Visible sketch points and edges snap."); }
                 app.dialog = Dialog::Pattern(p);
                 confirm(app, ui, "OK");
             });

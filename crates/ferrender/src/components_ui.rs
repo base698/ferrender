@@ -204,14 +204,14 @@ fn component_node(app: &mut App, ui: &mut Ui, id: Id) {
                     }
                 });
                 egui::CollapsingHeader::new(format!("{} Bodies", icon::FOLDER)).default_open(true).show(ui, |ui| {
-                    let bodies: Vec<_> = app.session.built.bodies.iter().filter(|b| b.component == id).map(|b| (b.id, b.name.clone(), !app.doc().hidden_bodies.contains(&b.id))).collect();
+                    let bodies: Vec<_> = crate::body_ops_ui::source(app).bodies.iter().filter(|b| b.component == id).map(|b| (b.id, b.name.clone(), !app.doc().hidden_bodies.contains(&b.id))).collect();
                     if bodies.is_empty() { ui.small(RichText::new("None yet").color(colors.muted)); }
                     for (body, name, visible) in bodies {
                         ui.horizontal(|ui| {
                             if crate::panels::eye(ui, visible) { let _ = app.execute(&json!({"op":"set_visible","id":body,"visible":!visible})); }
                             let response = ui.selectable_label(app.sel_body == Some(body), name);
-                            if response.clicked() { app.sel_body = Some(body); app.sel_feature = app.doc().feature(body).map(|f| f.id); app.sel_component = None; app.sel_face = None; }
-                            response.context_menu(|ui| { if ui.button("Move").clicked() { app.sel_body = Some(body); app.sel_component = None; let ctx = ui.ctx().clone(); app.run(&ctx, Action::Transform); ui.close(); } });
+                            if response.clicked() { if matches!(app.dialog,Dialog::Remove(_) | Dialog::Split(_)) {crate::body_ops_ui::choose_body(app,body);} else if let Dialog::Combine(d)=&mut app.dialog {if d.target.is_none(){d.target=Some(body);}else if d.target!=Some(body){if let Some(i)=d.tools.iter().position(|id|*id==body){d.tools.remove(i);}else{d.tools.push(body);}}} app.sel_body = Some(body); app.sel_feature = app.doc().feature(body).map(|f| f.id); app.sel_component = None; app.sel_face = None; }
+                            response.context_menu(|ui| { for (name, action) in [("Move", Action::Transform), ("Remove Body", Action::RemoveBody), ("Split Body", Action::SplitBody), ("Join Bodies", Action::JoinBodies)] { if ui.button(name).clicked() { app.sel_body = Some(body); app.sel_face = None; app.sel_component = None; let ctx = ui.ctx().clone(); app.run(&ctx, action); ui.close(); } } });
                         });
                     }
                 });

@@ -18,7 +18,7 @@ Enter the dimensions and Position X/Y/Z. The preview updates before you press **
 
 The torus's major radius runs from its center to the center of the tube. Its outside diameter is `2 × (major radius + tube radius)`, and its hole diameter is `2 × (major radius − tube radius)`. The default torus therefore has an outside diameter of 40 mm, a hole diameter of 20 mm, and a height of 10 mm.
 
-Position and rotation use the **active component's coordinates**. Rotation happens about the shape's origin, first X, then Y, then Z, followed by Position. Moving the whole component moves the primitive with it. This dialog uses coordinates for placement; selecting a face does not attach or orient the primitive to that face.
+Position and rotation use the **active component's coordinates**. Rotation happens about the shape's origin, first X, then Y, then Z, followed by Position. Moving the whole component moves the primitive with it. Use **Place in view** to click a position on XY, XZ, YZ, a flat face, or a construction plane. **Align** points the shape's local +Z along the chosen plane's normal; turn it off to keep the current rotation. After placement, drag the colored X/Y/Z arrows or rotation rings to refine it. Face/plane placement captures numeric values once: it does not attach the primitive to that reference. See the [direct modeling guide](DIRECT_MODELING_0.3.md) for handle directions, fallback controls, and transaction behavior.
 
 ## Choose the operation
 

@@ -5,6 +5,7 @@
 mod planes_api;
 mod components_api;
 mod primitives_api;
+mod body_ops_api;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -118,6 +119,8 @@ FEATURES
 {"op":"pattern","feature":ID,"type":"mirror","normal":"x"}   one reflected copy through the origin plane with that normal
 {"op":"edit_feature","feature":ID, ...}            any of distance, angle, operation, symmetric, extent, taper, axis, name, suppressed
 {"op":"delete_feature","feature":ID}
+{"op":"remove_body","bodies":[BODY_IDS]}           removes only these bodies at this timeline point; keeps their source features and previously patterned copies. body:ID is a single-body alias. Undo or suppress this feature to restore them.
+{"op":"split_body","body":BODY,"plane":"XY"}       plane: XY | XZ | YZ in target-component axes, {"plane":CONSTRUCTION_ID}, or {"face":{"body":ID,"point":[x,y,z]}} with a world-space planar-face pick in document units. Uses the infinite plane. Exact unthreaded bodies only; tangent/nonintersecting planes are rejected. Each solid piece becomes an independent body in the target component; the first negative-side piece keeps the target ID, others have stable synthetic IDs. edit_feature accepts body/plane for Split and bodies for Remove; picks resolve before that operation. Combine with operation:join joins selected pieces again.
 {"op":"rollback","to":ID}                          shows the model as it was just after that feature ("start" = before any, "end" = everything); features added while rolled back are inserted at that point
 {"op":"transform","body":ID,"translate":[x,y,z],"rotate":[rx,ry,rz],"scale":1}   scale about the origin, rotate about X then Y then Z, then translate
 {"op":"combine","target":BODY,"tools":[BODY],"operation":"join","keep_tools":false}   join | cut | intersect between bodies, including imported meshes
@@ -404,6 +407,7 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
         FeatureKind::Plane(_) => planes_api::info(s,id,&mut o),
         FeatureKind::Component(_) => {o["component_info"]=components_api::node(s,id);}
         FeatureKind::Primitive(p) => primitives_api::info(s,p,&mut o),
+        FeatureKind::Remove(_) | FeatureKind::Split(_) => body_ops_api::info(s,id,&f.kind,&mut o),
         FeatureKind::Extrude(e) => {
             o["sketch"] = json!(e.sketch);
             o["distance"] = json!({"expr": e.distance.expr, "value": len_out(doc, e.distance.v)});
@@ -1419,6 +1423,13 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 Ok(out)
             }
         }
+        "remove_body" | "split_body" => {
+            let id=body_ops_api::create(s,c)?;
+            let mut out=changed(s,&before);
+            out.as_object_mut().unwrap().extend(feature_info(s,id)?.as_object().unwrap().clone());
+            out["feature"]=json!(id);
+            Ok(out)
+        }
         "primitive" => {
             let primitive = primitives_api::create(&s.doc,c)?;
             let id = s.edit_feature(|d| {
@@ -1507,6 +1518,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             if !c["owner"].is_null() {return Err("moving features between components is not supported; activate a component before creating features".into());}
             let id = id_of(c, "feature")?;
             let c = c.clone();
+            let body_op_update=body_ops_api::update(s,id,&c)?;
             let plane_update=match s.doc.feature(id).map(|f|&f.kind) {
                 Some(FeatureKind::Plane(p)) if ["kind","base","distance","faces","flip","points"].iter().any(|key| !c[key].is_null()) => {
                     let mut prefix=s.doc.clone();
@@ -1560,6 +1572,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 if let Some(v) = c["suppressed"].as_bool() {
                     f.suppressed = v;
                 }
+                if let Some(kind)=body_op_update {f.kind=kind;}
                 match &mut f.kind {
                     FeatureKind::Plane(p) => {if let Some((kind,_))=plane_update {p.kind=kind;}}
                     FeatureKind::Text(t) => { *t = text_update.expect("text feature update was prepared"); }

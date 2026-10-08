@@ -144,26 +144,19 @@ fn grid_step(app: &App) -> f64 {
 /// point of a line, for horizontal and vertical inference.
 pub fn snap(app: &App, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Snap> {
     let raw = sketch_pos(app, sk, pos)?;
-    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false };
-    match hit(app, sk, pos) {
-        Hit::Point(id) => {
-            s.p = sk.pos(id);
-            s.point = Some(id);
-            return Some(s);
-        }
-        Hit::Entity(id) => {
-            // Spline fit points are editable; point-on-spline constraints are not supported.
-            if matches!(sk.entities[&id].geom, Geom::Spline { .. }) { return Some(s); }
-            s.on = Some(id);
-            s.p = match (sk.line(id), sk.curve(id)) {
-                (Some((a, b)), _) => a + (b - a) * ((raw - a).dot(b - a) / (b - a).length_squared().max(1e-12)).clamp(0.0, 1.0),
-                (_, Some((c, r))) => c + (raw - c).normalize_or(DVec2::X) * r,
-                _ => raw,
-            };
-            return Some(s);
-        }
-        _ => {}
+    if let Some((id,p)) = crate::sketch_capture::nearest_point(sk,pos,|p|on_screen(app,sk,p)) {
+        return Some(Snap { p,point:Some(id),on:None,h:false,v:false });
     }
+    if let Some(c) = sk.entities.keys().filter_map(|id| crate::sketch_capture::project_entity(sk,*id,pos,|p|on_screen(app,sk,p)))
+        .filter(|c|c.distance<=6.0).min_by(|a,b|a.distance.total_cmp(&b.distance)) {
+        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false });
+    }
+    Some(free_snap(app,raw,from,false))
+}
+
+fn free_snap(app: &App, raw: DVec2, from: Option<DVec2>, bypass: bool) -> Snap {
+    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false };
+    if bypass { return s; }
     if app.opts.snap_grid {
         let step = grid_step(app);
         s.p = (raw / step).round() * step;
@@ -178,7 +171,17 @@ pub fn snap(app: &App, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Sn
             s.v = true;
         }
     }
-    Some(s)
+    s
+}
+
+fn captured_snap(app: &mut App, ui: &Ui, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Snap> {
+    let raw = sketch_pos(app,sk,pos)?;
+    let Mode::Sketch(sid) = app.mode else { return snap(app,sk,pos,from); };
+    let (time,bypass) = ui.input(|i|(i.time,i.modifiers.alt || i.key_down(egui::Key::Space) || !i.focused));
+    let endpoint = crate::sketch_capture::nearest_point(sk,pos,|p|on_screen(app,sk,p));
+    let candidates: Vec<_> = sk.entities.keys().filter_map(|id| crate::sketch_capture::project_entity(sk,*id,pos,|p|on_screen(app,sk,p))).collect();
+    let context = crate::sketch_capture::Context { sketch:sid,tool:app.tool,revision:app.session.rev,camera:app.cam,plane:sk.plane };
+    app.sketch_capture.update(context,time,endpoint,&candidates,bypass).or_else(||Some(free_snap(app,raw,from,bypass)))
 }
 
 /// Adds a screen-space drag to the Move dialog's distances.
@@ -1076,7 +1079,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     } else if app.typed.as_ref().is_none_or(|t| t.fields.len() != names.len()) {
         app.typed = Some(Typed { fields: vec![String::new(); names.len()], ..Default::default() });
     }
-    let hovered = resp.hover_pos().and_then(|p| snap(app, sk, p, from));
+    let hovered = resp.hover_pos().and_then(|p| captured_snap(app, ui, sk, p, from));
     // Over the boxes themselves the pointer is not over the sketch; the shape stays where it was.
     let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false });
     let Some(mut s) = hovered.or(kept) else { return };
@@ -1217,9 +1220,13 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     let at = px(s.p);
     if s.point.is_some() {
         painter.rect_stroke(Rect::from_center_size(at, Vec2::splat(11.0)), 1.0, Stroke::new(1.6, colors.selected), StrokeKind::Outside);
-    } else if s.on.is_some() {
-        painter.line_segment([at - vec2(5.0, 5.0), at + vec2(5.0, 5.0)], Stroke::new(1.6, colors.selected));
-        painter.line_segment([at - vec2(5.0, -5.0), at + vec2(5.0, -5.0)], Stroke::new(1.6, colors.selected));
+    } else if let Some(entity) = s.on {
+        painter.add(Shape::line(path(app,sk,entity),Stroke::new(2.4,colors.selected)));
+        if let Some(pointer) = resp.hover_pos().filter(|p|p.distance(at)>2.0) {
+            painter.line_segment([pointer,at],Stroke::new(1.0,colors.selected));
+        }
+        painter.circle(at,4.5,colors.paper,Stroke::new(2.0,colors.selected));
+        note(at+vec2(0.0,36.0),format!("On {} · Alt to release",if sk.line(entity).is_some(){"line"}else{"curve"}));
     } else if s.h || s.v {
         let r = Rect::from_center_size(at + vec2(16.0, 16.0), Vec2::splat(15.0));
         painter.rect(r, 3.0, colors.paper, Stroke::new(1.0, colors.selected), StrokeKind::Outside);
@@ -1382,6 +1389,7 @@ fn value_box(app: &mut App, ui: &Ui) {
 }
 
 fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, reference_consumed: bool) {
+    if app.tool.clicks()==0 || app.dialog!=Dialog::None || app.value_edit.is_some() || !ui.input(|i|i.focused) { app.sketch_capture.clear(); }
     let Some(sk) = app.world_sketch(sid) else { return };
     if app.opts.gaps && app.gap_cache.as_ref().is_none_or(|(rev, cached, _)| *rev != app.session.rev || *cached != sid) {
         app.gap_cache = Some((app.session.rev, sid, sk.open_endpoints()));
@@ -1548,14 +1556,14 @@ fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: Option<Id>) -> Optio
         .min_by(|a, b| a.1.area().total_cmp(&b.1.area()))
 }
 
-fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
+fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed: bool) {
     let colors = ViewColors::new(painter.ctx());
     let mut doc = app.session.doc.clone();
-    let before = match &app.dialog { Dialog::Plane(d) => d.editing.and_then(|id| doc.features.iter().position(|f| f.id == id)).unwrap_or(doc.active()), _ => doc.active() };
+    let before = match &app.dialog { Dialog::Plane(d) => d.editing.and_then(|id| doc.features.iter().position(|f| f.id == id)).unwrap_or(doc.active()), _ => crate::body_ops_ui::editing(&app.dialog).and_then(|id|doc.features.iter().position(|f|f.id==id)).unwrap_or(doc.active()) };
     doc.features.truncate(before);
     for feature in &mut doc.features {
         if let FeatureKind::Sketch(sk) = &mut feature.kind {
-            sk.plane = sk.plane.transformed(app.session.built.component_placement(feature.owner));
+            sk.plane = app.modeling_source().sketch_plane(app.doc(),feature.id).unwrap_or_else(||sk.plane.transformed(app.modeling_source().component_placement(feature.owner)));
             if feature.suppressed || app.session.built.errors.contains_key(&feature.id) || !app.shown().component_visible(feature.owner) { sk.visible = false; }
         }
     }
@@ -1568,9 +1576,11 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
         draw_sketch(app, painter, sk, false, Hit::None, &mut Vec::new());
     }
     app.labels.clear();
-    let hover = resp.hover_pos();
-    let clicked = resp.clicked_by(PointerButton::Primary).then(|| resp.interact_pointer_pos()).flatten();
+    let hover = if consumed {None} else {resp.hover_pos()};
+    let clicked = (!consumed && resp.clicked_by(PointerButton::Primary)).then(|| resp.interact_pointer_pos()).flatten();
     match app.dialog.clone() {
+        Dialog::Remove(_) | Dialog::Split(_) => crate::body_ops_ui::interact(app,painter,hover,clicked),
+        Dialog::Primitive(_) => {},
         Dialog::Plane(_) => {
             crate::construction_view::interact(app, painter, hover, clicked);
             if let Some(arrow) = extrude_arrow(app) {
@@ -1832,7 +1842,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
             if let Some(source) = p.source {
                 let key = (app.session.rev, source);
                 if app.pattern_at.as_ref().is_none_or(|c| c.0 != key)
-                    && let Some(c) = app.doc().tool_center(source, &app.session.built)
+                    && let Some(c) = app.doc().tool_center(source, crate::body_ops_ui::source(app))
                 {
                     app.pattern_at = Some((key, c));
                 }
@@ -1841,7 +1851,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
                     let origin = to_screen(app, c);
                     painter.circle(origin, 5.0, colors.paper, Stroke::new(2.0, colors.accent));
                     let owner = app.doc().feature(source).map_or(0, |f| f.owner);
-                    let frame = app.session.built.component_placement(owner);
+                    let frame = crate::body_ops_ui::source(app).component_placement(owner);
                     let mut points = vec![origin];
                     for place in places {
                         let next = to_screen(app, frame.transform_point3(place.point(frame.inverse().transform_point3(c))));
@@ -1877,7 +1887,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter) {
             }
         }
         _ => {
-            if resp.double_clicked_by(PointerButton::Primary)
+            if !consumed && resp.double_clicked_by(PointerButton::Primary)
                 && let Some(pos) = resp.interact_pointer_pos()
             {
                 let found = doc.sketches().filter(|(_, s)| s.visible).find(|(_, s)| !matches!(hit(app, s, pos), Hit::None)).map(|(f, _)| f.id);
@@ -1904,7 +1914,10 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         app.fit_pending = false;
         app.fit();
     }
-    if app.timeline.preview.is_none() && !app.reference_drag.is_dragging() && !reference_consumed {
+    let graphical_consumed = if app.mode==Mode::Model && app.timeline.preview.is_none() {
+        crate::primitives::interact(app,ui,&resp) || crate::model_drag::interact(app,ui,&resp) || crate::gizmo::interact(app,ui,&resp)
+    } else {false};
+    if app.timeline.preview.is_none() && !app.reference_drag.is_dragging() && !reference_consumed && !graphical_consumed {
         navigate(app, ui, &resp);
     }
     let painter = ui.painter_at(rect);
@@ -1919,18 +1932,29 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     crate::construction_view::draw(app, &painter, resp.hover_pos());
     match app.mode {
         Mode::Sketch(sid) => sketch_mode(app, ui, &resp, &painter, sid, reference_consumed),
-        Mode::Model => model_mode(app, &resp, &painter),
+        Mode::Model => {
+            model_mode(app, &resp, &painter, graphical_consumed);
+            crate::model_drag::draw(app,&painter,resp.hover_pos());
+            crate::primitives::draw(app,&painter,resp.hover_pos());
+            crate::gizmo::draw(app,&painter,resp.hover_pos());
+        },
     }
     let hint = match (&app.dialog, app.mode) {
         (Dialog::PickPlane, _) => "Choose an origin plane, click a flat face, or click a construction plane.",
         (Dialog::Plane(d), _) => d.hint(),
-        (Dialog::MoveComponent(_), _) => "Move the component and all its children using the parent-relative values.",
+        (Dialog::MoveComponent(_), _) => "Drag an axis arrow or rotation ring, or use the parent-relative values. OK applies the move.",
+        (Dialog::Remove(_), _) => "Click bodies to remove them at this history step. Earlier copies stay.",
+        (Dialog::Split(d), _) if d.picking_body || d.body.is_none() => "Choose the body to split.",
+        (Dialog::Split(_), _) => "Choose a flat face or construction plane. XY, XZ and YZ use the body’s component axes.",
         (Dialog::DeleteComponent(_), _) => "Confirm deletion of the component and its contents, or cancel.",
         (Dialog::Feature(f), _) if f.pick_axis => "Click a sketch line to revolve around.",
         (Dialog::Feature(f), _) if f.pick_to => "Click the face the extrude should reach.",
         (Dialog::Feature(f), _) if f.revolve => "Click a closed region to select it. Shift-click to add or remove regions.",
         (Dialog::Feature(_), _) => "Click a closed region or flat face. Shift-click to add or remove regions. Drag the arrow to set the distance.",
-        (Dialog::Primitive(_), _) => "Set dimensions and position in the primitive dialog. F fits the preview into view.",
+        (Dialog::Primitive(d), _) if d.pick_surface => "Click a flat face or construction plane for placement.",
+        (Dialog::Primitive(d), _) if d.placing => "Click to place the primitive. Visible sketch geometry snaps; Alt releases. OK commits the feature.",
+        (Dialog::Primitive(_), _) => "Use Place in view, colored arrows/rings, or Position fields. F fits the preview.",
+        (Dialog::Pattern(p), _) if p.kind==1 => "Drag a last-copy handle to set the span. Visible sketch geometry snaps along that axis; Alt releases.",
         (Dialog::Pattern(_), _) => "The dots show where each copy will go.",
         (Dialog::Blend(_), _) => "Click edges of a body to add or remove them.",
         (Dialog::Shell(_), _) => "Click the faces to leave open.",
@@ -1938,7 +1962,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Thread(_), _) => "Click the round side of a rod, or the inside of a hole.",
         (Dialog::Text(_), _) => "Click a flat face to place text, or choose XY, XZ or YZ. The cross marks its baseline origin.",
         (Dialog::Measure(_), _) => "Click two things to measure between: corners and sketch points, edges and sketch lines, or faces.",
-        (Dialog::Transform(_), _) => "Drag the body to slide it across the screen, or type distances. Click another body to move that one.",
+        (Dialog::Transform(_), _) => "Drag colored arrows or rotation rings. Shift gives fine moves or 15° rotations. Click another body to move it.",
         (Dialog::Combine(c), _) if c.target.is_none() => "Click the body to keep.",
         (Dialog::Combine(_), _) => "Click the bodies to combine with it.",
         (_, Mode::Sketch(_)) => app.tool.hint(app.clicks.len()),

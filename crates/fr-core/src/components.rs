@@ -93,16 +93,16 @@ impl Document {
         Ok(id)
     }
     pub fn body_owner(&self,id:Id)->Option<Id> {
-        self.feature(id).or_else(||self.feature(id/1000).filter(|f|matches!(f.kind,FeatureKind::Pattern(_)))).map(|f|f.owner)
+        self.feature(id).or_else(||self.feature(id/1000).filter(|f|matches!(f.kind,FeatureKind::Pattern(_)|FeatureKind::Split(_)))).map(|f|f.owner)
     }
     pub fn delete_feature(&mut self,id:Id)->Result<Vec<Id>,String> {
         let f=self.feature(id).ok_or("the feature does not exist")?;
         let subtree=matches!(f.kind,FeatureKind::Component(_));
         let removed:Vec<_>=self.features.iter().filter(|f|f.id==id || (subtree && self.component_contains(id,f.owner))).map(|f|f.id).collect();
         if let Some(at)=self.rollback {self.rollback=Some(at-self.features.iter().take(at).filter(|f|removed.contains(&f.id)).count());}
-        let removed_patterns:Vec<_>=self.features.iter().filter(|f|removed.contains(&f.id) && matches!(f.kind,FeatureKind::Pattern(_))).map(|f|f.id).collect();
+        let removed_patterns:Vec<_>=self.features.iter().filter(|f|removed.contains(&f.id) && matches!(f.kind,FeatureKind::Pattern(_)|FeatureKind::Split(_))).map(|f|f.id).collect();
         self.features.retain(|f|!removed.contains(&f.id));
-        self.hidden_bodies.retain(|b|!removed.contains(b) && !removed_patterns.contains(&(b/1000)));
+        self.hidden_bodies.retain(|b|!removed.contains(b) && (*b%1000==0 || !removed_patterns.contains(&(b/1000))));
         if removed.contains(&self.active_component) {self.active_component=0;}
         Ok(removed)
     }

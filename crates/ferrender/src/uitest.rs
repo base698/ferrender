@@ -5,8 +5,13 @@
 mod dimensions_v022;
 mod desktop_open;
 mod v030;
+mod gizmo;
+mod sketch_capture;
 mod project_pattern;
+mod model_drag;
 mod primitives;
+mod primitive_place;
+mod body_ops;
 
 use std::path::PathBuf;
 

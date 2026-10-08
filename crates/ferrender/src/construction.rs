@@ -124,12 +124,12 @@ impl App {
     pub fn plane_source(&self) -> &fr_core::Built {
         match (&self.dialog, &self.construction_source) {
             (Dialog::Plane(d), Some((revision, plane, built))) if d.editing == Some(*plane) && *revision == self.session.rev => built,
-            _ => &self.session.built,
+            _ => crate::body_ops_ui::source(self),
         }
     }
 
     pub fn modeling_source(&self) -> &fr_core::Built {
-        if matches!(self.dialog, Dialog::Plane(_)) { self.plane_source() } else { self.text_source() }
+        if matches!(self.dialog, Dialog::Plane(_)) { self.plane_source() } else if matches!(self.dialog, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Pattern(_)) { crate::body_ops_ui::source(self) } else { self.text_source() }
     }
 
     pub fn choose_plane_reference(&mut self, reference: PlaneRef) {
@@ -142,7 +142,11 @@ impl App {
     }
 
     pub fn choose_origin(&mut self, owner: Id, origin: OriginPlane) {
-        if let Dialog::Plane(d) = &self.dialog {
+        if matches!(self.dialog, Dialog::Split(_)) {
+            let target = if let Dialog::Split(d)=&self.dialog { d.body.and_then(|id|self.doc().body_owner(id)) } else {None};
+            if target != Some(owner) {self.toast("Choose an origin plane in the body’s component.");return;}
+            crate::body_ops_ui::choose_plane(self,PlaneRef::Origin(origin));
+        } else if let Dialog::Plane(d) = &self.dialog {
             if owner != d.owner(self.doc()) { self.toast("Choose an origin plane of the component that owns this plane."); return; }
             self.choose_plane_reference(PlaneRef::Origin(origin));
         } else {
@@ -178,6 +182,8 @@ impl App {
 
     pub fn choose_construction_plane(&mut self, id: Id) {
         if matches!(self.dialog, Dialog::Plane(_)) { self.choose_plane_reference(PlaneRef::Plane(id)); }
+        else if matches!(self.dialog,Dialog::Split(_)) { crate::body_ops_ui::choose_plane(self,PlaneRef::Plane(id)); }
+        else if matches!(&self.dialog,Dialog::Primitive(d) if d.pick_surface) {crate::primitives::choose_plane(self,id);}
         else if self.dialog == Dialog::PickPlane { self.create_sketch_on(id); }
         else { self.sel_feature = Some(id); self.sel_component = None; self.sel_body = None; self.sel_face = None; }
     }

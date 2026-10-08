@@ -212,9 +212,9 @@ It is early, and smaller than what it imitates: no joints or linked component in
 
 ## Modeling additions in 0.3.0 testing
 
-**0.3.0-dev is a test build awaiting user verification, not a published release.** The work adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes. Native primitives add editable Box, Cylinder, Sphere, Cone and Torus features. Linear patterns support two directions for rectangular grids.
+**0.3.0-dev is a test build awaiting user verification, not a published release.** The work adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes. Native primitives add editable Box, Cylinder, Sphere, Cone and Torus features. Linear patterns support two directions for rectangular grids. The latest candidate adds Remove/Split/Join Bodies, graphical Move and primitive placement, pattern span handles, and sticky sketch capture.
 
-Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [candidate notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. The [primitive guide](docs/PRIMITIVES_0.3.md) explains dimensions, origins and placement. Existing designs remain readable; files using new features require the matching candidate build shown in About.
+Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [candidate notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. The [primitive guide](docs/PRIMITIVES_0.3.md) explains dimensions, origins and placement. The [direct modeling guide](docs/DIRECT_MODELING_0.3.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require the matching candidate build shown in About.
 
 ## Sketching improvements in 0.2
 
@@ -352,7 +352,7 @@ Offset, for a sketch on a plane above or below the one you pick.
 
 ### Primitives (0.3 test build)
 
-Choose **Model → Primitives → Box, Cylinder, Sphere, Cone or Torus**, or use the **Primitive** toolbar button. Set dimensions, position, optional rotation, and New Body / Join / Cut / Intersect. Dimensions and placement accept units and named parameters. Double-click the timeline feature to edit it; no sketch is required.
+Choose **Model → Primitives → Box, Cylinder, Sphere, Cone or Torus**, or use the **Primitive** toolbar button. Set dimensions, position, optional rotation, and New Body / Join / Cut / Intersect. Dimensions and placement accept units and named parameters. Place in view chooses a position on an origin plane, flat face or construction plane; optional alignment and colored arrows/rings refine it. Placement captures numeric values once. Double-click the timeline feature to edit it; no sketch is required.
 
 Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](docs/PRIMITIVES_0.3.md) includes examples and limits.
 
@@ -404,7 +404,7 @@ to the source component. For four corners choose Linear, Count 2, and enable
 Second direction with Count 2 on another axis. Enter the distance between corner
 centers for each spacing; a negative value reverses that direction. Counts
 include the original, with at most 1000 positions in a grid. Double-click the
-pattern's timeline chip to edit both directions together. A patterned cut cuts again at
+pattern's timeline chip to edit both directions together. Drag a last-copy span handle to set each direction graphically; capture a sketch target to align that axis coordinate. This sets a numeric spacing, preserving other coordinates. A patterned cut cuts again at
 each position; a patterned body makes more bodies. Dots in the viewport show
 where each copy will land. A cut copy that lands clear of every body is
 skipped; if they all miss, try another axis or a negative spacing.

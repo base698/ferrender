@@ -3,6 +3,7 @@
 //! assistant all drive. No GUI dependencies.
 
 pub mod api;
+pub mod body_ops;
 pub mod csg;
 pub mod components;
 pub mod doc;
