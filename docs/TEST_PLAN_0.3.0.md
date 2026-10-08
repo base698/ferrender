@@ -1,8 +1,8 @@
 # Ferrender 0.3.0 manual test plan
 
-This is a **test build awaiting your verification**, not a published release. Run the numbered checks below and report **Pass**, **Fail**, or **Unsure** by number. Allow about 90–120 minutes; you can stop between sections. None of these entries is a claim that a person has already completed the test.
+This is the **Ferrender 0.3.0 regression and manual acceptance plan**. For future testing, report **Pass**, **Fail**, or **Unsure** by number. Allow about 90–120 minutes; you can stop between sections. Acceptance observations are recorded below; a listed check does not by itself imply every substep was exercised.
 
-Save open work, quit older Ferrender windows, and open the supplied 0.3.0 test app. Use separate test files and keep your existing designs unchanged. Check **Help → About Ferrender → Copy build info**: it should say **0.3.0-dev**, with the commit matching the test bundle's build information. Record the commit and whether the build includes local changes.
+Save open work, quit older Ferrender windows, and open Ferrender 0.3.0. Use separate test files and keep your existing designs unchanged. Check **Help → About Ferrender → Copy build info**: it should say **0.3.0**, with the commit matching the release bundle's build information. Record the commit and whether the build includes local changes.
 
 ## Components
 
@@ -36,7 +36,7 @@ Use a fresh root-only document for tests 9–14. Make a **40 × 20 × 10 mm box*
 
 ## Solid primitives
 
-These checks cover the additional solid tools in the same unreleased 0.3.0 candidate. See the [primitive guide](PRIMITIVES_0.3.md) for placement conventions. Allow another 20–30 minutes and use a fresh document or copies of the examples below.
+These checks cover the additional solid tools in Ferrender 0.3.0. See the [primitive guide](PRIMITIVES_0.3.md) for placement conventions. Allow another 20–30 minutes and use a fresh document or copies of the examples below.
 
 18. **Create all five shapes.** Use **Model → Primitives** to create a Box, Cylinder, Sphere, Cone and Torus. Space them apart with Position X, for example 0, 50, 100, 150 and 200 mm. Expect a live preview, **New Body** as the default, five separate bodies and one timeline chip per primitive, without extra sketches. Check the Primitive toolbar opens Box and the Shape list changes the available dimension fields. The default cone should have a pointed top; the torus should have a clear hole.
 19. **Check dimensions and placement.** Create a Box with Width `30 mm`, Depth `20 mm`, Height `10 mm` and Position `(5, 7, 9) mm`. Before rotation, it should span X = 5–35, Y = 7–27 and Z = 9–19 mm. Change Rotate Z to `90 deg`: expect X = -15–5, Y = 7–37 and Z = 9–19 mm. A cylinder or cone starts at its base center and extends along positive Z. A sphere or torus is centered at Position and extends both above and below it. For a torus with Major radius `15 mm` and Tube radius `5 mm`, expect 40 mm outside diameter, 20 mm hole diameter and 10 mm height.
@@ -49,7 +49,7 @@ These checks cover the additional solid tools in the same unreleased 0.3.0 candi
 
 ## Direct modeling and graphical placement
 
-These additions are awaiting verification. See the [direct modeling guide](DIRECT_MODELING_0.3.md) for coordinate frames and snapping behavior.
+These checks cover body operations and graphical placement. See the [direct modeling guide](DIRECT_MODELING_0.3.md) for coordinate frames and snapping behavior.
 
 26. **Remove the original cone while keeping its mirror.** Create a cone away from the origin, for example Position X `20 mm`, and mirror it across YZ. Select only the original cone and use Remove Body. Expect the original to disappear at the new Remove timeline step while the mirrored cone remains intact. Roll back before Remove to see both, restore the marker, then Undo/Redo. Edit the Remove selection and Cancel; the previously accepted result should remain unchanged. The examples `01-cone-before-remove.ferr` and `02-cone-mirror-preserved.ferr` show the starting and expected stages. Optionally repeat with a box and a separated Linear pattern to check other earlier copies survive too.
 27. **Split and rejoin.** Create a box crossing an origin plane, or make a construction plane through its middle. Split Body with that plane and expect two separate pieces. Move one piece to confirm they are independent, then Undo the Move and Join Bodies to reunite them. Repeat using a flat face from another body: the whole infinite plane should cut, regardless of that face's displayed size. A plane outside the body or a curved face should be refused with a clear message. Check Cancel and Undo preserve the prior solid. Follow `03-box-ready-to-split.ferr`, `04-box-split.ferr`, `05-split-piece-moved.ferr`, and `06-split-pieces-joined.ferr` for each stage.
@@ -58,7 +58,7 @@ These additions are awaiting verification. See the [direct modeling guide](DIREC
 30. **Graphical primitive placement.** Open a Box or Cylinder and choose Place in view. Click positions on XY, XZ and YZ, then try a picked flat face and a construction plane. With Align on, local +Z should match the chosen plane normal; with Align off, the prior rotation should remain. Refine the position with arrows/rings and accept. Repeat inside a moved/rotated component. Change the picked reference afterward: the primitive should retain the captured numeric placement. Cancel a new placement and confirm it adds no feature.
 31. **Pattern last-copy span.** Create a Linear pattern with Count 4 and drag the last-copy handle to an overall span of about 30 mm. Expect spacing about 10 mm. Capture a visible sketch point or line and check the last copy aligns along the selected axis only, preserving its other coordinates and elevation. Try a circular arc and a negative direction. Enable a second direction for a grid and adjust each handle separately; changing one must leave the other spacing unchanged. Edit an existing pattern, Cancel once, then accept and Undo. Orbit when the direction is end-on. Use `07-pattern-sketch-targets.ferr` as a starting point and compare with `08-pattern-grid-aligned.ferr`.
 32. **Sticky sketch placement and release.** While drawing lines and circular geometry, approach an existing line, arc, circle, and endpoint. Expect capture near the target, enough tolerance to click it, and a visible highlight. Move farther away, make an outward flick, or hold Alt to release. Click while captured, then edit the target: the supported coincidence or point-on-curve relationship should remain. Check spline endpoints capture but spline interiors do not claim a point-on-spline constraint. Repeat at different zoom levels and with nearby competing targets.
-33. **Interrupted gestures and saved results.** Begin a handle drag, then cancel or switch dialogs; the old gesture must not alter the next tool or orbit the camera unexpectedly. Save and reopen accepted Remove, Split, Move, placed primitives and edited patterns. Check their history, expressions, visible placements and component ownership, then export STL and STEP. Compare the exact build information with the tested candidate and retain any failing file.
+33. **Interrupted gestures and saved results.** Begin a handle drag, then cancel or switch dialogs; the old gesture must not alter the next tool or orbit the camera unexpectedly. Save and reopen accepted Remove, Split, Move, placed primitives and edited patterns. Check their history, expressions, visible placements and component ownership, then export STL and STEP. Compare the exact build information with the tested release and retain any failing file.
 
 ## Command search, text, and rounded-face cuts
 
@@ -74,10 +74,12 @@ These additions are awaiting verification. See the [direct modeling guide](DIREC
 
 ## Manual observations received
 
-The user reported successful Remove/STL export, Split, moving and rotating separated bodies, rejoining and moving the joined body, sketch attachment to lines/projections, and creating sketches/extrusions on Offset and Three Points planes. These observations do not mark all substeps of checks 1–33 complete. The user has accepted component checks 1–4 using Bracket and Root: separation under Join, a component-scoped cut, and nested visibility with save/reopen. This records the Root/Bracket variation rather than a separate sibling Insert test. The remaining component checks still need human acceptance; automated coverage is recorded with the candidate build. Separate bodies with overlapping coplanar faces can still show a display artifact; joining them removes the coincident internal surfaces.
+On October 8, 2026, the user accepted component checks **1–8** and the reported workflows for command search, Move shortcut, raised/engraved text, rounded-face extrusion/cutting, torus Boolean operations, and Open Recent (**34–39**). The initial component isolation checks used Root and Bracket rather than a separate sibling Insert component. The user also reported successful Remove/STL export, Split, moving/rotating separated and rejoined bodies, sketch capture on lines/projections, and sketch/extrude workflows on Offset and Three Points planes. These observations record the tested workflows, without claiming every optional substep or negative case was run manually.
+
+The user approved publishing 0.3.0 once CI passes. Automated coverage complements the manual observations. Separate bodies with overlapping coplanar faces can still show a display artifact; joining them removes coincident internal surfaces. This known display limitation remains documented for the release.
 
 ## Report a failure
 
 Send the number, copied build info, exact inputs, expected result, actual result, and any error text. Save the smallest `.ferr` that reproduces it; include a screenshot for picking, placement, visibility, or layout problems. Say whether the action was refused, made the wrong shape, or changed unrelated geometry. Keep any failed example so it can become a regression test.
 
-A public 0.3.0 release is deliberately held until you have reviewed this test build. Passing automated tests does not replace these human checks.
+Retain this checklist for future regression testing. Release builds are published only after the required CI and native packaging checks pass.

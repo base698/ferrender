@@ -1,6 +1,6 @@
 # Solid primitives in Ferrender 0.3
 
-Primitives are part of the **unreleased 0.3.0-dev test build**. They create an editable solid directly, without drawing a sketch first. Human acceptance checks are in [tests 18–25 of the manual test plan](TEST_PLAN_0.3.0.md#solid-primitives).
+Primitives are part of the **Ferrender 0.3.0 release**. They create an editable solid directly, without drawing a sketch first. Human acceptance checks are in [tests 18–25 of the manual test plan](TEST_PLAN_0.3.0.md#solid-primitives).
 
 ## Create a solid
 
@@ -32,6 +32,6 @@ Dimensions must be between **0.001 and 10,000 mm**, except that one cone end may
 
 Each primitive adds one timeline feature. Double-click its chip to reopen its dimensions, placement and operation. Accepting an edit updates that same feature. Its shape type stays fixed; create a new primitive to use a different shape. Undo and Redo should restore the whole change, including any parameter defined while making it.
 
-Primitives can be used as Pattern sources, including a two-direction Linear grid. Their exact solid faces can also be used for sketching and subsequent modeling operations. Save and reopen to preserve expressions, ownership and placement; STL and STEP exports contain the resulting placed solids. Files using primitives require the updated 0.3.0 test build, and older builds should refuse them clearly rather than omit the new shapes.
+Primitives can be used as Pattern sources, including a two-direction Linear grid. Their exact solid faces can also be used for sketching and subsequent modeling operations. Save and reopen to preserve expressions, ownership and placement; STL and STEP exports contain the resulting placed solids. Files using primitives require Ferrender 0.3.0 or later, and older builds should refuse them clearly rather than omit the new shapes.
 
 For testing, report the primitive shape, dimensions, operation, active component, and copied build information. Keep a small failing `.ferr` and a screenshot if the preview or placement differs from the accepted model.

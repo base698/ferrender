@@ -210,11 +210,11 @@ been tried against the live API.
 It is early, and smaller than what it imitates: no joints or linked component instances, no loft or sweep, no drawings, and the
 [limits](#limits) below are real. `TODO.md` has the list.
 
-## Modeling additions in 0.3.0 testing
+## Modeling additions in 0.3.0
 
-**0.3.0-dev is a test build awaiting user verification, not a published release.** The work adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes. Native primitives add editable Box, Cylinder, Sphere, Cone and Torus features. Linear patterns support two directions for rectangular grids. The latest candidate adds Remove/Split/Join Bodies, graphical Move and primitive placement, pattern span handles, and sticky sketch capture.
+**Ferrender 0.3.0** adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes. Native primitives add editable Box, Cylinder, Sphere, Cone and Torus features. Linear patterns support two directions for rectangular grids. It also adds Remove/Split/Join Bodies, graphical Move and primitive placement, pattern span handles, and sticky sketch capture.
 
-Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [candidate notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. The [primitive guide](docs/PRIMITIVES_0.3.md) explains dimensions, origins and placement. The [direct modeling guide](docs/DIRECT_MODELING_0.3.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require the matching candidate build shown in About.
+Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [release notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. The [primitive guide](docs/PRIMITIVES_0.3.md) explains dimensions, origins and placement. The [direct modeling guide](docs/DIRECT_MODELING_0.3.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require 0.3.0 or later. Check About for the exact version and source commit.
 
 ## Sketching improvements in 0.2
 

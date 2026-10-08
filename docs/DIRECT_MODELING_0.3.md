@@ -1,6 +1,6 @@
 # Direct modeling and placement in Ferrender 0.3
 
-These controls belong to the **unreleased 0.3.0-dev test candidate**. Use the exact commit shown in About when reporting results. They are awaiting human acceptance; the numbered checks continue at 26 in the [manual test plan](TEST_PLAN_0.3.0.md).
+These controls belong to the **Ferrender 0.3.0 release**. Use the exact commit shown in About when reporting results. The numbered regression checks continue at 26 in the [manual test plan](TEST_PLAN_0.3.0.md).
 
 ## Remove, split, and join bodies
 

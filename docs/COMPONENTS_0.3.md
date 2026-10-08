@@ -1,6 +1,6 @@
 # Components in Ferrender 0.3
 
-Status: **implemented in the 0.3.0-dev test candidate; local automated verification passed; manual acceptance pending. Not released.** Target: 0.3.0, alongside [construction planes](CONSTRUCTION_PLANES_0.3.md). The specification below defines the intended behavior; it is not a record of passed tests. Use the consolidated [0.3.0 manual test plan](TEST_PLAN_0.3.0.md) to report acceptance results. A public release waits for user verification.
+Status: **implemented in Ferrender 0.3.0**, alongside [construction planes](CONSTRUCTION_PLANES_0.3.md). The specification below describes behavior and test cases. The [0.3.0 manual test plan](TEST_PLAN_0.3.0.md) records the scope of manual acceptance; its checklist remains available for regression testing.
 
 A component is a named, nestable container for sketches, bodies, construction planes and the features that make them. A document starts with one root component and gains more with **New Component**. Features go into the *active* component. Operations such as Join and Cut only touch bodies in the component they run in, so parts built side by side stay separate until you combine them on purpose. A component can be moved as a whole, and hidden as a whole.
 

@@ -1,10 +1,10 @@
 # Construction planes in Ferrender 0.3
 
-Status: **implemented in the 0.3.0-dev test candidate; local automated verification passed; manual acceptance pending. Not released.** Target: 0.3.0, alongside [components](COMPONENTS_0.3.md). The specification below defines the intended behavior; it is not a record of passed tests. Use the consolidated [0.3.0 manual test plan](TEST_PLAN_0.3.0.md) to report acceptance results. A public release waits for user verification.
+Status: **implemented in Ferrender 0.3.0**, alongside [components](COMPONENTS_0.3.md). The specification below describes behavior and test cases. The [0.3.0 manual test plan](TEST_PLAN_0.3.0.md) records the scope of manual acceptance; its checklist remains available for regression testing.
 
 In 0.2.2 a sketch could only start on an origin plane, on a flat face, or on a one-shot offset of either (the **Offset** field in the New Sketch dialog copies the plane and forgets where it came from). A construction plane is a plane that is a feature in its own right: it is visible in the viewport, listed in the browser, built from references that it keeps, and re-evaluated on every rebuild. A sketch drawn on it follows it when the referenced face moves, a parameter changes, or the three points it passes through are edited.
 
-The 0.3.0 candidate includes three kinds:
+Ferrender 0.3.0 includes three kinds:
 
 | Kind | References | Result |
 |---|---|---|

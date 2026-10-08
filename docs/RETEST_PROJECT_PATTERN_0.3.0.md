@@ -1,6 +1,6 @@
 # Projection and corner-pattern retest
 
-Run this before continuing the main 0.3.0 acceptance plan. Use the updated **0.3.0-dev** app and compare **Help → About Ferrender** with the supplied build information. Save your work and restart the app to load the updated build. The public release remains on hold.
+Run this before continuing the main 0.3.0 acceptance plan. Use the updated **0.3.0** app and compare **Help → About Ferrender** with the supplied build information. Save your work and restart the app to load the updated build. These steps remain available for regression testing after release.
 
 The problem was profile selection: Extrude automatically included a projected plate outline along with a circle. New Body created a separate body containing both extrusions, producing an overlapping plate. Pattern correctly repeated that whole feature. Multiple closed regions now require an explicit area choice; a normal click replaces the selection, and Shift-click adds or removes regions. The Project tool still creates geometry that can be deliberately selected for extrusion.
 

@@ -1,6 +1,6 @@
 # Sketching in Ferrender 0.2
 
-For the 0.3.0 test candidate, Select uses **V**; **S** opens command search. Other steps below retain their documented 0.2.2 behavior.
+For 0.3.0, Select uses **V**; **S** opens command search. Other steps below retain their documented 0.2.2 behavior.
 
 This guide covers Ferrender **0.2.2** and includes a manual acceptance plan. For a shorter retest of the 0.2.2 changes, see [Sketching fixes in 0.2.2](SKETCHING_0.2.2.md). A test listed below is a check to perform, not a claim that someone has already performed it. See the release notes for completed validation.
 

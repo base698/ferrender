@@ -8,7 +8,7 @@ For each release:
 
 1. Update the package versions and lockfile, documentation, and versioned release notes.
 2. Run the relevant tests, inspect the source diff, and commit. Never tag a dirty working tree or replace an existing published tag.
-3. Push the commit, then its `vMAJOR.MINOR.PATCH` tag.
+3. Push the release commit to the candidate branch and wait for the macOS and Linux CI jobs to pass. Merge that verified commit into main (fast-forward when possible), confirm the remote main commit, then push its `vMAJOR.MINOR.PATCH` tag.
 4. Check the Native release workflow and the resulting three downloads and SHA256SUMS.txt.
 5. Verify Help > About / `--version` on the packaged apps. The embedded commit must match the tag.
 
