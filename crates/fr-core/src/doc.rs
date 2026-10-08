@@ -115,7 +115,7 @@ pub enum PatternKind {
     Mirror { axis: usize },
 }
 
-/// Repeats what an earlier extrude, revolve or import did.
+/// Repeats an earlier extrusion, revolution, primitive, import or standalone text.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pattern {
     pub source: Id,
@@ -497,6 +497,7 @@ pub enum FeatureKind {
     Sketch(Sketch),
     Plane(ConstructionPlane),
     Component(Component),
+    Primitive(crate::primitives::Primitive),
     Extrude(Extrude),
     Revolve(Revolve),
     /// A mesh brought in from a file, already in millimetres.
@@ -530,6 +531,7 @@ impl Feature {
             FeatureKind::Sketch(_) => "sketch",
             FeatureKind::Plane(_) => "plane",
             FeatureKind::Component(_) => "component",
+            FeatureKind::Primitive(p) => p.shape.name(),
             FeatureKind::Extrude(_) => "extrude",
             FeatureKind::Revolve(_) => "revolve",
             FeatureKind::Import(_) => "import",
@@ -942,6 +944,7 @@ impl Document {
             self.sketch(id).ok_or("its sketch was deleted".to_owned())
         };
         match &f.kind {
+            FeatureKind::Primitive(p) => Ok(Some((Shape::Exact(p.solids()?),p.op))),
             FeatureKind::Extrude(e) => {
                 let s = sk(e.sketch)?;
                 let source=self.feature(e.sketch).unwrap().owner;
@@ -1007,6 +1010,7 @@ impl Document {
                 Err(e) => err = Some(e),
             };
             match &mut f.kind {
+                FeatureKind::Primitive(p) => p.evaluate(&mut set),
                 FeatureKind::Sketch(s) => {
                     for c in s.constraints.values_mut() {
                         if let (Some(v), Some(kind)) = (&mut c.value, c.kind.value_kind()) {
@@ -1134,7 +1138,7 @@ impl Document {
 
     fn apply(&self, f: &Feature, bodies: &mut Vec<Body>, count: &mut usize, context: &Built) -> Result<(), String> {
         let find = |bodies: &[Body], id: Id| bodies.iter().position(|b| b.id == id).ok_or("a body it used no longer exists".to_owned());
-        const MESH_ONLY: &str = "this body is a mesh (imported, tapered, or combined with one), and only exact bodies made from sketches can do that";
+        const MESH_ONLY: &str = "this body is a mesh (imported, tapered, or combined with one); this operation needs an exact body made from a sketch, primitive or text";
         match &f.kind {
             FeatureKind::Text(t) if t.op != Op::New => {
                 let profiles = t.outlines()?;
@@ -1362,7 +1366,7 @@ impl Document {
                 if context.errors.contains_key(&source.id) || !context.components.contains_key(&source.owner) {
                     return Err("the feature it repeats could not be built".into());
                 }
-                let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, imports and standalone text can be patterned")?;
+                let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, primitives, imports and standalone text can be patterned")?;
                 let mut landed = 0;
                 for (k, place) in p.placements()?.iter().enumerate() {
                     let copy = tool.placed(place);

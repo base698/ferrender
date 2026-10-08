@@ -14,6 +14,7 @@ pub mod measure;
 pub mod mesh;
 pub mod ops;
 pub mod profile;
+pub mod primitives;
 pub mod planes;
 pub mod reference;
 pub mod render;

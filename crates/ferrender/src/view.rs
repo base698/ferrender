@@ -1930,6 +1930,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Feature(f), _) if f.pick_to => "Click the face the extrude should reach.",
         (Dialog::Feature(f), _) if f.revolve => "Click a closed region to select it. Shift-click to add or remove regions.",
         (Dialog::Feature(_), _) => "Click a closed region or flat face. Shift-click to add or remove regions. Drag the arrow to set the distance.",
+        (Dialog::Primitive(_), _) => "Set dimensions and position in the primitive dialog. F fits the preview into view.",
         (Dialog::Pattern(_), _) => "The dots show where each copy will go.",
         (Dialog::Blend(_), _) => "Click edges of a body to add or remove them.",
         (Dialog::Shell(_), _) => "Click the faces to leave open.",

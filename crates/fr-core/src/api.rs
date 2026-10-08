@@ -4,6 +4,7 @@
 
 mod planes_api;
 mod components_api;
+mod primitives_api;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -96,6 +97,8 @@ SKETCHES
 {"op":"fillet","sketch":ID,"point":ID,"radius":V}   rounds a corner where two lines meet; {"op":"chamfer",...,"distance":V} cuts it straight
 
 FEATURES
+{"op":"primitive","type":"box","width":V,"depth":V,"height":V,"position":[0,0,0],"rotate":[0,0,0],"operation":"new"}
+   Native exact solids: box(width,depth,height), cylinder(diameter,height), sphere(diameter), cone(bottom_diameter,top_diameter,height; top defaults to 0), torus(major_radius,tube_radius). Dimensions are lengths; position and rotate are optional three-value expression arrays. New Body is the default; join/cut/intersect affect the active component. Box position is its lower corner; cylinder/cone position is its base center (+Z height); sphere/torus position is its center (torus axis +Z). Rotate X then Y then Z about that origin, then translate, in the component's frame. Dimensions are 0.001–10000 mm; one cone end may be zero and equal cone diameters make a cylinder. Torus major radius must exceed tube radius by at least 0.001 mm. Position is bounded to ±1000000 mm. edit_feature changes dimensions, position, rotate and operation; type stays fixed. Values accept units and parameter expressions. get_object_info reports type:primitive, shape, dimensions and placement.
 {"op":"text","text":"CAD","height":"6 mm","depth":"1 mm","operation":"new","plane":"XY"}
    Creates parametric solid lettering. plane: XY | XZ | YZ, with optional origin:[x,y,z] in document units. height defaults to 6 mm, depth to 1 mm. spacing, x, y default to 0; angle defaults to 0 degrees. align: left | center | right (default left). x/y shift the lettering within its plane; angle rotates it there. Numeric fields accept units and parameter expressions.
 {"op":"text","text":"CAD","operation":"join","body":BODY,"face":[x,y,z],"height":"6 mm","depth":"1 mm"}
@@ -108,7 +111,7 @@ FEATURES
    axis: "x" or "y" (the sketch's axes), the id of a line in the sketch, or {"from":[x,y],"to":[x,y]}. The profile must not cross the axis.
    extrude also takes "extent":"all" (go through bodies in its component; the sign of distance picks the side), "taper":DEGREES (walls lean outward, negative inward), and instead of a sketch, "face":{"body":BODY,"point":[x,y,z]} to pull the flat face nearest that point out (or, with a negative distance, push it in and cut).
 {"op":"create_sketch","face":{"body":BODY,"point":[x,y,z]}}   sketch on a flat face
-{"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve or import around a component-local axis through its origin; count includes the original
+{"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve, primitive, import or standalone text around a component-local axis through its origin; count includes the original
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":4,"spacing":V}
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":2,"spacing":V,"axis2":"y","count2":2,"spacing2":V}
    Optional axis2/count2/spacing2 form a rectangular grid; supply all three together, with distinct component-local axes. Each count includes the source and must be at least 2; their product is at most 1000. Spacing is between adjacent instances and can be negative; both spacings in a grid must be nonzero. Without a second direction, count is at most 1000 and zero spacing remains allowed for compatibility (coincident copies).
@@ -400,6 +403,7 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
         FeatureKind::Sketch(sk) => { o["on"] = json!(sk.on); }
         FeatureKind::Plane(_) => planes_api::info(s,id,&mut o),
         FeatureKind::Component(_) => {o["component_info"]=components_api::node(s,id);}
+        FeatureKind::Primitive(p) => primitives_api::info(s,p,&mut o),
         FeatureKind::Extrude(e) => {
             o["sketch"] = json!(e.sketch);
             o["distance"] = json!({"expr": e.distance.expr, "value": len_out(doc, e.distance.v)});
@@ -1415,6 +1419,18 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 Ok(out)
             }
         }
+        "primitive" => {
+            let primitive = primitives_api::create(&s.doc,c)?;
+            let id = s.edit_feature(|d| {
+                let id = d.add_feature(FeatureKind::Primitive(primitive));
+                crate::validation::document(d)?;
+                Ok((id,id))
+            })?;
+            let mut out = changed(s,&before);
+            out.as_object_mut().unwrap().extend(feature_info(s,id)?.as_object().unwrap().clone());
+            out["feature"] = json!(id);
+            Ok(out)
+        }
         "pattern" => {
             let source = id_of(c, "feature")?;
             let axis = |key: &str, default: usize| match c[key].as_str().map(str::to_ascii_lowercase).as_deref() {
@@ -1547,6 +1563,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 match &mut f.kind {
                     FeatureKind::Plane(p) => {if let Some((kind,_))=plane_update {p.kind=kind;}}
                     FeatureKind::Text(t) => { *t = text_update.expect("text feature update was prepared"); }
+                    FeatureKind::Primitive(p) => primitives_api::update(&probe,&c,p)?,
                     FeatureKind::Extrude(e) => {
                         if !c["distance"].is_null() {
                             e.distance = probe.value(&text_of(&c["distance"])?, Kind::Length)?;

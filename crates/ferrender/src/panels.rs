@@ -81,6 +81,9 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Extrude", "E", Action::Extrude);
             item(app, ui, "Revolve", "", Action::Revolve);
             item(app, ui, "Text / Emboss", "", Action::Text);
+            ui.menu_button("Primitives", |ui| {
+                for (kind, name) in crate::primitives::NAMES.into_iter().enumerate() { item(app, ui, name, "", Action::Primitive(kind)); }
+            });
             ui.separator();
             item(app, ui, "Move / Rotate / Scale", "", Action::Transform);
             item(app, ui, "Combine", "", Action::Combine);
@@ -268,6 +271,9 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 if big(ui, icon::ARROWS_CLOCKWISE, "Revolve", rev, "Turn a sketch profile around an axis, like a lathe").clicked() {
                     app.run(&ctx, Action::Revolve);
                 }
+                if big(ui, icon::CUBE, "Primitive", matches!(app.dialog, Dialog::Primitive(_)), "Create a box, cylinder, sphere, cone or torus").clicked() {
+                    app.run(&ctx, Action::Primitive(0));
+                }
                 if big(ui, icon::TEXT_T, "Text", matches!(app.dialog, Dialog::Text(_)), "Create solid text, or raise or engrave it on a flat face").clicked() {
                     app.run(&ctx, Action::Text);
                 }
@@ -294,7 +300,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 if big(ui, icon::SPIRAL, "Thread", matches!(app.dialog, Dialog::Thread(_)), "Put a screw thread on a rod or in a hole").clicked() {
                     app.run(&ctx, Action::Thread);
                 }
-                if big(ui, icon::CIRCLES_THREE, "Pattern", matches!(app.dialog, Dialog::Pattern(_)), "Repeat a feature in a circle or a row, or mirror it").clicked() {
+                if big(ui, icon::CIRCLES_THREE, "Pattern", matches!(app.dialog, Dialog::Pattern(_)), "Repeat a feature in a circle, row or grid, or mirror it").clicked() {
                     app.run(&ctx, Action::Pattern);
                 }
                 if big(ui, icon::FUNCTION, "Parameters", app.show_params, "Named values you can use in any size box as $name").clicked() {
@@ -384,6 +390,7 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Sketch(_) => icon::PENCIL_RULER,
         FeatureKind::Plane(_) => icon::SQUARE,
         FeatureKind::Component(_) => icon::TREE_STRUCTURE,
+        FeatureKind::Primitive(_) => icon::CUBE,
         FeatureKind::Extrude(_) => icon::ARROW_FAT_LINES_UP,
         FeatureKind::Revolve(_) => icon::ARROWS_CLOCKWISE,
         FeatureKind::Import(_) => icon::DOWNLOAD_SIMPLE,
@@ -544,7 +551,7 @@ pub(crate) fn value_row(app: &App, ui: &mut Ui, label: &str, text: &mut String, 
     ui.end_row();
 }
 
-fn op_row(ui: &mut Ui, op: &mut Op, allowed: &[Op]) {
+pub(crate) fn op_row(ui: &mut Ui, op: &mut Op, allowed: &[Op]) {
     ui.label("Operation");
     egui::ComboBox::from_id_salt("op").width(110.0).selected_text(op.label()).show_ui(ui, |ui| {
         for o in allowed {
@@ -595,6 +602,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
     match app.dialog.clone() {
         Dialog::None => {}
         Dialog::Plane(d) => crate::construction::dialog(app, ctx, d),
+        Dialog::Primitive(d) => crate::primitives::dialog(app, ctx, d),
         Dialog::MoveComponent(d) => crate::components_ui::move_dialog(app, ctx, d),
         Dialog::DeleteComponent(id) => crate::components_ui::delete_dialog(app, ctx, id),
         Dialog::PointCoordinates(mut d) => {
@@ -756,7 +764,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 let owner = p.editing.and_then(|id| app.doc().feature(id).map(|f| f.owner));
                 let sources: Vec<(Id, String)> = app.doc().features.iter().take(before)
                     .filter(|f| !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner) && owner.is_none_or(|owner| f.owner == owner))
-                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
+                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
                     .map(|f| (f.id, format!("{} · {}", f.name, app.doc().component_name(f.owner)))).collect();
                 let shown = sources.iter().find(|s| Some(s.0) == p.source).map_or("choose".to_owned(), |s| s.1.clone());
                 egui::Grid::new("pattern").num_columns(3).show(ui, |ui| {

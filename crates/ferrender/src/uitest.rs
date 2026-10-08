@@ -6,6 +6,7 @@ mod dimensions_v022;
 mod desktop_open;
 mod v030;
 mod project_pattern;
+mod primitives;
 
 use std::path::PathBuf;
 

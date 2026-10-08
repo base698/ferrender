@@ -4,6 +4,7 @@ mod bridge;
 mod build_info;
 mod config;
 mod construction;
+mod primitives;
 mod construction_view;
 mod components_ui;
 mod gpu;

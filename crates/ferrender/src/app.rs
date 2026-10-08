@@ -322,6 +322,7 @@ pub struct PointCoordsDlg {
 pub enum Dialog {
     None,
     Plane(crate::construction::PlaneDlg),
+    Primitive(crate::primitives::PrimitiveDlg),
     MoveComponent(crate::components_ui::MoveDlg),
     DeleteComponent(Id),
     /// Waiting for a plane or a flat face to sketch on.
@@ -433,6 +434,7 @@ impl Dialog {
                     }
                 }
             }
+            Dialog::Primitive(p) => p.apply(d),
             Dialog::Transform(t) => {
                 let v = |d: &mut Document, s: &String, kind| d.enter(if s.trim().is_empty() { "0" } else { s }, kind);
                 let translate = [v(d, &t.translate[0], Kind::Length)?, v(d, &t.translate[1], Kind::Length)?, v(d, &t.translate[2], Kind::Length)?];
@@ -504,7 +506,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
+        matches!(self, Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
     }
 }
 
@@ -578,6 +580,7 @@ pub struct Opts {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
+    Primitive(usize),
     Plane,
     NewComponent,
     ActivateRoot,
@@ -890,7 +893,9 @@ impl App {
         if self.sel_feature.is_some_and(|f| self.session.doc.feature(f).is_none()) {
             self.sel_feature = None;
         }
-        if matches!(&self.preview, Some((Dialog::Text(t), _, _)) if t.editing.is_some()) && !matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) {
+        let primitive_edit_closed = matches!(&self.preview, Some((Dialog::Primitive(p), _, _)) if p.editing.is_some())
+            && !matches!(&self.dialog, Dialog::Primitive(p) if p.editing.is_some());
+        if primitive_edit_closed || (matches!(&self.preview, Some((Dialog::Text(t), _, _)) if t.editing.is_some()) && !matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some())) {
             self.fit_pending = true;
         }
         self.preview = None;
@@ -1444,6 +1449,7 @@ impl App {
         let shown = |v: &fr_core::Value| v.expr.clone();
         match &kind {
             FeatureKind::Plane(p) => { self.finish_sketch(); self.dialog = Dialog::Plane(crate::construction::PlaneDlg::from_plane(id, p)); }
+            FeatureKind::Primitive(p) => { self.finish_sketch(); self.dialog = Dialog::Primitive(crate::primitives::PrimitiveDlg::from_feature(id, p)); self.fit_pending = true; }
             FeatureKind::Component(_) => self.move_component_dialog(id),
             FeatureKind::Pattern(pattern) => { self.finish_sketch(); self.dialog = Dialog::Pattern(PatternDlg::from_feature(id, pattern)); }
             FeatureKind::Sketch(_) => self.edit_sketch(id),
@@ -1577,7 +1583,9 @@ impl App {
 
     /// Keeps the dialog's preview current.
     pub fn update_preview(&mut self) {
-        if matches!(&self.preview, Some((Dialog::Text(t), _, _)) if t.editing.is_some()) && !matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) {
+        let primitive_edit_closed = matches!(&self.preview, Some((Dialog::Primitive(p), _, _)) if p.editing.is_some())
+            && !matches!(&self.dialog, Dialog::Primitive(p) if p.editing.is_some());
+        if primitive_edit_closed || (matches!(&self.preview, Some((Dialog::Text(t), _, _)) if t.editing.is_some()) && !matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some())) {
             self.fit_pending = true;
         }
         self.prepare_text_source();
@@ -1598,7 +1606,7 @@ impl App {
             Ok(id) => {
                 // Editing sees the feature in its original place in the timeline.
                 // Later transforms must not make a clicked face move a second time.
-                if (matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) || matches!(&self.dialog, Dialog::Plane(p) if p.editing.is_some()))
+                if (matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) || matches!(&self.dialog, Dialog::Plane(p) if p.editing.is_some()) || matches!(&self.dialog, Dialog::Primitive(p) if p.editing.is_some()))
                     && let Some(index) = doc.features.iter().position(|f| f.id == id)
                 { doc.roll_to(index + 1); }
                 let built = doc.rebuild();
@@ -2004,16 +2012,21 @@ impl App {
                     _ => self.toast("Select what to mirror, then Shift-click the mirror line last."),
                 }
             }
+            Action::Primitive(kind) => {
+                self.finish_sketch();
+                self.dialog = Dialog::Primitive(crate::primitives::PrimitiveDlg::new(kind));
+                self.fit_pending = true;
+            }
             Action::Pattern => {
                 self.finish_sketch();
-                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
+                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
                 let available = |f: &&fr_core::Feature| !f.suppressed && !self.session.built.errors.contains_key(&f.id) && self.session.built.components.contains_key(&f.owner) && ok(&f.kind);
                 let sources: Vec<_> = self.doc().features.iter().take(self.doc().active()).filter(available).collect();
                 let chosen = self.sel_feature.or(self.sel_body).filter(|id| sources.iter().any(|f| f.id == *id));
                 let source = chosen.or_else(|| sources.iter().rev().find(|f| f.owner == self.doc().active_component).map(|f| f.id));
                 match source {
                     Some(_) => self.dialog = Dialog::Pattern(PatternDlg::new(source)),
-                    None => self.toast("There is no extrude, revolve, standalone text or imported mesh to repeat yet."),
+                    None => self.toast("There is no extrusion, revolve, primitive, standalone text or imported mesh to repeat yet."),
                 }
             }
             Action::Section => self.show_section = !self.show_section,

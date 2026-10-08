@@ -196,7 +196,7 @@ been tried against the live API.
 | **Sketch** | Line, rectangle, circle, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
 | **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; signed X/Y position, length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
-| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, join / cut / intersect, fillet, chamfer, shell |
+| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
@@ -210,11 +210,11 @@ been tried against the live API.
 It is early, and smaller than what it imitates: no joints or linked component instances, no loft or sweep, no drawings, and the
 [limits](#limits) below are real. `TODO.md` has the list.
 
-## Components and construction planes in 0.3.0 testing
+## Modeling additions in 0.3.0 testing
 
-**0.3.0-dev is a test build awaiting user verification, not a published release.** The work adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes.
+**0.3.0-dev is a test build awaiting user verification, not a published release.** The work adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes. Native primitives add editable Box, Cylinder, Sphere, Cone and Torus features. Linear patterns support two directions for rectangular grids.
 
-Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [candidate notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. Existing designs remain readable; new component and construction-plane files require 0.3.0 or later.
+Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [candidate notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. The [primitive guide](docs/PRIMITIVES_0.3.md) explains dimensions, origins and placement. Existing designs remain readable; files using new features require the matching candidate build shown in About.
 
 ## Sketching improvements in 0.2
 
@@ -350,9 +350,17 @@ also go Through All bodies, reach To Face (click a face and the distance is
 measured for you), and lean its walls with a Taper angle. New Sketch takes an
 Offset, for a sketch on a plane above or below the one you pick.
 
+### Primitives (0.3 test build)
+
+Choose **Model → Primitives → Box, Cylinder, Sphere, Cone or Torus**, or use the **Primitive** toolbar button. Set dimensions, position, optional rotation, and New Body / Join / Cut / Intersect. Dimensions and placement accept units and named parameters. Double-click the timeline feature to edit it; no sketch is required.
+
+Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](docs/PRIMITIVES_0.3.md) includes examples and limits.
+
+These are exact solids that support subsequent sketches, fillets, holes, transforms, patterns, Combine and STEP export. New Body is the default, so touching primitives stay separate until you choose Join or Combine.
+
 ### Exact and mesh bodies
 
-A body made from sketches is an exact solid: true
+An untapered sketch extrusion, revolve or primitive creates an exact solid: true
 planes, cylinders and blends, turned into triangles only for display and STL.
 An imported STL, a tapered extrude, and anything combined with one of those is
 a mesh body. Both kinds work with extrude, revolve, cut, join, move and
@@ -390,7 +398,7 @@ cancel. Dragging is disabled until the updated view finishes drawing.
 
 ### Pattern
 
-Repeats an extrude, revolve, standalone text or imported mesh: around an axis,
+Repeats an extrude, revolve, primitive, standalone text or imported mesh: around an axis,
 in a row or rectangular grid, or mirrored through an origin plane. Axes belong
 to the source component. For four corners choose Linear, Count 2, and enable
 Second direction with Count 2 on another axis. Enter the distance between corner
