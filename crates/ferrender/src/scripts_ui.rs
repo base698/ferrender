@@ -415,8 +415,16 @@ pub fn menu(app: &mut App, ui: &mut Ui) {
     if ui.button("Open Scripts Folder").clicked() { let d = user_dir(); let _ = std::fs::create_dir_all(&d); let _ = open::that(&d); ui.close(); }
     if ui.button("Reload").clicked() { app.scripts.loaded = false; ui.close(); }
     ui.separator();
-    if ui.add_enabled(!app.doc().features.is_empty(), egui::Button::new("Export Timeline as Script\u{2026}")).clicked() { app.export_timeline_script(); ui.close(); }
-    if ui.button("Show Script Log").clicked() { app.scripts.show_log = true; ui.close(); }
+    if ui.add_enabled(!app.doc().features.is_empty(), egui::Button::new("Export Timeline as Script\u{2026}")).clicked() {
+        let ctx = ui.ctx().clone();
+        app.run(&ctx, Action::ExportTimelineScript);
+        ui.close();
+    }
+    if ui.button("Show Script Log").clicked() {
+        let ctx = ui.ctx().clone();
+        app.run(&ctx, Action::ScriptLog);
+        ui.close();
+    }
 }
 
 /// The inputs dialog.

@@ -71,6 +71,7 @@ pub struct Scene {
 
 impl Scene {
     /// How many bodies are drawn through the indexed large-mesh path.
+    #[cfg(test)]
     pub fn big_count(&self) -> usize { self.big.len() }
 
     /// A new document can reuse session revisions; keep GPU revisions monotonic.
