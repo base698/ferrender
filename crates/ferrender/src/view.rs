@@ -1768,9 +1768,10 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 fill(app, painter, doc.sketch(*sid).unwrap(), p, Color32::from_rgba_unmultiplied(0, 120, 255, 40));
             }
             if let Some(pos) = clicked {
-                let line = f.sketch.and_then(|s| doc.sketch(s)).and_then(|sk| match hit(app, sk, pos) {
-                    Hit::Entity(e) if sk.line(e).is_some() => Some(e),
-                    _ => None,
+                // The nearest line of the sketch under the click, ignoring points: an axis is
+                // often picked near where lines meet, and a construction line is as good an axis.
+                let line = f.sketch.and_then(|s| doc.sketch(s)).and_then(|sk| {
+                    sk.entities.keys().filter(|e| sk.line(**e).is_some()).map(|e| (*e, path_dist(&path(app, sk, *e), pos))).filter(|(_, d)| *d <= 6.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(e, _)| e)
                 });
                 if f.pick_to {
                     // Measure from the sketch (or face) plane to the face clicked, along the extrude direction.
@@ -1781,7 +1782,8 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                         f.through_all = false;
                         f.pick_to = false;
                     }
-                } else if let (true, Some(l)) = (f.pick_axis, line) {
+                } else if let (true, Some(l)) = (f.pick_axis || f.revolve, line) {
+                    // Revolving: any line of the sketch clicked becomes the axis, no Line button needed.
                     f.axis = Axis::Line(l);
                     f.pick_axis = false;
                 } else if let (Some(w), Some((sid, entity))) = (&mut f.sweep, over_path) {
@@ -2114,6 +2116,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Split(_), _) => "Choose a flat face or construction plane. XY, XZ and YZ use the body’s component axes.",
         (Dialog::DeleteComponent(_), _) => "Confirm deletion of the component and its contents, or cancel.",
         (Dialog::Feature(f), _) if f.pick_axis => "Click a sketch line to revolve around.",
+        (Dialog::Feature(f), _) if f.revolve => "Click a line of the sketch to revolve around it, or a region to choose the profile.",
         (Dialog::Feature(f), _) if f.pick_to => "Click the face the extrude should reach.",
         (Dialog::Feature(f), _) if f.sweep.as_ref().is_some_and(|w| w.path_sketch.is_none()) => "Click a line or curve of the path, drawn in another sketch than the profile.",
         (Dialog::Feature(f), _) if f.sweep.is_some() && f.profiles.is_empty() => "Click a closed region for the profile.",

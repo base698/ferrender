@@ -377,6 +377,20 @@ fn a_revolve_across_the_axis_names_the_points_and_can_move_them_onto_it() {
     h.state_mut().apply_dialog();
     assert_eq!(h.state().session.built.bodies.len(), 1);
     assert!(h.state().session.built.errors.is_empty());
+
+    // Revolving again: clicking a line of the sketch makes it the axis, with no Line button first.
+    run(&mut h, Action::Undo);
+    run(&mut h, Action::Revolve);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!() };
+    assert_eq!(f.axis, fr_core::doc::Axis::Y);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let right = *sk.entities.iter().find(|(_, e)| matches!(e.geom, Geom::Line { a, b } if (sk.pos(a).x - 20.0).abs() < 1e-6 && (sk.pos(b).x - 20.0).abs() < 1e-6)).map(|(id, _)| id).expect("the right edge");
+    let p = at(&h, 20.0, 15.0);
+    click(&mut h, p);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the dialog stays open") };
+    assert_eq!(f.axis, fr_core::doc::Axis::Line(right), "the clicked edge is the axis");
+    h.run_steps(2);
+    assert_eq!(h.state().preview.as_ref().and_then(|p| p.2.clone()), None, "the profile lies on one side of its own edge");
 }
 
 #[test]
