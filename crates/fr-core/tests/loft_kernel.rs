@@ -36,7 +36,7 @@ fn polygon(plane: Plane, points: &[(f64, f64)]) -> Sketch {
 
 fn run(sketches: &[Sketch], ruled: bool) -> Result<(Lumps, Vec<Vec<Profile>>), String> {
     let all: Vec<Vec<Profile>> = sketches.iter().map(profile::profiles).collect();
-    let sections: Vec<Section> = all.iter().zip(sketches).map(|(p, sk)| Section { profile: p.iter().find(|p| p.depth == 0).expect("a closed outline"), plane: sk.plane }).collect();
+    let sections: Vec<Section> = all.iter().zip(sketches).map(|(p, sk)| Section::Outline { profile: p.iter().find(|p| p.depth == 0).expect("a closed outline"), plane: sk.plane }).collect();
     Ok((exact::loft(&sections, ruled)?, all))
 }
 
@@ -147,7 +147,7 @@ fn faces_are_named_by_the_first_section() {
     let sketches = [square(at(0.0), 5.0), square(at(10.0), 2.0), square(at(20.0), 4.0)];
     for ruled in [true, false] {
         let (l, all) = run(&sketches, ruled).unwrap();
-        let sections: Vec<Section> = all.iter().zip(&sketches).map(|(p, sk)| Section { profile: &p[0], plane: sk.plane }).collect();
+        let sections: Vec<Section> = all.iter().zip(&sketches).map(|(p, sk)| Section::Outline { profile: &p[0], plane: sk.plane }).collect();
         let tags = exact::tag_loft(&l, &sections, 7);
         let tags: Vec<_> = tags[0].iter().map(|t| t.clone().expect("every face is named")).collect();
         let caps: Vec<bool> = tags.iter().filter_map(|t| match &t.origin { Origin::ProfileCap { feature: 7, end, .. } => Some(*end), _ => None }).collect();

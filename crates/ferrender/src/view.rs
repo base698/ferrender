@@ -1654,6 +1654,21 @@ fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: &[Id]) -> Option<(Id
         .min_by(|a, b| a.1.area().total_cmp(&b.1.area()))
 }
 
+/// A sketch point under the cursor for a loft's tip: a point of a visible sketch (or one the
+/// dialog uses) that has no closed region, since in a sketch with regions a point such as a
+/// circle's centre is part of the outline's region; the origin only when the sketch holds nothing else.
+fn pick_sketch_point(app: &App, doc: &Document, pos: Pos2, also: &[Id]) -> Option<(Id, Id)> {
+    doc.sketches()
+        .filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also.contains(&f.id)))
+        .filter(|(_, s)| profiles(s).is_empty())
+        .filter_map(|(f, s)| match hit(app, s, pos) {
+            Hit::Point(id) if id != 0 || s.entities.is_empty() => Some((f.id, id, on_screen(app, s, s.pos(id)).distance(pos))),
+            _ => None,
+        })
+        .min_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(sid, id, _)| (sid, id))
+}
+
 fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed: bool) {
     let colors = ViewColors::new(painter.ctx());
     let mut doc = app.session.doc.clone();
@@ -1835,26 +1850,46 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
             }
         }
         Dialog::Loft(mut l) => {
-            let over = hover.and_then(|p| pick_profile(app, &doc, p, &dlg_sketch));
-            // Each section filled and numbered in the order it is joined.
+            // A point under the cursor wins over the region around it: it is the smaller target.
+            let point_over = hover.and_then(|p| pick_sketch_point(app, &doc, p, &dlg_sketch));
+            let over = if point_over.is_some() { None } else { hover.and_then(|p| pick_profile(app, &doc, p, &dlg_sketch)) };
+            // Each section filled and numbered in the order it is joined; a tip is a ringed point.
             for (i, section) in l.sections.iter().enumerate() {
                 let Some(sk) = doc.sketch(section.sketch) else { continue };
-                let all = profiles(sk);
-                let Some(p) = all.iter().find(|p| p.edges == section.profile) else { continue };
-                fill(app, painter, sk, p, Color32::from_rgba_unmultiplied(0, 120, 255, 84));
-                let at = on_screen(app, sk, p.centroid());
+                let at = if let Some(point) = section.point {
+                    let Some(p) = sk.points.get(&point) else { continue };
+                    let at = on_screen(app, sk, *p);
+                    painter.circle_stroke(at, 14.0, Stroke::new(2.0, colors.selected));
+                    at
+                } else {
+                    let all = profiles(sk);
+                    let Some(p) = all.iter().find(|p| p.edges == section.profile) else { continue };
+                    fill(app, painter, sk, p, Color32::from_rgba_unmultiplied(0, 120, 255, 84));
+                    on_screen(app, sk, p.centroid())
+                };
                 painter.circle_filled(at, 10.0, colors.selected);
                 painter.text(at, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(12.0), Color32::WHITE);
             }
             if let Some((sid, p)) = &over {
                 fill(app, painter, doc.sketch(*sid).unwrap(), p, Color32::from_rgba_unmultiplied(0, 120, 255, 40));
             }
-            if clicked.is_some() && let Some((sid, p)) = over {
+            if let Some((sid, id)) = point_over && let Some(sk) = doc.sketch(sid) {
+                painter.circle_stroke(on_screen(app, sk, sk.pos(id)), 9.0, Stroke::new(2.0, colors.selected));
+            }
+            if clicked.is_some() && let Some((sid, id)) = point_over {
+                // A sketch gives one section: clicking its chosen point drops it, another point replaces it.
+                match l.sections.iter().position(|section| section.sketch == sid) {
+                    Some(i) if l.sections[i].point == Some(id) => { l.sections.remove(i); }
+                    Some(i) => { l.sections[i].point = Some(id); l.sections[i].profile.clear(); }
+                    None => l.sections.push(fr_core::doc::LoftSection { sketch: sid, profile: Vec::new(), point: Some(id) }),
+                }
+                app.dialog = Dialog::Loft(l);
+            } else if clicked.is_some() && let Some((sid, p)) = over {
                 // A sketch gives one section: clicking its chosen region drops it, another region replaces it.
                 match l.sections.iter().position(|section| section.sketch == sid) {
                     Some(i) if l.sections[i].profile == p.edges => { l.sections.remove(i); }
-                    Some(i) => l.sections[i].profile = p.edges,
-                    None => l.sections.push(fr_core::doc::LoftSection { sketch: sid, profile: p.edges }),
+                    Some(i) => { l.sections[i].profile = p.edges; l.sections[i].point = None; }
+                    None => l.sections.push(fr_core::doc::LoftSection { sketch: sid, profile: p.edges, point: None }),
                 }
                 app.dialog = Dialog::Loft(l);
             }
@@ -2153,8 +2188,8 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Primitive(d), _) if d.pick_surface => "Click a flat face or construction plane for placement.",
         (Dialog::Primitive(d), _) if d.placing => "Click to place the primitive. Visible sketch geometry snaps; Alt releases. OK commits the feature.",
         (Dialog::Primitive(_), _) => "Use Place in view, colored arrows/rings, or Position fields. F fits the preview.",
-        (Dialog::Loft(l), _) if l.sections.is_empty() => "Click a closed region in the first sketch, then one in each sketch after it, in order.",
-        (Dialog::Loft(l), _) if l.sections.len() == 1 => "Click a closed region in the next sketch, drawn on another plane.",
+        (Dialog::Loft(l), _) if l.sections.is_empty() => "Click a closed region in the first sketch, then one in each sketch after it, in order. A sketch point makes the loft come to a tip there.",
+        (Dialog::Loft(l), _) if l.sections.len() == 1 => "Click a closed region in the next sketch, drawn on another plane, or a sketch point for a tip.",
         (Dialog::Loft(_), _) => "Click another region to add a section, or a numbered one to leave it out. Reorder them in the dialog.",
         (Dialog::Pattern(p), _) if p.kind==1 => "Drag a last-copy handle to set the span. Visible sketch geometry snaps along that axis; Alt releases.",
         (Dialog::Pattern(_), _) => "The dots show where each copy will go.",

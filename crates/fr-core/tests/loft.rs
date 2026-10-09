@@ -243,3 +243,63 @@ fn run(inputs) {
     let cone = frustum(std::f64::consts::PI * 25.0, std::f64::consts::PI * 4.0, 20.0);
     assert!((volume(&s) - cone).abs() < 1e-3 * cone, "{} against {cone}", volume(&s));
 }
+
+/// A sketch on XY lifted to `z` holding one lone point at `at`. Returns the sketch and point ids.
+fn tip(s: &mut Session, z: f64, at: [f64; 2]) -> (Id, Id) {
+    cmd(s, json!({"op": "create_sketch", "plane": "XY", "offset": z}));
+    let id = s.doc.sketches().last().unwrap().0.id;
+    let out = cmd(s, json!({"op": "add_geometry", "sketch": id, "items": [{"type": "point", "at": at}]}));
+    (id, out["items"][0]["points"][0].as_u64().unwrap() as Id)
+}
+
+#[test]
+fn a_loft_can_come_to_a_point() {
+    // A 20 mm square to a point 30 mm above its centre: a pyramid, whose tip is a flat 0.001 mm across.
+    let mut s = Session::default();
+    let base = square(&mut s, 0.0, 10.0);
+    let (apex, point) = tip(&mut s, 30.0, [0.0, 0.0]);
+    let out = cmd(&mut s, json!({"op": "loft", "sections": [base, {"sketch": apex, "point": point}], "ruled": true}));
+    assert_eq!(out["body_count"], 1, "{out}");
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    let pyramid = 30.0 / 3.0 * 400.0;
+    assert!((volume(&s) - pyramid).abs() < pyramid * 1e-3, "{} is not a pyramid of {pyramid}", volume(&s));
+    let top = s.built.bodies[0].mesh.bbox().unwrap().1.z;
+    assert!((top - 30.0).abs() < 1e-6, "it reaches the point: {top}");
+    let info = cmd(&mut s, json!({"op": "get_object_info", "id": out["feature"]}));
+    assert_eq!(info["sections"][1]["point"], json!(point), "{info}");
+    assert!(info["sections"][1].get("edges").is_none());
+
+    // The tip can come first too, and a smooth loft through two sections is the same pyramid.
+    cmd(&mut s, json!({"op": "undo"}));
+    cmd(&mut s, json!({"op": "loft", "sections": [{"sketch": apex, "point": point}, base], "ruled": false}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    assert!((volume(&s) - pyramid).abs() < pyramid * 1e-3, "{}", volume(&s));
+
+    // A circle to a point is a cone.
+    cmd(&mut s, json!({"op": "undo"}));
+    let disc = section(&mut s, 0.0, json!({"type": "circle", "center": [0, 0], "radius": 10}));
+    cmd(&mut s, json!({"op": "loft", "sections": [disc, {"sketch": apex, "point": point}]}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    let cone = std::f64::consts::PI * 100.0 * 30.0 / 3.0;
+    assert!((volume(&s) - cone).abs() < cone * 2e-3, "{} is not a cone of {cone}", volume(&s));
+
+    // Two points have nothing to skin; a point the sketch does not have is refused when asked.
+    let (other, other_point) = tip(&mut s, 60.0, [5.0, 5.0]);
+    let e = refused(&mut s, json!({"op": "loft", "sections": [{"sketch": apex, "point": point}, {"sketch": other, "point": other_point}]}));
+    assert!(e.contains("closed outline"), "{e}");
+    let e = refused(&mut s, json!({"op": "loft", "sections": [disc, {"sketch": apex, "point": 999}]}));
+    assert!(e.contains("no point 999"), "{e}");
+
+    // Saved with the tip, the design is format 15 and rebuilds to the same cone.
+    let dir = std::env::temp_dir().join(format!("ferrender-loft-tip-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cone.ferr");
+    cmd(&mut s, json!({"op": "save", "path": path.to_str().unwrap(), "cache": false}));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"version\": 15"), "a tip needs format 15");
+    let again = Session::open(&path).unwrap();
+    assert!(again.built.errors.is_empty(), "{:?}", again.built.errors);
+    assert!((volume(&again) - volume(&s)).abs() < 1e-6);
+    let l = again.doc.features.iter().find_map(|f| if let FeatureKind::Loft(l) = &f.kind { Some(l) } else { None }).expect("the loft");
+    assert_eq!(l.sections[1].point, Some(point));
+}

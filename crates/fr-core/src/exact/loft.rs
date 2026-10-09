@@ -13,11 +13,39 @@
 
 use super::*;
 
-/// One closed outline of a loft and the plane it is drawn on, in the feature's frame.
+/// One section of a loft, in the feature's frame: a closed outline on its plane, or a
+/// point the loft comes to, drawn as a sketch point and so carrying that sketch's plane.
 #[derive(Clone, Copy, Debug)]
-pub struct Section<'a> {
-    pub profile: &'a Profile,
-    pub plane: Plane,
+pub enum Section<'a> {
+    Outline { profile: &'a Profile, plane: Plane },
+    Point { at: DVec2, plane: Plane },
+}
+
+impl Section<'_> {
+    fn plane(&self) -> Plane {
+        match self { Section::Outline { plane, .. } | Section::Point { plane, .. } => *plane }
+    }
+
+    /// The points the result must reach.
+    fn world_points(&self) -> Vec<DVec3> {
+        match self {
+            Section::Outline { profile, plane } => profile.outer.iter().map(|p| plane.to_world(*p)).collect(),
+            Section::Point { at, plane } => vec![plane.to_world(*at)],
+        }
+    }
+}
+
+/// How far the tiny outline that stands in for a point reaches, in millimetres. The
+/// kernel skins wires only, so a tip is a section this small with the same edges as the
+/// outlines: a cone or pyramid ends in a flat a thousandth of a millimetre across.
+const TIP: f64 = 1e-3;
+
+/// The outline standing in for a point: a tiny circle when the outlines are circles,
+/// otherwise a tiny regular polygon with `n` edges.
+fn tip_segs(at: DVec2, n: usize, circle: bool) -> Vec<Seg> {
+    if circle { return vec![Seg::Circle(at, TIP)]; }
+    let corner = |k: usize| at + DVec2::from_angle(std::f64::consts::TAU * k as f64 / n as f64) * TIP;
+    (0..n).map(|k| Seg::Line(corner(k), corner((k + 1) % n))).collect()
 }
 
 /// A section ready for the kernel: its edges in the order and direction that match the section before.
@@ -78,41 +106,57 @@ fn ribs(sections: &[Section]) -> R<Vec<Rib>> {
     if sections.len() < 2 {
         return Err("a loft needs at least two sections on different planes".into());
     }
+    // The first outline sets the number of edges every section has and names the side
+    // faces; a point section borrows both.
+    let Some((base_n, base)) = sections.iter().enumerate().find_map(|(i, s)| match s { Section::Outline { profile, .. } => Some((i + 1, *profile)), Section::Point { .. } => None }) else {
+        return Err("a loft needs at least one closed outline; it cannot run from a point to a point".into());
+    };
+    if base.path.is_empty() {
+        return Err(format!("section {base_n} has no exact outline"));
+    }
+    let (want, circle) = (base.path.len(), matches!(base.path[..], [Seg::Circle(..)]));
     let mut out: Vec<Rib> = Vec::new();
     for (i, s) in sections.iter().enumerate() {
         let n = i + 1;
-        if s.profile.path.is_empty() {
-            return Err(format!("section {n} has no exact outline"));
-        }
-        if !s.profile.hole_paths.is_empty() {
-            return Err(format!("section {n} has a hole in it; a loft section is one closed outline, so loft the hole separately and cut it"));
-        }
-        let Some(first) = out.first() else {
-            out.push(Rib { segs: s.profile.path.clone(), ids: s.profile.path_ids.clone(), plane: s.plane, about: s.plane.normal() });
+        let path = match s {
+            Section::Outline { profile, .. } => {
+                if profile.path.is_empty() {
+                    return Err(format!("section {n} has no exact outline"));
+                }
+                if !profile.hole_paths.is_empty() {
+                    return Err(format!("section {n} has a hole in it; a loft section is one closed outline, so loft the hole separately and cut it"));
+                }
+                let have = profile.path.len();
+                if want != have {
+                    let edges = |k: usize| if k == 1 { "1 edge".to_owned() } else { format!("{k} edges") };
+                    return Err(format!("section {n} has {} where section {base_n} has {}; every section of a loft needs the same number of edges, so split or remove edges until they agree", edges(have), edges(want)))
+                }
+                profile.path.clone()
+            }
+            Section::Point { at, .. } => tip_segs(*at, want, circle),
+        };
+        let b = s.plane();
+        let Some(before) = out.last() else {
+            out.push(Rib { segs: path, ids: base.path_ids.clone(), plane: b, about: b.normal() });
             continue;
         };
-        let (want, have) = (first.segs.len(), s.profile.path.len());
-        if want != have {
-            let edges = |k: usize| if k == 1 { "1 edge".to_owned() } else { format!("{k} edges") };
-            return Err(format!("section {n} has {} where section 1 has {}; every section of a loft needs the same number of edges, so split or remove edges until they agree", edges(have), edges(want)));
-        }
-        let before = out.last().unwrap();
-        let (a, b) = (before.plane, s.plane);
+        let a = before.plane;
         if a.normal().dot(b.normal()).abs() > 1.0 - 1e-9 && (b.origin - a.origin).dot(a.normal()).abs() < 1e-7 {
             return Err(format!("sections {i} and {n} lie on the same plane; draw each section on its own plane"));
         }
-        let ids = first.ids.clone();
+        let ids = base.path_ids.clone();
         // A circle has no corners to match; it only has to run the same way round.
-        if matches!(s.profile.path[..], [Seg::Circle(..)]) {
+        if matches!(path[..], [Seg::Circle(..)]) {
             let about = if b.normal().dot(before.about) < 0.0 { -b.normal() } else { b.normal() };
-            out.push(Rib { segs: s.profile.path.clone(), ids, plane: b, about });
+            out.push(Rib { segs: path, ids, plane: b, about });
             continue;
         }
         let target = before.corners();
         let shift = before.centre();
+        let have = path.len();
         let mut best: Option<(f64, Vec<Seg>)> = None;
         for flipped in [false, true] {
-            let walk = if flipped { reversed(&s.profile.path) } else { s.profile.path.clone() };
+            let walk = if flipped { reversed(&path) } else { path.clone() };
             let candidate = Rib { segs: walk, ids: Vec::new(), plane: b, about: b.normal() };
             // Compare shapes, not positions: a section may sit well to one side of the last.
             let (corners, centre) = (candidate.corners(), candidate.centre());
@@ -126,7 +170,7 @@ fn ribs(sections: &[Section]) -> R<Vec<Rib>> {
                 }
             }
         }
-        let segs = best.map(|(_, segs)| segs).unwrap_or_else(|| s.profile.path.clone());
+        let segs = best.map(|(_, segs)| segs).unwrap_or(path);
         out.push(Rib { segs, ids, plane: b, about: b.normal() });
     }
     Ok(out)
@@ -150,7 +194,7 @@ pub fn loft(sections: &[Section], ruled: bool) -> R<Lumps> {
     }
     // Every section is a slice of the result, so the result reaches at least as far as they do.
     // Straight walls cannot reach any further. The kernel's own box is padded, so measure the triangles.
-    let points: Vec<DVec3> = sections.iter().flat_map(|s| s.profile.outer.iter().map(|p| s.plane.to_world(*p))).collect();
+    let points: Vec<DVec3> = sections.iter().flat_map(Section::world_points).collect();
     let (lo, hi) = points.iter().fold((DVec3::MAX, DVec3::MIN), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
     let Some((blo, bhi)) = mesh.bbox() else { return Err("the kernel returned an empty loft".into()) };
     let slack = 1e-4 + 2.0 * FINE.deflection_linear;

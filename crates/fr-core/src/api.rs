@@ -130,8 +130,8 @@ FEATURES
    carries the profile along a path drawn in ANOTHER sketch: lines, arcs and splines joined end to end, or one circle. Draw the path first, then the profile on a plane that crosses it (for a path on XY starting along X, a profile on YZ). "path" names the entities to follow; omitted, it is every non-construction entity of path_sketch, which must then be one unbranched run. A closed path gives a ring or a frame. Pieces that meet tangentially are followed exactly; a sharp corner is mitred like a picture frame (it may turn by at most 150 degrees). The profile may sit anywhere along the path and off to one side of it. orientation: follow (the profile turns with the path) | fixed (it keeps its orientation; the path may not run sideways to it). Refused with a reason when a bend is tighter than the profile reaches on its inside, or a stretch between corners is too short. get_object_info on the feature lists the path in the order it is walked. Each side face is named by its profile entity and path entity. "spans" sweeps only parts of the path: each pair is a start and an end as fractions of the path's length, 0 at its start and 1 at its end, in walking order ([[0,0.5]] is the first half, [[0.1,0.3],[0.6,0.7]] two separate pieces in one body). Omitted or [] is the whole path. Each piece is the part of the whole sweep that lies there, so the profile stays where it would be on the full sweep. Pieces that touch or overlap are joined. On a circle, 0 is at the sketch's +X side and the fractions run anticlockwise.
    extrude also takes "extent":"all" (go through bodies in its component; the sign of distance picks the side), "taper":DEGREES (walls lean outward, negative inward), and instead of a sketch, "face":{"body":BODY,"point":[x,y,z]} to pull the flat face nearest that point out (or, with a negative distance, push it in and cut).
 {"op":"create_sketch","face":{"body":BODY,"point":[x,y,z]}}   sketch on a flat face
-{"op":"loft","sections":[SKETCH,SKETCH,{"sketch":SKETCH,"profile":INDEX}],"ruled":false,"operation":"new"}
-   skins one solid through closed outlines drawn in sketches on DIFFERENT planes, in the order given: two or more sections, each a sketch id (the sketch's one outer region) or a sketch with the index of a region from get_object_info. Stack the sketches with create_sketch's "offset", on construction planes, or on faces. Every section needs the same number of edges: four lines to four lines, a circle to a circle; a mismatch is refused with both counts. Sections are matched corner to nearest corner, so it does not matter where each outline was started or which way round it was drawn. A region with a hole cannot be a section. "ruled":true joins neighbouring sections with straight walls (a frustum between two squares); otherwise the surface curves smoothly through all of them, which only differs from ruled with three or more sections. The ends are flat caps on the first and last sections. Returns the feature and the body it made or changed.
+{"op":"loft","sections":[SKETCH,SKETCH,{"sketch":SKETCH,"profile":INDEX},{"sketch":SKETCH,"point":POINT}],"ruled":false,"operation":"new"}
+   skins one solid through closed outlines drawn in sketches on DIFFERENT planes, in the order given: two or more sections, each a sketch id (the sketch's one outer region), a sketch with the index of a region from get_object_info, or a sketch with the id of one of its points, which makes the loft come to a tip there (a cone or pyramid whose tip is a flat 0.001 mm across). Stack the sketches with create_sketch's "offset", on construction planes, or on faces. Every section needs the same number of edges: four lines to four lines, a circle to a circle; a mismatch is refused with both counts. Sections are matched corner to nearest corner, so it does not matter where each outline was started or which way round it was drawn. A region with a hole cannot be a section. "ruled":true joins neighbouring sections with straight walls (a frustum between two squares); otherwise the surface curves smoothly through all of them, which only differs from ruled with three or more sections. The ends are flat caps on the first and last sections. Returns the feature and the body it made or changed.
 {"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve, sweep, loft, primitive, import or standalone text around a component-local axis through its origin; count includes the original
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":4,"spacing":V}
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":2,"spacing":V,"axis2":"y","count2":2,"spacing2":V}
@@ -560,6 +560,11 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
         FeatureKind::Loft(l) => {
             // Each section with the index its region has in its sketch now, as the command takes it.
             o["sections"] = J::Array(l.sections.iter().map(|section| {
+                if let Some(point) = section.point {
+                    let mut out = json!({"sketch": section.sketch, "point": point});
+                    if !doc.sketch(section.sketch).is_some_and(|sk| sk.points.contains_key(&point)) { out["error"] = json!("its point was deleted"); }
+                    return out;
+                }
                 let mut out = json!({"sketch": section.sketch, "edges": section.profile.len()});
                 match doc.sketch(section.sketch).map(profiles).and_then(|all| all.iter().position(|p| p.edges == section.profile)) {
                     Some(index) => out["profile"] = json!(index),
@@ -846,22 +851,32 @@ fn pick_profiles(doc: &Document, sid: Id, c: &J) -> R<Vec<Vec<Id>>> {
 /// A loft's "sections": sketches, each with the one closed region to use. A bare
 /// sketch id means the sketch's only outer region.
 fn loft_sections_of(doc: &Document, c: &J) -> R<Vec<LoftSection>> {
-    let wrong = "\"sections\" should list two or more sketches in order, each a sketch id or {\"sketch\": ID, \"profile\": INDEX}";
+    let wrong = "\"sections\" should list two or more sketches in order, each a sketch id, {\"sketch\": ID, \"profile\": INDEX} or {\"sketch\": ID, \"point\": POINT}";
     let list = c["sections"].as_array().ok_or(wrong)?;
     if list.len() < 2 {
         return Err("a loft needs at least two sections, each in its own sketch on its own plane".into());
     }
     list.iter().enumerate().map(|(i, v)| {
         let n = i + 1;
-        let (sid, index) = match v {
-            J::Number(_) => (v.as_u64().ok_or(wrong)? as Id, None),
+        let (sid, index, point) = match v {
+            J::Number(_) => (v.as_u64().ok_or(wrong)? as Id, None, None),
             J::Object(o) => (o.get("sketch").and_then(J::as_u64).ok_or(wrong)? as Id, match o.get("profile") {
                 None | Some(J::Null) => None,
                 Some(p) => Some(p.as_u64().ok_or("a section's \"profile\" should be the index of a region of its sketch")? as usize),
+            }, match o.get("point") {
+                None | Some(J::Null) => None,
+                Some(p) => Some(p.as_u64().ok_or("a section's \"point\" should be the id of a point of its sketch")? as Id),
             }),
             _ => return Err(wrong.to_owned()),
         };
         let sk = doc.sketch(sid).ok_or(format!("section {n}: feature {sid} is not a sketch"))?;
+        // A point section: the loft comes to a tip there.
+        if let Some(point) = point {
+            if !sk.points.contains_key(&point) {
+                return Err(format!("section {n}: sketch {sid} has no point {point}"));
+            }
+            return Ok(LoftSection { sketch: sid, profile: Vec::new(), point: Some(point) });
+        }
         let all = profiles(sk);
         if all.is_empty() {
             return Err(format!("section {n}: sketch {sid} has no closed outline"));
@@ -876,7 +891,7 @@ fn loft_sections_of(doc: &Document, c: &J) -> R<Vec<LoftSection>> {
                 }
             }
         };
-        Ok(LoftSection { sketch: sid, profile: profile.edges.clone() })
+        Ok(LoftSection { sketch: sid, profile: profile.edges.clone(), point: None })
     }).collect()
 }
 

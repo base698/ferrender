@@ -259,7 +259,11 @@ pub struct Sweep {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LoftSection {
     pub sketch: Id,
+    /// The entities of the closed outline; empty for a point section.
     pub profile: Vec<Id>,
+    /// A point of the sketch the loft comes to instead of an outline: the tip of a cone or pyramid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<Id>,
 }
 
 /// Skins one solid through closed outlines drawn in sketches on different planes, in order.
@@ -1401,12 +1405,19 @@ impl Document {
                     let n = i + 1;
                     let s = sk(section.sketch).map_err(|e| e.replace("its sketch", &format!("section {n}'s sketch")))?;
                     let plane = s.plane.transformed(context.component_placement(f.owner).inverse() * context.component_placement(self.feature(section.sketch).unwrap().owner));
-                    drawn.push((profile::profiles(s), plane, n));
+                    let point = section.point.map(|p| s.points.get(&p).copied());
+                    drawn.push((profile::profiles(s), plane, n, point));
                 }
                 let mut sections = Vec::with_capacity(drawn.len());
-                for ((all, plane, n), section) in drawn.iter().zip(&l.sections) {
-                    let profile = all.iter().find(|p| p.edges == section.profile).ok_or_else(|| format!("section {n}'s outline is no longer closed"))?;
-                    sections.push(exact::Section { profile, plane: *plane });
+                for ((all, plane, n, point), section) in drawn.iter().zip(&l.sections) {
+                    match point {
+                        Some(Some(at)) => sections.push(exact::Section::Point { at: *at, plane: *plane }),
+                        Some(None) => return Err(format!("section {n}'s point was deleted from its sketch")),
+                        None => {
+                            let profile = all.iter().find(|p| p.edges == section.profile).ok_or_else(|| format!("section {n}'s outline is no longer closed"))?;
+                            sections.push(exact::Section::Outline { profile, plane: *plane });
+                        }
+                    }
                 }
                 let solids = exact::loft(&sections, l.ruled)?;
                 let t = exact::tag_loft(&solids, &sections, f.id);

@@ -1751,7 +1751,9 @@ impl App {
         self.finish_sketch();
         let doc = self.doc();
         let mut sections: Vec<LoftSection> = doc.sketches().filter(|(f, s)| s.visible && !doc.is_suppressed(f.id)).filter_map(|(f, s)| match fr_core::profile::profiles(s).as_slice() {
-            [only] => Some(LoftSection { sketch: f.id, profile: only.edges.clone() }),
+            [only] => Some(LoftSection { sketch: f.id, profile: only.edges.clone(), point: None }),
+            // A sketch holding nothing but one point (or only its origin) is a tip.
+            [] if s.entities.is_empty() && s.points.len() <= 2 => Some(LoftSection { sketch: f.id, profile: Vec::new(), point: Some(s.points.keys().copied().find(|id| *id != 0).unwrap_or(0)) }),
             _ => None,
         }).collect();
         if sections.len() < 2 { sections.clear(); }

@@ -395,6 +395,30 @@ fn a_revolve_across_the_axis_names_the_points_and_can_move_them_onto_it() {
 }
 
 #[test]
+fn loft_offers_a_lone_sketch_point_as_its_tip() {
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let base = h.state().session.doc.sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "add_geometry", "sketch": base, "items": [{"type": "rect", "from": [-10, -10], "to": [10, 10]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY", "offset": 30}));
+    let apex = h.state().session.doc.sketches().last().unwrap().0.id;
+    let out = exec(&mut h, json!({"op": "add_geometry", "sketch": apex, "items": [{"type": "point", "at": [0, 0]}]}));
+    let point = out["items"][0]["points"][0].as_u64().unwrap() as u32;
+    h.state_mut().finish_sketch();
+    run(&mut h, Action::Loft);
+    let Dialog::Loft(l) = h.state().dialog.clone() else { panic!("the loft dialog should open") };
+    assert_eq!(l.sections.len(), 2, "both sketches are sections already: {:?}", l.sections);
+    assert_eq!(l.sections[1].point, Some(point), "the lone point is the tip");
+    h.run_steps(2);
+    assert_eq!(h.state().preview.as_ref().and_then(|p| p.2.clone()), None, "the pyramid previews");
+    h.state_mut().apply_dialog();
+    let body = &h.state().session.built.bodies[0];
+    let pyramid = 30.0 / 3.0 * 400.0;
+    assert!((body.solids[0].volume() - pyramid).abs() < pyramid * 1e-3, "{}", body.solids[0].volume());
+}
+
+#[test]
 fn move_tool_moves_the_selection_in_a_sketch() {
     let mut h = harness();
     h.state_mut().create_sketch(Plane::XY);

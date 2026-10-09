@@ -971,7 +971,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         for (i, section) in l.sections.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 let name = app.doc().feature(section.sketch).map_or_else(|| format!("sketch {}", section.sketch), |x| x.name.clone());
-                                ui.label(format!("{}. {name} · {} edge{}", i + 1, section.profile.len(), if section.profile.len() == 1 { "" } else { "s" }));
+                                ui.label(if section.point.is_some() { format!("{}. {name} · tip at a point", i + 1) } else { format!("{}. {name} · {} edge{}", i + 1, section.profile.len(), if section.profile.len() == 1 { "" } else { "s" }) });
                                 if ui.add_enabled(i > 0, egui::Button::new(icon::ARROW_UP).small()).on_hover_text("Join this section earlier").clicked() { change = Some((i, i - 1)); }
                                 if ui.add_enabled(i < last, egui::Button::new(icon::ARROW_DOWN).small()).on_hover_text("Join this section later").clicked() { change = Some((i, i + 1)); }
                                 if ui.add(egui::Button::new(icon::X).small()).on_hover_text("Leave this section out").clicked() { change = Some((i, usize::MAX)); }
@@ -992,7 +992,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     ui.end_row();
                     op_row(ui, &mut l.op, &Op::ALL);
                 });
-                ui.label(RichText::new("Click a closed region in each sketch, from one end to the other. Every section needs the same number of edges.").color(colors.muted));
+                ui.label(RichText::new("Click a closed region in each sketch, from one end to the other, or a sketch point to end at a tip. Every outline needs the same number of edges.").color(colors.muted));
                 if ui.small_button("Clear sections").clicked() { l.sections.clear(); }
                 app.dialog = Dialog::Loft(l);
                 confirm(app, ui, "OK");
