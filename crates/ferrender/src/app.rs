@@ -1153,7 +1153,17 @@ impl App {
 
     /// Turns the placed clicks into geometry once the tool has enough of them.
     pub fn commit_clicks(&mut self) {
-        let (tool, c, construction, sides) = (self.tool, self.clicks.clone(), self.opts.construction, self.opts.sides.clamp(3, 64));
+        let (tool, mut c, construction, sides) = (self.tool, self.clicks.clone(), self.opts.construction, self.opts.sides.clamp(3, 64));
+        // A spline that lands on an existing point before its fourth click is finished
+        // there: the missing fit points go evenly along the last stretch, so the curve
+        // still passes through every clicked point and ends where it was closed.
+        if tool == Tool::Spline && c.len() >= 2 && c.len() < 4 && c.last().is_some_and(|s| s.point.is_some()) {
+            let (from, to) = (c[c.len() - 2].p, c[c.len() - 1].p);
+            let missing = 4 - c.len();
+            let fill: Vec<Snap> = (1..=missing).map(|i| Snap { p: from.lerp(to, i as f64 / (missing + 1) as f64), point: None, on: None, h: false, v: false, axis: [false, false] }).collect();
+            let at = c.len() - 1;
+            c.splice(at..at, fill);
+        }
         if c.len() < tool.clicks() || tool.clicks() == 0 {
             return;
         }

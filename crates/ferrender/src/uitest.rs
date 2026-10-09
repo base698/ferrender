@@ -318,6 +318,24 @@ fn points_near_an_axis_land_on_it_and_splines_carry_on() {
     run(&mut h, Action::Cancel);
     assert!(h.state().clicks.is_empty(), "Escape ends the run");
     assert_eq!(h.state().session.doc.sketch(sid).unwrap().entities.len(), 2);
+
+    // Two new clicks and then the chain's end point: the spline is finished there with
+    // its missing fit points filled in along the last stretch, and the run ends.
+    run(&mut h, Action::Tool(Tool::Spline));
+    for (x, y) in [(40.0, 30.0), (55.0, 35.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    assert_eq!(h.state().clicks.len(), 2, "two clicks placed: {:?}", h.state().clicks);
+    let end = h.state().session.doc.sketch(sid).unwrap().pos(second.1);
+    let p = at(&h, end.x, end.y);
+    click(&mut h, p);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    assert_eq!(sk.entities.len(), 3, "the third spline was made from three clicks");
+    let closed = sk.entities.values().find_map(|e| if let Geom::Spline { a, b, c, d } = e.geom { (d == second.1 && a != second.0).then_some((a, b, c)) } else { None }).expect("it ends on the point that was clicked");
+    assert!((sk.pos(closed.0).x - 40.0).abs() < 1.0 && (sk.pos(closed.1).x - 55.0).abs() < 1.0, "it passes through the clicked points: {:?} {:?} {:?} end {:?}", sk.pos(closed.0), sk.pos(closed.1), sk.pos(closed.2), end);
+    assert!((sk.pos(closed.2) - (sk.pos(closed.1) + end) / 2.0).length() < 1e-6, "the filled-in point sits halfway along the last stretch");
+    assert!(h.state().clicks.is_empty(), "landing on an existing point ends the run");
 }
 
 #[test]
