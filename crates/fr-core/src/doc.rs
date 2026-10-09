@@ -1839,6 +1839,18 @@ impl Session {
         self.undo.last()
     }
 
+    /// How many undo steps there are, so a run of many edits can later be folded into one.
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Drops the undo steps above `depth`, so everything since then undoes as one step.
+    pub fn collapse_undo(&mut self, depth: usize) {
+        self.undo.truncate(depth);
+        self.redo.clear();
+        self.checkpoint = None;
+    }
+
     pub fn rebuild(&mut self) {
         let t = std::time::Instant::now();
         self.built = self.doc.rebuild();

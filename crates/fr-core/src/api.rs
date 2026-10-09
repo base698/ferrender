@@ -166,9 +166,27 @@ QUERIES
    The view is fitted to the bodies. For a custom camera add "azimuth" and "elevation" in degrees (the eye's bearing around Z and height above the XY plane), "target":[x,y,z] to centre on a point, and "zoom" to magnify (2 = twice as close).
 {"op":"get_reference"}                             this text
 
+Scripts. A Rhai script with a META map (name, description, inputs) and fn run(inputs) drives these same commands as functions: extrude(#{sketch: s, distance: 10}) returns what the command returns; new is new_design and thread is add_thread (Rhai keywords); run(#{op: ...}) takes any command. Also scene(), info(id), params(), errors(), selection(), measure(a, b), screenshot(path, #{view: "iso"}); files read_text, write_text, read_csv, write_csv, list_files(dir, ".ferr"), exists, mkdir, join, basename, document_dir(), script_dir(), all inside the allowed folders; log, progress(0..1, msg), confirm, ask, fail, name_template("{a}-{b}", #{a: 1, b: 2}). Inputs arrive as numbers in mm and degrees with the typed text in inputs.expr.NAME, so passing inputs.expr.width to a command keeps the parameter live. Declared input kinds: length, angle, number, integer, bool, choice (with choices), text, folder, file, body, face, sketch; each has an initial value.
+{"op":"script_meta","source":"..."} or {"path":"/abs/x.rhai"}   the META of a script without running it
+{"op":"run_script","path":"/abs/x.rhai","inputs":{"width":"30 mm"},"allow":["/abs/out"],"yes":true}   runs the script as one undo step (source may be given instead of path); returns log, result, exports, features, errors
+{"op":"add_feature","feature":{...}}                 appends a feature exactly as the file format writes it (used by exported timeline scripts)
+
 Bodies are named by the id of the feature that created them. Check get_scene_info for feature errors after changes, and look at a screenshot to confirm the shape."#;
 
 type R<T> = Result<T, String>;
+
+/// Every command `execute` accepts. Scripts get one host function per entry, and a test
+/// checks this list against the match arms and the reference text.
+pub const OPS: &[&str] = &[
+    "get_scene_info", "get_object_info", "get_viewport_screenshot", "batch", "undo", "redo", "new", "open", "save",
+    "export_stl", "export_step", "get_reference", "text", "rollback", "fillet_edges", "chamfer_edges", "shell", "measure",
+    "list_threads", "hole", "thread", "move", "set_units", "set_parameter", "delete_parameter", "create_component",
+    "activate_component", "move_component", "create_plane", "create_sketch", "add_geometry", "point_coordinates",
+    "add_constraint", "set_dimension", "delete", "extrude", "revolve", "remove_body", "split_body", "primitive", "pattern",
+    "trim", "mirror", "offset", "fillet", "chamfer", "project", "edit_feature", "delete_feature", "import_stl", "import_mesh",
+    "mesh_measure", "mesh_repair", "mesh_decimate", "mesh_smooth", "mesh_subdivide", "mesh_cut", "mesh_mirror", "mesh_offset",
+    "mesh_extrude_region", "mesh_sculpt", "mesh_from_image", "transform", "combine", "set_visible", "run_script", "script_meta", "add_feature",
+];
 
 fn id_of(c: &J, key: &str) -> R<Id> {
     c[key].as_u64().and_then(|v| Id::try_from(v).ok()).ok_or(format!("\"{key}\" should be an id"))
@@ -1750,6 +1768,57 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 Ok(id)
             })?;
             Ok(json!({"feature": id, "body": body_info(s, id), "report": report, "summary": report.summary()}))
+        }
+        "script_meta" => {
+            let source = match (c["source"].as_str(), c["path"].as_str()) {
+                (Some(s), _) => s.to_owned(),
+                (None, Some(p)) => std::fs::read_to_string(p).map_err(|e| format!("could not read {p}: {e}"))?,
+                _ => return Err("script_meta needs \"source\" or \"path\"".into()),
+            };
+            Ok(serde_json::to_value(crate::script::meta(&source)?).unwrap_or(J::Null))
+        }
+        "run_script" => {
+            let (source, dir) = match (c["source"].as_str(), c["path"].as_str()) {
+                (Some(s), _) => (s.to_owned(), None),
+                (None, Some(p)) => (std::fs::read_to_string(p).map_err(|e| format!("could not read {p}: {e}"))?, std::path::Path::new(p).parent().map(std::path::Path::to_path_buf)),
+                _ => return Err("run_script needs \"source\" or \"path\"".into()),
+            };
+            let mut req = crate::script::Request::new(source);
+            req.script_dir = dir.clone();
+            req.inputs = if c["inputs"].is_object() { c["inputs"].clone() } else { json!({}) };
+            req.sandbox.yes = c["yes"].as_bool().unwrap_or(true);
+            req.sandbox.allowed = c["allow"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(std::path::PathBuf::from).collect()).unwrap_or_default();
+            if let Some(d) = dir { req.sandbox.allowed.push(d); }
+            if let Some(d) = s.path.as_ref().and_then(|p| p.parent()) { req.sandbox.allowed.push(d.to_path_buf()); }
+            // The whole run is one undo step, and a failing script leaves the document as it was.
+            let depth = s.undo_depth();
+            let before_doc = s.doc.clone();
+            s.snapshot();
+            let result = crate::script::run(s, &req);
+            s.collapse_undo(depth + 1);
+            let outcome = match result {
+                Ok(o) => o,
+                Err(e) => { s.doc = before_doc; s.collapse_undo(depth); s.rebuild(); return Err(e); }
+            };
+            s.rebuild();
+            let mut out = serde_json::to_value(&outcome).unwrap_or(J::Null);
+            out["errors"] = json!(s.built.errors.iter().map(|(id, e)| json!({"feature": id, "error": e})).collect::<Vec<_>>());
+            Ok(out)
+        }
+        "add_feature" => {
+            // A feature as the file stores it, for scripts that replay an exported timeline.
+            let mut feature: crate::Feature = serde_json::from_value(c["feature"].clone()).map_err(|e| format!("add_feature needs a \"feature\" as the file format writes one: {e}"))?;
+            let id = s.edit_feature(|d| {
+                if feature.id == 0 || d.feature(feature.id).is_some() { feature.id = d.next_id; }
+                d.next_id = d.next_id.max(feature.id + 1);
+                if !d.features.iter().any(|f| f.id == feature.owner) && feature.owner != 0 { feature.owner = d.active_component; }
+                let id = feature.id;
+                d.features.push(feature);
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            Ok(out)
         }
         "mesh_measure" => {
             let body = id_of(c, "body")?;
