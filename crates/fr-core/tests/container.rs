@@ -86,7 +86,8 @@ fn a_reference_image_makes_a_container_that_round_trips() {
     let saved = s.save(&path).unwrap();
     assert!(saved.container && saved.backup.is_none() && s.container);
     assert!(std::fs::read(&path).unwrap().starts_with(b"PK"));
-    assert_eq!(entries(&path), ["design.json", "images/1.png", "manifest.json", "thumbnail.png"]);
+    // Containers also carry the geometry cache of their bodies.
+    assert_eq!(entries(&path), ["cache/2.brep", "cache/index.json", "design.json", "images/1.png", "manifest.json", "thumbnail.png"]);
 
     let design = String::from_utf8(entry(&path, "design.json")).unwrap();
     assert!(design.contains("\"blob\": \"images/1.png\""));
@@ -127,7 +128,7 @@ fn an_imported_mesh_is_stored_as_a_binary_blob() {
     run(&mut s, json!({"op": "import_stl", "path": stl.display().to_string(), "units": "mm"}));
     let path = d.join("scan.ferr");
     assert!(s.save(&path).unwrap().container);
-    assert_eq!(entries(&path), ["design.json", "manifest.json", "meshes/1.mesh", "thumbnail.png"]);
+    assert_eq!(entries(&path), ["cache/1.mesh", "cache/index.json", "design.json", "manifest.json", "meshes/1.mesh", "thumbnail.png"]);
     // Four triangles sharing four corners: a 32-byte header, four f32 positions, four u32 index triples.
     assert_eq!(entry(&path, "meshes/1.mesh").len(), 32 + 4 * 12 + 4 * 12);
     let again = Session::open(&path).unwrap();

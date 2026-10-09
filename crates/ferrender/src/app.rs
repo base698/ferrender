@@ -1763,6 +1763,11 @@ impl App {
         match Session::open(path) {
             Ok(s) => {
                 self.replace_session(s);
+                if self.session.read_only {
+                    self.toast("This design was written by a newer Ferrender. Its saved geometry is shown read-only.");
+                } else if self.session.from_cache {
+                    self.toast(format!("Opened from the saved geometry: {} bodies without a rebuild.", self.session.built.bodies.len()));
+                }
                 self.remember_document();
             },
             Err(e) => self.file_error("Could not open design", path, e, "Your current design has been kept."),

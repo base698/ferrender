@@ -361,6 +361,9 @@ pub fn status(app: &mut App, ui: &mut Ui) {
     let colors = Palette::from_ctx(ui.ctx());
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("Active: {}", app.doc().component_name(app.doc().active_component))).strong());
+        if app.session.read_only {
+            ui.label(RichText::new("Read-only: written by a newer Ferrender, showing its saved geometry").color(colors.accent));
+        }
         match app.sketch() {
             Some((id, _)) => {
                 let name = app.doc().feature(id).map_or(String::new(), |f| f.name.clone());

@@ -1062,6 +1062,13 @@ impl Document {
 
     /// Re-evaluates every expression, re-solves the sketches and regenerates the bodies.
     pub fn rebuild(&mut self) -> Built {
+        self.rebuild_with(None)
+    }
+
+    /// [`rebuild`](Self::rebuild), taking the bodies and planes from a verified geometry
+    /// cache when one is given: expressions, sketches and components are still evaluated,
+    /// and the cached results stand in for every body-making step.
+    pub fn rebuild_with(&mut self, cache: Option<crate::cache::Restored>) -> Built {
         let mut built = Built::default();
         // Legacy documents have no implicit-unit metadata. Make their existing
         // expressions explicit in the units in which the document was opened.
@@ -1166,6 +1173,12 @@ impl Document {
             }
             if matches!(f.kind, FeatureKind::Sketch(_)) { continue; }
             let mut f = f;
+            if let Some(cache) = &cache {
+                // The cache stands in for every plane and body step; errors it recorded are reported again.
+                if let Some(p) = cache.planes.get(&f.id) { built.planes.insert(f.id, p.clone()); }
+                if let Some(e) = cache.errors.get(&f.id) { built.errors.insert(f.id, e.clone()); }
+                continue;
+            }
             if matches!(f.kind, FeatureKind::Plane(_)) {
                 match self.resolve_plane(&mut f,&built) {
                     Ok((p, level)) => { built.planes.insert(f.id,p); if let Some(level) = level { built.resolutions.insert(f.id, level); } }
@@ -1190,6 +1203,13 @@ impl Document {
                     built.errors.insert(f.id, e);
                 }
             }
+        }
+        if let Some(cache) = cache {
+            built.bodies = cache.bodies;
+            built.resolutions = cache.resolutions;
+            built.placements_applied = true;
+            if !built.components.contains_key(&self.active_component) {self.active_component=0;}
+            return built;
         }
         let components=built.components.clone();
         built.bodies.retain_mut(|body| {
@@ -1600,6 +1620,23 @@ pub struct Session {
     pub edits: u64,
     /// The file at `path` is (or was last written as) a ZIP container rather than plain JSON.
     pub container: bool,
+    /// The bodies came from the file's geometry cache rather than a rebuild (until the next edit).
+    pub from_cache: bool,
+    /// The design was written by a newer Ferrender: only its cached geometry is shown, and nothing can be edited.
+    pub read_only: bool,
+    /// How long the last full rebuild took, which decides whether a save writes a cache.
+    pub rebuild_ms: u32,
+    /// Whether saves write the geometry cache.
+    pub cache_policy: CachePolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CachePolicy {
+    /// Cache when the file is a container anyway or the design takes a while to rebuild.
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 /// History metadata belonging to the most recent in-progress edit. Keeping
@@ -1618,8 +1655,28 @@ impl Default for Session {
 
 impl Session {
     pub fn new(mut doc: Document) -> Session {
+        let t = std::time::Instant::now();
         let built = doc.rebuild();
-        Session { doc, built, undo: Vec::new(), redo: Vec::new(), checkpoint: None, path: None, dirty: false, rev: 1, edits: 0, container: false }
+        Session { doc, built, undo: Vec::new(), redo: Vec::new(), checkpoint: None, path: None, dirty: false, rev: 1, edits: 0, container: false, from_cache: false, read_only: false, rebuild_ms: t.elapsed().as_millis() as u32, cache_policy: CachePolicy::Auto }
+    }
+
+    /// A session from a file's design and, when it matches and verifies, its geometry cache.
+    pub fn with_cache(mut doc: Document, cache: Option<&crate::cache::Cache>) -> Session {
+        let restored = cache.filter(|c| c.matches(&doc)).and_then(|c| c.restore().ok());
+        let Some(restored) = restored else { return Session::new(doc) };
+        let built = doc.rebuild_with(Some(restored));
+        Session { doc, built, undo: Vec::new(), redo: Vec::new(), checkpoint: None, path: None, dirty: false, rev: 1, edits: 0, container: false, from_cache: true, read_only: false, rebuild_ms: 0, cache_policy: CachePolicy::Auto }
+    }
+
+    /// A read-only view of a newer file's cached geometry.
+    fn from_cache_only(cache: &crate::cache::Cache) -> Result<Session, String> {
+        let restored = cache.restore().map_err(|e| format!("this file was written by a newer version of Ferrender, and its saved geometry could not be shown: {e}"))?;
+        let mut built = Built { placements_applied: true, ..Default::default() };
+        built.components.insert(0, crate::components::BuiltComponent { placement: DAffine3::IDENTITY, visible: true });
+        built.bodies = restored.bodies;
+        built.planes = restored.planes;
+        let doc = Document::new(Unit::Mm);
+        Ok(Session { doc, built, undo: Vec::new(), redo: Vec::new(), checkpoint: None, path: None, dirty: false, rev: 1, edits: 0, container: true, from_cache: true, read_only: true, rebuild_ms: 0, cache_policy: CachePolicy::Never })
     }
 
     /// Records the current state as an undo step; call before changing the document.
@@ -1653,13 +1710,19 @@ impl Session {
     }
 
     pub fn rebuild(&mut self) {
+        let t = std::time::Instant::now();
         self.built = self.doc.rebuild();
+        self.rebuild_ms = t.elapsed().as_millis() as u32;
+        self.from_cache = false;
         self.rev += 1;
         self.edits += 1;
     }
 
     /// Applies a change as one undo step; an error leaves the document as it was.
     pub fn edit<T>(&mut self, f: impl FnOnce(&mut Document) -> Result<T, String>) -> Result<T, String> {
+        if self.read_only {
+            return Err("this design was written by a newer version of Ferrender and is shown read-only; update Ferrender to edit it".into());
+        }
         self.snapshot();
         match f(&mut self.doc) {
             Ok(v) => {
@@ -1717,8 +1780,19 @@ impl Session {
 
     /// Like [`Session::save`], naming the application in the container manifest.
     pub fn save_as(&mut self, path: &Path, app: Option<String>) -> Result<crate::io::Saved, String> {
-        let mut extras = crate::io::Extras { thumbnail_png: None, app };
-        if crate::io::needs_container(&self.doc) && self.built.bodies.iter().map(|b| b.mesh.len()).sum::<usize>() <= crate::io::THUMBNAIL_MAX_TRIANGLES {
+        if self.read_only {
+            return Err("this design was written by a newer version of Ferrender and is shown read-only; it cannot be saved from here".into());
+        }
+        let mut extras = crate::io::Extras { thumbnail_png: None, app, cache: None };
+        let wants_cache = match self.cache_policy {
+            CachePolicy::Always => true,
+            CachePolicy::Never => false,
+            CachePolicy::Auto => crate::io::needs_container(&self.doc) || self.rebuild_ms >= crate::cache::WORTH_CACHING_MS,
+        };
+        if wants_cache && !self.built.bodies.is_empty() && !self.built.errors.keys().any(|id| self.doc.feature(*id).is_some_and(|f| !f.suppressed)) {
+            extras.cache = crate::cache::Cache::capture(&self.doc, &self.built)?;
+        }
+        if (crate::io::needs_container(&self.doc) || extras.cache.is_some()) && self.built.bodies.iter().map(|b| b.mesh.len()).sum::<usize>() <= crate::io::THUMBNAIL_MAX_TRIANGLES {
             let size = crate::io::THUMBNAIL_SIZE;
             extras.thumbnail_png = Some(crate::render::snapshot(self, None, size, size).png());
         }
@@ -1730,10 +1804,16 @@ impl Session {
         Ok(saved)
     }
 
+    /// Opens a file, from its geometry cache when that matches the design, and as a
+    /// read-only view of the cache when the design is from a newer Ferrender.
     pub fn open(path: &Path) -> Result<Session, String> {
-        let mut s = Session::new(crate::io::load(path)?);
+        let opened = crate::io::open(path)?;
+        let mut s = match opened.doc {
+            Some(doc) => Session::with_cache(doc, opened.cache.as_ref()),
+            None => Session::from_cache_only(opened.cache.as_ref().ok_or("this file was written by a newer version of Ferrender")?)?,
+        };
         s.path = Some(path.to_owned());
-        s.container = crate::io::is_container(path);
+        s.container = opened.container;
         Ok(s)
     }
 

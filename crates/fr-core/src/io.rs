@@ -51,7 +51,25 @@ pub struct Extras {
     pub thumbnail_png: Option<Vec<u8>>,
     /// The writing application, for the manifest; `None` names fr-core.
     pub app: Option<String>,
+    /// The built geometry, which makes the file a container (see `cache`).
+    pub cache: Option<crate::cache::Cache>,
 }
+
+/// What opening a file yields: the design when this build can read it, the
+/// geometry cache when the file has one, and whether the design is from a
+/// newer Ferrender (in which case only the cache can be shown).
+pub struct Opened {
+    pub doc: Option<Document>,
+    pub cache: Option<crate::cache::Cache>,
+    pub container: bool,
+    /// The design's version is beyond this reader; `doc` is `None`.
+    pub newer: bool,
+    /// What the manifest says wrote the file.
+    pub app: Option<String>,
+}
+
+const MAX_CACHE_INDEX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CACHE_BLOB: usize = crate::cache::MAX_CACHE_BYTES;
 
 /// What a save did.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +77,8 @@ pub struct Saved {
     pub path: PathBuf,
     /// The file was written as a ZIP container rather than plain JSON.
     pub container: bool,
+    /// How many bodies the geometry cache holds (0 when none was written).
+    pub cached_bodies: usize,
     /// Where the previous plain-JSON file was copied when this save converted it to a container.
     pub backup: Option<PathBuf>,
 }
@@ -189,7 +209,7 @@ pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String
     crate::validation::document(doc)?;
     let (mut v, meshes) = json_value_detached(doc);
     let blobs = detach_blobs(&mut v, meshes)?;
-    if blobs.is_empty() {
+    if blobs.is_empty() && extras.cache.is_none() {
         let text = serde_json::to_string_pretty(&v).unwrap();
         if text.len() > MAX_NATIVE_BYTES { return Err("the Ferrender file exceeds 64 MiB".into()); }
         return Ok((text.into_bytes(), false));
@@ -199,8 +219,10 @@ pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String
     let deflate = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated).large_file(true);
     let fast = deflate.compression_level(Some(1));
     let store = SimpleFileOptions::default().compression_method(CompressionMethod::Stored).large_file(true);
+    let cache_entries = extras.cache.as_ref().map(|c| c.entries()).unwrap_or_default();
     let mut entries: Vec<&str> = vec!["manifest.json", "design.json"];
     entries.extend(blobs.iter().map(|b| b.name.as_str()));
+    entries.extend(cache_entries.iter().map(|e| e.0.as_str()));
     let thumbnail = extras.thumbnail_png.as_ref().filter(|t| !t.is_empty() && t.len() <= MAX_THUMBNAIL_BYTES);
     if thumbnail.is_some() { entries.push("thumbnail.png"); }
     let manifest = json!({
@@ -212,6 +234,7 @@ pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String
         "kernel": {"cadrum": "0.8.20"},
         "saved": iso_now(),
         "entries": entries,
+        "cached_bodies": extras.cache.as_ref().map(|c| c.body_count()),
     });
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     let put = |zip: &mut ZipWriter<Cursor<Vec<u8>>>, name: &str, bytes: &[u8], options: SimpleFileOptions| -> Result<(), String> {
@@ -221,6 +244,9 @@ pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String
     put(&mut zip, "design.json", design.as_bytes(), deflate)?;
     for b in &blobs {
         put(&mut zip, &b.name, &b.bytes, if b.stored { store } else if b.bytes.len() > FAST_DEFLATE_ABOVE { fast } else { deflate })?;
+    }
+    for (name, bytes) in &cache_entries {
+        put(&mut zip, name, bytes, if bytes.len() > FAST_DEFLATE_ABOVE { fast } else { deflate })?;
     }
     if let Some(t) = thumbnail {
         put(&mut zip, "thumbnail.png", t, store)?;
@@ -255,7 +281,7 @@ fn entry_allowed(name: &str) -> bool {
         return false;
     }
     let numbered = |dir: &str, ext: &str| name.strip_prefix(dir).and_then(|r| r.strip_suffix(ext)).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    matches!(name, "manifest.json" | "design.json" | "thumbnail.png") || numbered("images/", ".png") || numbered("meshes/", ".mesh") || numbered("meshes/", ".tris")
+    matches!(name, "manifest.json" | "design.json" | "thumbnail.png" | "cache/index.json") || numbered("images/", ".png") || numbered("meshes/", ".mesh") || numbered("meshes/", ".tris") || numbered("cache/", ".brep") || numbered("cache/", ".mesh")
 }
 
 /// Reads one entry, refusing before decompression if it declares more than `max` bytes.
@@ -289,6 +315,47 @@ fn read_manifest(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Result<Value, Strin
         return Err("this file was written by a newer version of Ferrender".into());
     }
     Ok(manifest)
+}
+
+/// Reads a container's geometry cache, if it has one that is well formed. A damaged cache is
+/// simply absent: the design rebuilds.
+fn read_cache(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Option<crate::cache::Cache> {
+    if archive.by_name("cache/index.json").is_err() { return None; }
+    let index: crate::cache::Index = serde_json::from_slice(&read_entry(archive, "cache/index.json", MAX_CACHE_INDEX_BYTES).ok()?).ok()?;
+    let mut blobs = std::collections::HashMap::new();
+    for e in &index.bodies {
+        for name in e.brep.iter().chain(e.mesh.iter()) {
+            if !entry_allowed(name) || !name.starts_with("cache/") { return None; }
+            blobs.insert(name.clone(), read_entry(archive, name, MAX_CACHE_BLOB).ok()?);
+        }
+    }
+    Some(crate::cache::Cache { index, blobs })
+}
+
+/// Opens a file fully: the design, its cache, and whether it is from a newer version.
+pub fn open(path: &Path) -> Result<Opened, String> {
+    let bytes = read_bounded(path, MAX_CONTAINER_BYTES)?;
+    if !bytes.starts_with(b"PK") {
+        let doc = from_json(std::str::from_utf8(&bytes).map_err(|_| "the Ferrender file is not UTF-8")?)?;
+        return Ok(Opened { doc: Some(doc), cache: None, container: false, newer: false, app: None });
+    }
+    if bytes.len() > MAX_CONTAINER_BYTES { return Err("the Ferrender file exceeds 2 GiB".into()); }
+    let mut archive = open_container(&bytes)?;
+    let manifest = read_manifest(&mut archive)?;
+    let app = manifest["app"].as_str().map(str::to_owned);
+    let cache = read_cache(&mut archive);
+    let design = read_entry(&mut archive, "design.json", MAX_NATIVE_BYTES)?;
+    let mut v: Value = serde_json::from_slice(&design).map_err(|e| format!("the container's design is damaged: {e}"))?;
+    if v["version"].as_u64().unwrap_or(0) > FORMAT_VERSION as u64 {
+        if cache.is_some() {
+            return Ok(Opened { doc: None, cache, container: true, newer: true, app });
+        }
+        return Err("this file was written by a newer version of Ferrender".into());
+    }
+    crate::mesh::BLOBS.with(|b| b.borrow_mut().incoming.clear());
+    let result = attach_blobs(&mut v, |name, max| read_entry(&mut archive, name, max)).and_then(|_| from_value(v));
+    crate::mesh::BLOBS.with(|b| b.borrow_mut().incoming.clear());
+    Ok(Opened { doc: Some(result?), cache, container: true, newer: false, app })
 }
 
 /// Decodes either form from its bytes.
@@ -362,7 +429,7 @@ pub fn save_with(doc: &Document, path: &Path, extras: &Extras) -> Result<Saved, 
     let result = file.write_all(&bytes).and_then(|_| file.sync_all()).and_then(|_| std::fs::rename(&tmp, path));
     if result.is_err() { let _ = std::fs::remove_file(&tmp); }
     result.map_err(|e| format!("could not save {}: {e}", path.display()))?;
-    Ok(Saved { path: path.to_owned(), container, backup })
+    Ok(Saved { path: path.to_owned(), container, backup, cached_bodies: extras.cache.as_ref().map_or(0, |c| c.body_count()) })
 }
 
 fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>, String> {

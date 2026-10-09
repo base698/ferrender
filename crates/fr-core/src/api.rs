@@ -39,7 +39,7 @@ DOCUMENT
 {"op":"set_parameter","name":"width","expr":"40 mm"}
 {"op":"delete_parameter","name":"width"}
 {"op":"undo"} {"op":"redo"}
-{"op":"save","path":"/abs/part.ferr"} {"op":"open","path":"/abs/part.ferr"}
+{"op":"save","path":"/abs/part.ferr"} {"op":"open","path":"/abs/part.ferr"}   save takes "cache":true|false to force or skip the geometry cache (by default it is written when the file is a container or the design is slow to rebuild); open uses a matching cache instead of rebuilding, and get_scene_info says "from_cache"
    A design with reference images or imported meshes is saved as a ZIP container (same JSON inside plus the blobs and a thumbnail); plain designs stay plain JSON. save returns "container" and, when it converted an older plain file, "backup" with the path of the kept original. open reads both forms.
    In the GUI, new and open refuse to discard unsaved work. Save first or set "discard_unsaved":true on that command to explicitly discard it, including inside a batch.
 {"op":"export_stl","path":"/abs/part.stl","units":"mm"}   units default to mm, which is what slicers expect
@@ -573,6 +573,9 @@ fn scene_info(s: &Session) -> J {
         "components":[components_api::node(s,0)],
         "file": s.path.as_ref().map(|p| p.display().to_string()),
         "container": s.container,
+        "from_cache": s.from_cache,
+        "read_only": s.read_only,
+        "rebuild_ms": s.rebuild_ms,
         "parameters": doc.params.iter().map(|p| json!({"name": p.name, "expr": p.expr, "value": doc.show_param(&p.name)})).collect::<Vec<_>>(),
         "features": doc.features.iter().filter_map(|f| feature_info(s, f.id).ok()).collect::<Vec<_>>(),
         "bodies": s.built.bodies.iter().filter_map(|b| body_info(s, b.id)).collect::<Vec<_>>(),
@@ -947,8 +950,11 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         }
         "save" => {
             let path = c["path"].as_str().map(std::path::PathBuf::from).or(s.path.clone()).ok_or("save needs a \"path\"")?;
+            if let Some(cache) = c["cache"].as_bool() {
+                s.cache_policy = if cache { crate::doc::CachePolicy::Always } else { crate::doc::CachePolicy::Never };
+            }
             let saved = s.save(&path)?;
-            let mut out = json!({"saved": path.display().to_string(), "container": saved.container});
+            let mut out = json!({"saved": path.display().to_string(), "container": saved.container, "cached_bodies": saved.cached_bodies});
             if let Some(backup) = saved.backup {
                 out["backup"] = json!(backup.display().to_string());
             }

@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod body_ops;
+pub mod cache;
 pub mod csg;
 pub mod components;
 pub mod doc;
