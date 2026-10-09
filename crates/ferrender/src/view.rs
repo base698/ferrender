@@ -1592,18 +1592,18 @@ pub(crate) fn pick_face(app: &App, pos: Pos2) -> Option<Face> {
     Some(face)
 }
 
-/// The smallest profile under a screen position among the sketches a feature can use.
 /// The sketch line or curve under the pointer that could be a sweep's path: one in a
 /// shown sketch other than the profile's.
-fn pick_path(app: &App, doc: &Document, pos: Pos2, profile: Option<Id>) -> Option<(Id, Id)> {
+fn pick_path(app: &App, doc: &Document, pos: Pos2, profile: Option<Id>, selected_path: Option<Id>) -> Option<(Id, Id)> {
     doc.sketches()
-        .filter(|(f, s)| Some(f.id) != profile && s.visible && !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner))
+        .filter(|(f, s)| Some(f.id) != profile && (s.visible || selected_path == Some(f.id)) && !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner))
         .find_map(|(f, s)| match hit(app, s, pos) {
             Hit::Entity(e) => Some((f.id, e)),
             _ => None,
         })
 }
 
+/// The smallest profile under a screen position among the sketches a feature can use.
 fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: Option<Id>) -> Option<(Id, Profile)> {
     doc.sketches()
         .filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also == Some(f.id)))
@@ -1673,7 +1673,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
             }
             // The sweep's path, in the colour of a selection; dashed while it cannot be followed.
             let over_path = match (&f.sweep, hover) {
-                (Some(_), Some(p)) => pick_path(app, &doc, p, f.sketch),
+                (Some(w), Some(p)) => pick_path(app, &doc, p, f.sketch, w.path_sketch),
                 _ => None,
             };
             if let Some(w) = &f.sweep {
@@ -1739,7 +1739,13 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                     } else {
                         w.path.clear();
                     }
-                } else if let Some((sid, p)) = over.filter(|(sid, _)| f.sweep.as_ref().is_none_or(|w| w.path_sketch != Some(*sid))) {
+                } else if let Some((sid, p)) = over {
+                    // Both sketches may be closed. Let a region click correct
+                    // reversed defaults by releasing its previous path role.
+                    if let Some(w) = &mut f.sweep && w.path_sketch == Some(sid) {
+                        w.path_sketch = None;
+                        w.path.clear();
+                    }
                     let extend = resp.ctx.input(|i| i.modifiers.shift);
                     if !extend || f.sketch != Some(sid) { f.profiles.clear(); }
                     f.sketch = Some(sid);
