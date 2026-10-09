@@ -26,6 +26,7 @@ pub struct Bridge {
     rx: Receiver<Pending>,
     stop: Arc<AtomicBool>,
     ctx: egui::Context,
+    listener: Option<std::thread::JoinHandle<()>>,
     /// A channel identifier; no TCP port is opened.
     pub port: u16,
 }
@@ -33,6 +34,10 @@ pub struct Bridge {
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        // Finish removing the socket and releasing its ownership lock before a
+        // new window can restart this channel. The listener never waits on the
+        // UI or client workers and its accept loop is nonblocking.
+        if let Some(listener) = self.listener.take() { let _ = listener.join(); }
     }
 }
 
@@ -294,9 +299,9 @@ mod unix {
         let instance = random.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let (tx, rx) = sync_channel(MAX_QUEUED);
         let stop = Arc::new(AtomicBool::new(false));
-        let bridge = Bridge { rx, stop: stop.clone(), ctx: ctx.clone(), port };
+        let mut bridge = Bridge { rx, stop: stop.clone(), ctx: ctx.clone(), listener: None, port };
         let connections = Arc::new(AtomicUsize::new(0));
-        std::thread::Builder::new().name("ferrender-mcp-listener".into()).spawn(move || {
+        bridge.listener = Some(std::thread::Builder::new().name("ferrender-mcp-listener".into()).spawn(move || {
             let _lock_file = lock_file;
             let _socket_file = socket_file;
             while !stop.load(Ordering::Acquire) {
@@ -317,7 +322,7 @@ mod unix {
                     Err(_) => break,
                 }
             }
-        })?;
+        })?);
         Ok(bridge)
     }
 
@@ -455,7 +460,7 @@ mod tests {
         let (tx, rx) = sync_channel(4);
         let (reply, wait) = channel();
         tx.send(Pending { cmd: json!({}), reply, expires: Instant::now() - Duration::from_secs(1), cancelled: Arc::new(AtomicBool::new(false)) }).unwrap();
-        let bridge = Bridge { rx, stop: Arc::new(AtomicBool::new(false)), ctx: egui::Context::default(), port: 0 };
+        let bridge = Bridge { rx, stop: Arc::new(AtomicBool::new(false)), ctx: egui::Context::default(), listener: None, port: 0 };
         bridge.serve(|_| panic!("expired request executed"));
         assert!(wait.recv().unwrap().is_err());
         let (reply, wait) = channel();
@@ -534,9 +539,7 @@ mod tests {
         assert!(completed, "isolated bridge did not answer within three seconds");
         assert_eq!(reply.result.unwrap()["echo"], 42);
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while path.exists() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
-        assert!(!path.exists(), "closing a bridge must remove its socket");
+        assert!(!path.exists(), "dropping a bridge completes socket and lock cleanup before restart");
         let restarted = unix::start_at(path.clone(), 0, egui::Context::default()).unwrap();
         let error = call_with(&json!({"op": "must_not_run"}), Some(&reply.instance), || unix::connect_at(&path)).unwrap_err();
         assert!(!error.may_have_executed);
