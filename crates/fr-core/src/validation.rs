@@ -148,6 +148,10 @@ pub fn document(d: &Document) -> Result<(), String> {
             }
         }
         plane_dependencies(d,f)?;
+        if let Some(by)=f.made_by {
+            let earlier=d.features.iter().take_while(|g|g.id!=f.id).any(|g|g.id==by && matches!(g.kind,FeatureKind::ScriptRun(_)));
+            if !earlier { return Err(format!("feature {} says it was made by script run {by}, which is not an earlier script run",f.id)); }
+        }
         match &f.kind {
             FeatureKind::Sketch(s) => s.validate().map_err(|e|format!("sketch {}: {e}",f.id))?,
             FeatureKind::Import(m) => m.validate()?,
@@ -161,6 +165,11 @@ pub fn document(d: &Document) -> Result<(), String> {
                 if r.resolution < 2 || r.resolution > 1200 { return Err(format!("relief {}: resolution must be between 2 and 1200", f.id)); }
                 if !r.gamma.is_finite() || r.gamma <= 0.0 || r.gamma > 10.0 || r.blur > 64 { return Err(format!("relief {}: gamma must be between 0 and 10 and blur at most 64", f.id)); }
                 for v in [&r.width, &r.depth, &r.base] { expression(&v.expr)?; if !v.v.is_finite() { return Err(format!("relief {}: values must be finite", f.id)); } }
+            }
+            FeatureKind::ScriptRun(r) => {
+                if r.source.len() > crate::script::MAX_SOURCE_BYTES { return Err(format!("script run {}: the source is larger than 1 MB", f.id)); }
+                if !r.inputs.is_object() { return Err(format!("script run {}: inputs must be an object", f.id)); }
+                if r.script_name.chars().count() > 256 { return Err(format!("script run {}: the name is too long", f.id)); }
             }
             FeatureKind::MeshOp(m) => {
                 use crate::doc::MeshOpKind;

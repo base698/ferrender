@@ -132,6 +132,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             ui.separator();
             item(app, ui, "Sculpt", "", Action::Sculpt);
         });
+        ui.menu_button("Scripts", |ui| crate::scripts_ui::menu(app, ui));
         ui.menu_button("View", |ui| {
             for (label, view) in [("Home", "iso"), ("Top", "top"), ("Front", "front"), ("Right", "right"), ("Back", "back"), ("Left", "left"), ("Bottom", "bottom")] {
                 item(app, ui, label, "", Action::View(view));
@@ -448,12 +449,14 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Text(_) => icon::TEXT_T,
         FeatureKind::MeshOp(_) => icon::POLYGON,
         FeatureKind::Relief(_) => icon::IMAGE,
+        FeatureKind::ScriptRun(_) => icon::CODE,
     }
 }
 
 /// Edit, suppress and delete, shared by the timeline and the browser.
 pub(crate) fn feature_menu(app: &mut App, ui: &mut Ui, id: Id, suppressed: bool) {
-    if ui.button("Edit").clicked() {
+    let script = crate::scripts_ui::chip_menu(app, ui, id);
+    if !script && ui.button("Edit").clicked() {
         app.edit_feature(id);
         ui.close();
     }
@@ -466,8 +469,8 @@ pub(crate) fn feature_menu(app: &mut App, ui: &mut Ui, id: Id, suppressed: bool)
         let _ = app.execute(&json!({"op": "edit_feature", "feature": id, "suppressed": !suppressed}));
         ui.close();
     }
-    if ui.button("Delete").clicked() {
-        app.delete_feature(id);
+    if ui.button("Delete").on_hover_text(if script { "Deletes the run and everything it made" } else { "" }).clicked() {
+        if script { app.delete_script_run(id); } else { app.delete_feature(id); }
         ui.close();
     }
 }
@@ -764,6 +767,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 confirm(app, ui, "OK");
             });
         }
+        Dialog::Script(d) => crate::scripts_ui::dialog(app, ctx, d),
         Dialog::Mesh(mut m) => {
             dialog_window(app, crate::app::MESH_OPS[m.kind]).show(ctx, |ui| {
                 let name = m.body.and_then(|b| app.session.built.body(b)).map_or("Click a body".to_owned(), |b| b.name.clone());

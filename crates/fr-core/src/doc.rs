@@ -602,6 +602,18 @@ impl Relief {
     }
 }
 
+/// A script run's place in the timeline: it builds nothing itself, but owns the features
+/// the run made (their `made_by`), carries the script and its inputs so it can run again,
+/// and suppressing or deleting it does the same to everything it made.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScriptRun {
+    pub script_name: String,
+    pub source: String,
+    /// CRC-32 of `source`, so a changed script file can be noticed.
+    pub source_hash: u32,
+    pub inputs: serde_json::Value,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Combine {
     pub target: Id,
@@ -634,6 +646,7 @@ pub enum FeatureKind {
     Text(Text),
     MeshOp(MeshOp),
     Relief(Relief),
+    ScriptRun(ScriptRun),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -644,6 +657,9 @@ pub struct Feature {
     pub suppressed: bool,
     #[serde(default, skip_serializing_if = "is_root")]
     pub owner: Id,
+    /// The script run that made this feature, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_by: Option<Id>,
     pub kind: FeatureKind,
 }
 
@@ -672,6 +688,7 @@ impl Feature {
             FeatureKind::Text(_) => "text",
             FeatureKind::MeshOp(m) => m.op.name(),
             FeatureKind::Relief(_) => "relief",
+            FeatureKind::ScriptRun(_) => "script",
         }
     }
 }
@@ -960,7 +977,7 @@ impl Document {
             FeatureKind::Pattern(p)=>self.feature(p.source).map(|f|f.owner),
             _=>target.and_then(|id|self.body_owner(id)),
         }.unwrap_or(self.active_component);
-        let mut f = Feature { id, name: String::new(), suppressed: false, owner, kind };
+        let mut f = Feature { id, name: String::new(), suppressed: false, owner, made_by: None, kind };
         let n = self.features.iter().filter(|o| o.type_name() == f.type_name()).count() + 1;
         let t = f.type_name();
         f.name = format!("{}{}{n}", t[..1].to_uppercase(), &t[1..]);
@@ -1170,6 +1187,11 @@ impl Document {
             }
         }
         let probe = self.clone();
+        // A feature made by a suppressed script run is suppressed with it.
+        let suppressed_runs: Vec<Id> = self.features.iter().filter(|f| f.suppressed && matches!(f.kind, FeatureKind::ScriptRun(_))).map(|f| f.id).collect();
+        for f in &mut self.features {
+            if let Some(by) = f.made_by && suppressed_runs.contains(&by) && !matches!(f.kind, FeatureKind::ScriptRun(_)) { f.suppressed = true; }
+        }
         for f in self.features.iter_mut().take(probe.active()).filter(|f|!f.suppressed && probe.component_available(f.owner)) {
             let mut err = None;
             let mut set = |v: &mut Value, kind: Kind| match probe.value(&v.expr, kind) {
@@ -1238,7 +1260,7 @@ impl Document {
                     _ => {}
                 },
                 FeatureKind::Relief(r) => { for v in [&mut r.width, &mut r.depth, &mut r.base] { set(v, Kind::Length); } }
-                FeatureKind::Import(_) | FeatureKind::Combine(_) | FeatureKind::Remove(_) | FeatureKind::Split(_) => {}
+                FeatureKind::Import(_) | FeatureKind::Combine(_) | FeatureKind::Remove(_) | FeatureKind::Split(_) | FeatureKind::ScriptRun(_) => {}
             }
             if let Some(e) = err {
                 built.errors.insert(f.id, e);
@@ -1268,7 +1290,7 @@ impl Document {
                 built.components.insert(f.id,crate::components::BuiltComponent {placement,visible:parent.visible && c.visible});
                 continue;
             }
-            if matches!(f.kind, FeatureKind::Sketch(_)) { continue; }
+            if matches!(f.kind, FeatureKind::Sketch(_) | FeatureKind::ScriptRun(_)) { continue; }
             let mut f = f;
             if let Some(cache) = &cache {
                 // The cache stands in for every plane and body step; errors it recorded are reported again.
@@ -1837,6 +1859,11 @@ impl Session {
     /// The document as it was at the last snapshot.
     pub fn before(&self) -> Option<&Document> {
         self.undo.last()
+    }
+
+    /// A copy for a worker thread: the document and its built state, no history.
+    pub fn fork(&self) -> Session {
+        Session { doc: self.doc.clone(), built: self.built.clone(), undo: Vec::new(), redo: Vec::new(), checkpoint: None, path: self.path.clone(), dirty: self.dirty, rev: self.rev, edits: self.edits, container: self.container, from_cache: false, read_only: self.read_only, rebuild_ms: self.rebuild_ms, cache_policy: self.cache_policy }
     }
 
     /// How many undo steps there are, so a run of many edits can later be folded into one.

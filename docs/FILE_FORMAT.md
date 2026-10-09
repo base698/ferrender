@@ -84,6 +84,7 @@ A dimension or feature value is `{"expr": "...", "v": 20.0}`: the expression as 
 | `transform` | `body`, `translate` [3 values], `rotate` [3 values], `scale` value | Scale about the origin, rotate about X then Y then Z, then translate. |
 | `mesh_op` | `body`, `op`, `region` (optional) | `op` is one of `{"repair": {fill_holes}}`, `{"decimate": {target, method: "quadric"\|"cluster", preserve_boundary}}`, `{"smooth": {iterations, strength}}`, `{"subdivide": {levels, scheme: "loop"\|"midpoint"}}`, `{"cut": {plane, keep: "negative"\|"positive"\|"both", cap}}`, `{"mirror": {plane, weld}}`, `{"offset": {distance value, direction?}}`, `{"extrude_region": {distance value, direction?}}`, `{"sculpt": {brush: "pull"\|"push"\|"inflate"\|"smooth"\|"flatten", at, radius value, strength value}}`. `region` is `{"sphere": {centre, radius}}`, `{"box": {lo, hi}}`, `{"side": {plane}}`, `{"normal": {direction, degrees}}` or `{"connected": {seed}}`. Applied to an exact body it makes the body a mesh. |
 | `relief` | `image` (as a sketch's `reference`), `plane`, `width`, `depth`, `base` (values), `resolution`, `invert`, `blur`, `gamma`, `op` | A height field from the image's luminance on the plane; `resolution` cells along the longer side (2–1200). |
+| `script_run` | `script_name`, `source`, `source_hash` (CRC-32 of the source), `inputs` (object) | Builds nothing. Features whose `made_by` is this feature's id were made by the run; suppressing or deleting the run applies to them. |
 | `combine` | `target`, `tools` [body ids], `op`, `keep_tools` | |
 | `blend` | `body`, `edges` [[x,y,z]], `size` value, `chamfer` (bool), `frame` | A fillet when `chamfer` is false. Edges are named by a point on them; see References. |
 | `shell` | `body`, `faces` [[x,y,z]], `thickness` value, `frame` | |
@@ -134,6 +135,7 @@ An edge tag is `{"faces": [TAG, TAG]}`, the two faces it separates, in sorted or
 | 9 | 0.4.0 | The ZIP container. A plain JSON file is never stamped 9; only `manifest.json`'s `min_reader` carries it. |
 | 10 | 0.4.0 | Face and edge tags on references (`blend.tags`, `shell.tags`, `thread.tag`, `text.tag`, plane `face.tag`). |
 | 11 | 0.4.0 | `mesh_op` and `relief` features; the `free` plane reference. |
+| 12 | 0.4.0 | `script_run` features and `made_by` on features. |
 
 The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". There is no migration code: every version's documents deserialize directly, with absent fields taking their defaults. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 

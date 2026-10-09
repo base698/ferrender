@@ -1319,6 +1319,105 @@ fn the_mesh_menu_decimates_and_thickens_through_dialogs() {
     save(&mut h, "mesh-dialogs.png");
 }
 
+/// Pumps frames until the script worker has finished and been committed.
+fn wait_for_script(h: &mut H) {
+    for _ in 0..600 {
+        h.state_mut().poll_script();
+        h.run_steps(1);
+        if !h.state().scripts.busy() { return; }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the script did not finish in time");
+}
+
+#[test]
+fn scripts_run_from_the_menu_as_chips_that_rerun_detach_and_delete() {
+    let mut h = harness();
+    let ctx = h.ctx.clone();
+    {
+        let app = h.state_mut();
+        app.scripts.reload(None);
+        let gear = app.scripts.entries.iter().position(|e| e.file_name == "spur-gear.rhai").expect("the gear sample is listed");
+        app.open_script(gear);
+    }
+    let Dialog::Script(mut d) = h.state().dialog.clone() else { panic!("the inputs dialog should open") };
+    assert_eq!(d.name, "Spur gear");
+    assert_eq!(d.fields.iter().map(|f| f.input.kind.as_str()).collect::<Vec<_>>(), ["integer", "length", "length", "length"]);
+    d.fields[0].text = "12".into();
+    h.state_mut().dialog = Dialog::Script(d);
+    h.state_mut().apply_dialog();
+    assert!(h.state().scripts.busy(), "the run is on a worker thread");
+    wait_for_script(&mut h);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    let kinds: Vec<&str> = app.doc().features.iter().map(|f| f.type_name()).collect();
+    assert_eq!(kinds, ["script", "sketch", "extrude"], "the chip comes first and owns the rest");
+    let chip = app.doc().features[0].id;
+    assert!(app.doc().features[1..].iter().all(|f| f.made_by == Some(chip)));
+    assert!(app.session.can_undo());
+    let (lo, hi) = app.session.built.bodies[0].mesh.bbox().unwrap();
+    assert!(((hi.x - lo.x) - 28.0).abs() < 0.1, "12 teeth of module 2: outer diameter 28, got {}", hi.x - lo.x);
+    // One undo removes the whole run.
+    let undone = { let app = h.state_mut(); app.session.undo() };
+    assert!(undone);
+    assert!(h.state().doc().features.is_empty());
+    let redone = { let app = h.state_mut(); app.session.redo() };
+    assert!(redone);
+    assert_eq!(h.state().doc().features.len(), 3);
+    // Edit inputs and re-run: more teeth, same chip position, the old features gone.
+    h.state_mut().rerun_script(chip, true);
+    let Dialog::Script(mut d) = h.state().dialog.clone() else { panic!("the inputs dialog should open for the re-run") };
+    assert_eq!(d.rerun, Some(chip));
+    assert_eq!(d.fields[0].text, "12", "the last inputs are remembered");
+    d.fields[0].text = "30".into();
+    h.state_mut().dialog = Dialog::Script(d);
+    h.state_mut().apply_dialog();
+    wait_for_script(&mut h);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    let dump: Vec<String> = app.doc().features.iter().map(|f| format!("{} {} made_by={:?} {}", f.id, f.name, f.made_by, match &f.kind { fr_core::FeatureKind::ScriptRun(r) => r.inputs.to_string(), _ => String::new() })).collect();
+    assert_eq!(app.doc().features.len(), 3, "{dump:?} log {:?} err {:?}", app.scripts.log, app.scripts.last_error);
+    let (lo, hi) = app.session.built.bodies[0].mesh.bbox().unwrap();
+    assert!(((hi.x - lo.x) - 64.0).abs() < 0.1, "30 teeth: outer diameter 64, got {}; {dump:?} log {:?} err {:?}", hi.x - lo.x, app.scripts.log, app.scripts.last_error);
+    let chip2 = app.doc().features[0].id;
+    assert!(matches!(app.doc().features[0].kind, fr_core::FeatureKind::ScriptRun(_)));
+    // Suppressing the chip suppresses what it made.
+    let _ = h.state_mut().execute(&json!({"op": "edit_feature", "feature": chip2, "suppressed": true}));
+    h.run_steps(1);
+    assert!(h.state().session.built.bodies.is_empty(), "a suppressed run builds nothing");
+    let _ = h.state_mut().execute(&json!({"op": "edit_feature", "feature": chip2, "suppressed": false}));
+    h.run_steps(1);
+    // Hmm: the features made keep their own suppressed flag once cascaded; unsuppress them too.
+    for id in h.state().doc().features.iter().filter(|f| f.made_by == Some(chip2)).map(|f| f.id).collect::<Vec<_>>() {
+        let _ = h.state_mut().execute(&json!({"op": "edit_feature", "feature": id, "suppressed": false}));
+    }
+    h.run_steps(1);
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    // Detach keeps the features as ordinary ones.
+    h.state_mut().detach_script(chip2);
+    let app = h.state();
+    assert_eq!(app.doc().features.len(), 2);
+    assert!(app.doc().features.iter().all(|f| f.made_by.is_none()));
+    // A fresh run, then delete removes the run and everything it made.
+    {
+        let app = h.state_mut();
+        let gear = app.scripts.entries.iter().position(|e| e.file_name == "spur-gear.rhai").unwrap();
+        app.open_script(gear);
+    }
+    h.state_mut().apply_dialog();
+    wait_for_script(&mut h);
+    assert_eq!(h.state().doc().features.len(), 5);
+    let chip3 = h.state().doc().features.iter().find(|f| matches!(f.kind, fr_core::FeatureKind::ScriptRun(_))).unwrap().id;
+    h.state_mut().delete_script_run(chip3);
+    assert_eq!(h.state().doc().features.len(), 2);
+    // The log window and export.
+    h.state_mut().run(&ctx, Action::ScriptLog);
+    assert!(h.state().scripts.show_log);
+    let script = fr_core::script::export_timeline(&h.state().session).unwrap();
+    assert!(script.contains("add_feature"));
+    save(&mut h, "scripts-menu.png");
+}
+
 #[test]
 fn editing_extrusions_preserves_taper_and_through_all() {
     let mut h = state_harness();

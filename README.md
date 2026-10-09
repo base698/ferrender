@@ -527,6 +527,26 @@ and wall thickness. Export STL asks whether to write millimetres, centimetres or
 slicers read STL as millimetres. Export STEP writes the exact bodies as true
 surfaces for other CAD programs; mesh bodies are left out.
 
+### Scripts
+
+The Scripts menu runs Rhai scripts against the open design. A script is a text
+file with a `META` map (name, description, declared inputs) and a `fn
+run(inputs)`; every command of the API is a function in it, so `extrude(#{
+sketch: s, distance: inputs.expr.height })` does what the MCP command does. An
+inputs dialog is made from the declared inputs (lengths and angles take
+expressions, so parameters stay live) and remembers what you typed. Runs go on
+a worker thread with a progress bar and Cancel, land as one undo step, and
+leave a chip in the timeline that owns what the run made: Edit Inputs and
+Re-run, Re-run, Detach, Suppress and Delete act on the whole run. Scripts can
+read and write files only in their own folder, the design's folder and folders
+you allow in `config.toml`. Samples (export variants of a parameter, export a
+folder of designs, a spur gear, bosses at sketch points, a CI check, the face
+relief) can be copied to your scripts folder (`~/.config/ferrender/scripts`)
+and edited; Export Timeline as Script turns the open design into a script with
+its parameters as inputs. Headless, `ferrender run script.rhai design.ferr
+--input teeth=24 --save` runs a script and `ferrender check design.ferr` lists
+timeline errors for CI; over MCP, `list_scripts` and `run_script` do the same.
+
 ### View
 
 In the model, drag to orbit and Shift-drag to pan. In a sketch the

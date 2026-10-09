@@ -398,6 +398,7 @@ pub enum Dialog {
     Mesh(MeshDlg),
     Relief(ReliefDlg),
     Sculpt(SculptDlg),
+    Script(crate::scripts_ui::ScriptDlg),
 }
 
 impl PatternDlg {
@@ -594,7 +595,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_))
+        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_) | Dialog::Script(_))
     }
 }
 
@@ -673,6 +674,8 @@ pub enum Action {
     Mesh(usize),
     Relief,
     Sculpt,
+    ScriptLog,
+    ExportTimelineScript,
     Primitive(usize),
     RemoveBody,
     SplitBody,
@@ -797,6 +800,7 @@ pub struct App {
     /// The GPU viewport is available; otherwise bodies are drawn in software.
     pub gpu: bool,
     pub scene: view::Scene,
+    pub scripts: crate::scripts_ui::Scripts,
     pub fit_pending: bool,
     pub bridge: Option<Bridge>,
     /// This app's recovery copy; none while testing unless a test sets one.
@@ -885,6 +889,7 @@ impl App {
             rename: None,
             gpu,
             scene: view::Scene::default(),
+            scripts: Default::default(),
             fit_pending: false,
             bridge: if cfg!(test) || !config.bridge.enabled { None } else { Bridge::start(config.bridge.port, cc.egui_ctx.clone()) },
             recovery: if cfg!(test) { None } else { Config::path().parent().map(|d| Recovery::start(d.join("recovery"))) },
@@ -1693,6 +1698,10 @@ impl App {
 
     /// Confirms the open dialog.
     pub fn apply_dialog(&mut self) {
+        if let Dialog::Script(d) = self.dialog.clone() {
+            self.start_script(d);
+            return;
+        }
         let dlg = self.dialog.clone();
         match self.session.edit_feature(|d| { let id = dlg.apply(d)?; fr_core::validation::document(d)?; Ok((id, id)) }) {
             Ok(id) => {
@@ -2101,6 +2110,7 @@ impl App {
                 let mm = |v: f64| format!("{} {}", fr_core::units::trim_num(v / u.mm(), 3), u.name());
                 self.dialog = Dialog::Sculpt(SculptDlg { brush: 0, radius: mm(8.0), strength: mm(1.0), strokes: 0 });
             }
+            Action::ScriptLog | Action::ExportTimelineScript => { crate::scripts_ui::action(self, &a); }
             Action::Relief => {
                 self.finish_sketch();
                 if let Some(path) = rfd::FileDialog::new().add_filter("PNG or JPEG", &["png", "jpg", "jpeg"]).pick_file() {
@@ -2502,6 +2512,7 @@ impl eframe::App for App {
         egui::Panel::left("browser").frame(side).exact_size(230.0).resizable(false).show(ui, |ui| panels::browser(self, ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(colors.background)).show(ui, |ui| view::viewport(self, ui));
         panels::windows(self, &ctx);
+        crate::scripts_ui::windows(self, &ctx);
 
         if let Some((msg, until)) = &self.toast {
             if self.now > *until {

@@ -547,6 +547,12 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["rotate"] = json!(t.rotate.iter().map(|v| v.expr.clone()).collect::<Vec<_>>());
             o["scale"] = json!(t.scale.expr);
         }
+        FeatureKind::ScriptRun(r) => {
+            o["script"] = json!(r.script_name);
+            o["inputs"] = r.inputs.clone();
+            o["source_hash"] = json!(r.source_hash);
+            o["made"] = json!(doc.features.iter().filter(|g| g.made_by == Some(f.id)).map(|g| g.id).collect::<Vec<_>>());
+        }
         FeatureKind::MeshOp(m) => {
             o["body"] = json!(m.body);
             o["op"] = serde_json::to_value(&m.op).unwrap_or(J::Null);
