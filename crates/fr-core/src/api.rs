@@ -14,7 +14,7 @@ use base64::Engine;
 use glam::{DVec2, DVec3};
 use serde_json::{Value as J, json};
 
-use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Op, Pattern, PatternKind, Revolve, Session, Shell, Text, Thread, Transform};
+use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Op, Pattern, PatternKind, Revolve, Session, Shell, Sweep, SweepOrient, Text, Thread, Transform};
 use crate::measure::{self, Item};
 use crate::threads;
 use crate::exact;
@@ -27,7 +27,7 @@ use crate::units::{Unit, fmt_len, trim_num};
 use crate::{io, solver};
 
 /// Given to AI clients so they know what they can send.
-pub const REFERENCE: &str = r#"Ferrender is a parametric CAD program: sketches on planes, constrained and dimensioned, turned into solid bodies by extrude and revolve features. Commands are JSON objects with an "op". Z is up.
+pub const REFERENCE: &str = r#"Ferrender is a parametric CAD program: sketches on planes, constrained and dimensioned, turned into solid bodies by extrude, revolve and sweep features. Commands are JSON objects with an "op". Z is up.
 
 VALUES. Lengths are numbers in the document's units, or strings with units and arithmetic: 10, "10 mm", "2 in", "$width / 2 + 1cm". Parameters are referenced as $name. Angles are degrees.
 
@@ -126,14 +126,16 @@ FEATURES
    operation: new | join | cut | intersect. Negative distance goes the other way. With "symmetric":true the distance is the total thickness, half each side. A shape drawn inside another in the SAME sketch becomes a hole; shapes in different sketches never do. "profiles" are indices from get_object_info on the sketch; when omitted, every outer region is used and regions nested inside become holes; "all" fills them in.
 {"op":"revolve","sketch":ID,"axis":"x","angle":360,"operation":"new","profiles":[...]}
    axis: "x" or "y" (the sketch's axes), the id of a line in the sketch, or {"from":[x,y],"to":[x,y]}. The profile must not cross the axis.
+{"op":"sweep","sketch":PROFILE_SKETCH,"path_sketch":PATH_SKETCH,"path":[entity ids],"orientation":"follow","operation":"new","profiles":[...]}
+   carries the profile along a path drawn in ANOTHER sketch: lines, arcs and splines joined end to end, or one circle. Draw the path first, then the profile on a plane that crosses it (for a path on XY starting along X, a profile on YZ). "path" names the entities to follow; omitted, it is every non-construction entity of path_sketch, which must then be one unbranched run. A closed path gives a ring or a frame. Pieces that meet tangentially are followed exactly; a sharp corner is mitred like a picture frame (it may turn by at most 150 degrees). The profile may sit anywhere along the path and off to one side of it. orientation: follow (the profile turns with the path) | fixed (it keeps its orientation; the path may not run sideways to it). Refused with a reason when a bend is tighter than the profile reaches on its inside, or a stretch between corners is too short. get_object_info on the feature lists the path in the order it is walked. Each side face is named by its profile entity and path entity.
    extrude also takes "extent":"all" (go through bodies in its component; the sign of distance picks the side), "taper":DEGREES (walls lean outward, negative inward), and instead of a sketch, "face":{"body":BODY,"point":[x,y,z]} to pull the flat face nearest that point out (or, with a negative distance, push it in and cut).
 {"op":"create_sketch","face":{"body":BODY,"point":[x,y,z]}}   sketch on a flat face
-{"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve, primitive, import or standalone text around a component-local axis through its origin; count includes the original
+{"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve, sweep, primitive, import or standalone text around a component-local axis through its origin; count includes the original
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":4,"spacing":V}
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":2,"spacing":V,"axis2":"y","count2":2,"spacing2":V}
    Optional axis2/count2/spacing2 form a rectangular grid; supply all three together, with distinct component-local axes. Each count includes the source and must be at least 2; their product is at most 1000. Spacing is between adjacent instances and can be negative; both spacings in a grid must be nonzero. Without a second direction, count is at most 1000 and zero spacing remains allowed for compatibility (coincident copies).
 {"op":"pattern","feature":ID,"type":"mirror","normal":"x"}   one reflected copy through the origin plane with that normal
-{"op":"edit_feature","feature":ID, ...}            any of distance, angle, operation, symmetric, extent, taper, axis, name, suppressed
+{"op":"edit_feature","feature":ID, ...}            any of distance, angle, operation, symmetric, extent, taper, axis, name, suppressed; on a sweep, path and orientation
 {"op":"delete_feature","feature":ID}
 {"op":"remove_body","bodies":[BODY_IDS]}           removes only these bodies at this timeline point; keeps their source features and previously patterned copies. body:ID is a single-body alias. Undo or suppress this feature to restore them.
 {"op":"split_body","body":BODY,"plane":"XY"}       plane: XY | XZ | YZ in target-component axes, {"plane":CONSTRUCTION_ID}, or {"face":{"body":ID,"point":[x,y,z]}} with a world-space planar-face pick in document units. Uses the infinite plane. Exact unthreaded bodies only; tangent/nonintersecting planes are rejected. Each solid piece becomes an independent body in the target component; the first negative-side piece keeps the target ID, others have stable synthetic IDs. edit_feature accepts body/plane for Split and bodies for Remove; picks resolve before that operation. Combine with operation:join joins selected pieces again.
@@ -182,7 +184,7 @@ pub const OPS: &[&str] = &[
     "export_stl", "export_step", "get_reference", "text", "rollback", "fillet_edges", "chamfer_edges", "shell", "measure",
     "list_threads", "hole", "thread", "move", "set_units", "set_parameter", "delete_parameter", "create_component",
     "activate_component", "move_component", "create_plane", "create_sketch", "add_geometry", "point_coordinates",
-    "add_constraint", "set_dimension", "delete", "extrude", "revolve", "remove_body", "split_body", "primitive", "pattern",
+    "add_constraint", "set_dimension", "delete", "extrude", "revolve", "sweep", "remove_body", "split_body", "primitive", "pattern",
     "trim", "mirror", "offset", "fillet", "chamfer", "project", "edit_feature", "delete_feature", "import_stl", "import_mesh",
     "mesh_measure", "mesh_repair", "mesh_decimate", "mesh_smooth", "mesh_subdivide", "mesh_cut", "mesh_mirror", "mesh_offset",
     "mesh_extrude_region", "mesh_sculpt", "mesh_from_image", "transform", "combine", "set_visible", "run_script", "script_meta", "add_feature",
@@ -528,6 +530,17 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["angle"] = json!({"expr": r.angle.expr, "value": r.angle.v});
             o["axis"] = axis(r.axis);
             o["operation"] = json!(r.op.name());
+        }
+        FeatureKind::Sweep(w) => {
+            o["sketch"] = json!(w.sketch);
+            o["path_sketch"] = json!(w.path_sketch);
+            // The path as it is walked, whether it was named or is the whole sketch.
+            match s.doc.sketch(w.path_sketch).ok_or_else(|| "its path sketch was deleted".to_owned()).and_then(|sk| crate::profile::chain(sk, &w.path)) {
+                Ok(chain) => { o["path"] = json!(chain.ids); o["path_closed"] = json!(chain.closed); }
+                Err(e) => { o["path"] = json!(w.path); o["path_error"] = json!(e); }
+            }
+            o["orientation"] = json!(w.orient.name());
+            o["operation"] = json!(w.op.name());
         }
         FeatureKind::Text(t) => {
             o["text"] = json!(t.text);
@@ -1583,6 +1596,44 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 Ok(out)
             }
         }
+        "sweep" => {
+            let owner = s.doc.active_component;
+            let has_bodies = s.built.bodies.iter().any(|b| b.component == owner);
+            let c = c.clone();
+            let id = s.edit_feature(|d| {
+                let path_sketch = match &c["path_sketch"] {
+                    J::Null => return Err("sweep needs a \"path_sketch\": the sketch that holds the path".into()),
+                    _ => id_of(&c, "path_sketch")?,
+                };
+                let along = d.sketch(path_sketch).ok_or(format!("feature {path_sketch} is not a sketch"))?;
+                // The profile is the newest sketch that is not the path, unless one is named.
+                let sid = match &c["sketch"] {
+                    J::Null => d.sketches().filter(|(f, _)| f.id != path_sketch).last().map(|(f, _)| f.id).ok_or("sweep needs a second sketch holding the profile")?,
+                    _ => sketch_id(d, &c)?,
+                };
+                if sid == path_sketch { return Err("the profile and the path must be in different sketches".into()); }
+                let path = match &c["path"] {
+                    J::Null => Vec::new(),
+                    _ => ids_of(&c, "path")?,
+                };
+                // Report a path that is not one run now, before the feature exists.
+                crate::profile::chain(along, &path)?;
+                let orient = match &c["orientation"] {
+                    J::Null => SweepOrient::Follow,
+                    J::String(name) => SweepOrient::parse(name).ok_or(format!("unknown orientation '{name}'; use follow or fixed"))?,
+                    _ => return Err("\"orientation\" should be follow or fixed".into()),
+                };
+                let profiles = pick_profiles(d, sid, &c)?;
+                let kind = FeatureKind::Sweep(Sweep { sketch: sid, profiles, path_sketch, path, orient, op: op_of(&c, if has_bodies { Op::Join } else { Op::New })? });
+                let id = d.add_feature_to(owner, kind)?;
+                sk_mut(d, sid).visible = false;
+                sk_mut(d, path_sketch).visible = false;
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            Ok(out)
+        }
         "remove_body" | "split_body" => {
             let id=body_ops_api::create(s,c)?;
             let mut out=changed(s,&before);
@@ -1760,6 +1811,17 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                             r.axis = axis_of(&probe, r.sketch, &c["axis"])?;
                         }
                         r.op = op_of(&c, r.op)?;
+                    }
+                    FeatureKind::Sweep(w) => {
+                        if !c["path"].is_null() {
+                            let path = ids_of(&c, "path")?;
+                            crate::profile::chain(probe.sketch(w.path_sketch).ok_or("its path sketch was deleted")?, &path)?;
+                            w.path = path;
+                        }
+                        if let Some(name) = c["orientation"].as_str() {
+                            w.orient = SweepOrient::parse(name).ok_or(format!("unknown orientation '{name}'; use follow or fixed"))?;
+                        }
+                        w.op = op_of(&c, w.op)?;
                     }
                     _ => {}
                 }

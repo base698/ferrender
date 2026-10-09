@@ -232,7 +232,7 @@ struct Arrow {
 fn extrude_arrow(app: &App) -> Option<Arrow> {
     if let Some((plane, middle, text)) = crate::construction_view::offset_base(app) { return distance_arrow(app, plane, middle, &text); }
     let Dialog::Feature(f) = &app.dialog else { return None };
-    if f.revolve || f.through_all {
+    if f.revolve || f.sweep.is_some() || f.through_all {
         return None;
     }
     let doc = app.doc();
@@ -1593,6 +1593,17 @@ pub(crate) fn pick_face(app: &App, pos: Pos2) -> Option<Face> {
 }
 
 /// The smallest profile under a screen position among the sketches a feature can use.
+/// The sketch line or curve under the pointer that could be a sweep's path: one in a
+/// shown sketch other than the profile's.
+fn pick_path(app: &App, doc: &Document, pos: Pos2, profile: Option<Id>) -> Option<(Id, Id)> {
+    doc.sketches()
+        .filter(|(f, s)| Some(f.id) != profile && s.visible && !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner))
+        .find_map(|(f, s)| match hit(app, s, pos) {
+            Hit::Entity(e) => Some((f.id, e)),
+            _ => None,
+        })
+}
+
 fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: Option<Id>) -> Option<(Id, Profile)> {
     doc.sketches()
         .filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also == Some(f.id)))
@@ -1660,6 +1671,27 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                     painter.extend(Shape::dashed_line(&[on_screen(app, sk, a - d), on_screen(app, sk, a + d)], Stroke::new(1.6, theme::choose(painter.ctx(), Color32::from_rgb(214, 60, 160), Color32::from_rgb(244, 124, 208))), 10.0, 4.0));
                 }
             }
+            // The sweep's path, in the colour of a selection; dashed while it cannot be followed.
+            let over_path = match (&f.sweep, hover) {
+                (Some(_), Some(p)) => pick_path(app, &doc, p, f.sketch),
+                _ => None,
+            };
+            if let Some(w) = &f.sweep {
+                let stroke = Stroke::new(2.6, colors.selected);
+                if let Some(sk) = w.path_sketch.and_then(|s| doc.sketch(s)) {
+                    let chain = fr_core::profile::chain(sk, &w.path);
+                    let ids: Vec<Id> = match &chain { Ok(c) => c.ids.clone(), Err(_) if w.path.is_empty() => sk.entities.iter().filter(|(_, e)| !e.construction).map(|(id, _)| *id).collect(), Err(_) => w.path.clone() };
+                    for id in ids {
+                        let line: Vec<Pos2> = sk.polyline(id).into_iter().map(|p| on_screen(app, sk, p)).collect();
+                        if chain.is_ok() { painter.add(Shape::line(line, stroke)); } else { painter.extend(Shape::dashed_line(&line, stroke, 8.0, 5.0)); }
+                    }
+                }
+                if let Some((sid, _)) = over_path && w.path_sketch != Some(sid) && let Some(sk) = doc.sketch(sid) {
+                    for id in sk.entities.iter().filter(|(_, e)| !e.construction).map(|(id, _)| *id) {
+                        painter.add(Shape::line(sk.polyline(id).into_iter().map(|p| on_screen(app, sk, p)).collect(), Stroke::new(2.0, colors.selected.gamma_multiply(0.5))));
+                    }
+                }
+            }
             if let Some(face) = &f.face
                 && let Some(plane) = face.plane
             {
@@ -1694,7 +1726,20 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 } else if let (true, Some(l)) = (f.pick_axis, line) {
                     f.axis = Axis::Line(l);
                     f.pick_axis = false;
-                } else if let Some((sid, p)) = over {
+                } else if let (Some(w), Some((sid, entity))) = (&mut f.sweep, over_path) {
+                    // A plain click takes the sketch's whole run; Shift-click builds the path a piece at a time.
+                    let extend = resp.ctx.input(|i| i.modifiers.shift);
+                    if w.path_sketch != Some(sid) { w.path.clear(); }
+                    w.path_sketch = Some(sid);
+                    if extend {
+                        match w.path.iter().position(|e| *e == entity) {
+                            Some(i) => { w.path.remove(i); }
+                            None => w.path.push(entity),
+                        }
+                    } else {
+                        w.path.clear();
+                    }
+                } else if let Some((sid, p)) = over.filter(|(sid, _)| f.sweep.as_ref().is_none_or(|w| w.path_sketch != Some(*sid))) {
                     let extend = resp.ctx.input(|i| i.modifiers.shift);
                     if !extend || f.sketch != Some(sid) { f.profiles.clear(); }
                     f.sketch = Some(sid);
@@ -1704,6 +1749,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                         None => f.profiles.push(p.edges),
                     }
                 } else if !f.revolve
+                    && f.sweep.is_none()
                     && f.editing.is_none()
                     && let Some(mut face) = pick_face(app, pos)
                 {
@@ -2005,6 +2051,9 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::DeleteComponent(_), _) => "Confirm deletion of the component and its contents, or cancel.",
         (Dialog::Feature(f), _) if f.pick_axis => "Click a sketch line to revolve around.",
         (Dialog::Feature(f), _) if f.pick_to => "Click the face the extrude should reach.",
+        (Dialog::Feature(f), _) if f.sweep.as_ref().is_some_and(|w| w.path_sketch.is_none()) => "Click a line or curve of the path, drawn in another sketch than the profile.",
+        (Dialog::Feature(f), _) if f.sweep.is_some() && f.profiles.is_empty() => "Click a closed region for the profile.",
+        (Dialog::Feature(f), _) if f.sweep.is_some() => "Click a region to change the profile or a curve to change the path. Shift-click curves to follow only part of a sketch.",
         (Dialog::Feature(f), _) if f.revolve => "Click a closed region to select it. Shift-click to add or remove regions.",
         (Dialog::Feature(_), _) => "Click a closed region or flat face. Shift-click to add or remove regions. Drag the arrow to set the distance.",
         (Dialog::Primitive(d), _) if d.pick_surface => "Click a flat face or construction plane for placement.",

@@ -243,7 +243,7 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
         Ok(())
     };
     let body=|id:Id| -> Result<(),String> {
-        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
+        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Sweep(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
         else if id>=1000 && d.feature(id/1000).is_some() {earlier(id/1000,"pattern or split",|k|matches!(k,FeatureKind::Pattern(_)|FeatureKind::Split(_)))}
         else {Ok(())}
     };

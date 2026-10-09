@@ -41,21 +41,24 @@ pub fn bounds(lumps: &[Solid]) -> Option<(DVec3, DVec3)> {
     lumps.iter().map(|s| s.bounding_box()).map(|b| (g(b[0]), g(b[1]))).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
 }
 
+/// One sketch segment as a kernel edge, `z` off the plane.
+fn seg_edge(s: &Seg, plane: &Plane, z: f64) -> Result<Edge, cadrum::Error> {
+    let at = |p: DVec2| c(plane.to_world(p) + plane.normal() * z);
+    match *s {
+        Seg::Line(a, b) => Edge::line(at(a), at(b)),
+        Seg::Arc(a, m, b) => Edge::arc_3pts(at(a), at(m), at(b)),
+        Seg::Spline(points) => Edge::bspline(points.map(at).iter(), cadrum::BSplineEnd::NotAKnot),
+        Seg::Circle(centre, r) => Edge::circle(r, c(plane.normal())).map(|e| e.translate(at(centre))),
+    }
+}
+
 /// One closed boundary as kernel edges, `z` off the plane.
 fn ring(path: &[Seg], plane: &Plane, z: f64) -> R<Vec<Edge>> {
-    let at = |p: DVec2| c(plane.to_world(p) + plane.normal() * z);
-    path.iter()
-        .map(|s| {
-            match *s {
-                Seg::Line(a, b) => Edge::line(at(a), at(b)),
-                Seg::Arc(a, m, b) => Edge::arc_3pts(at(a), at(m), at(b)),
-                Seg::Spline(points) => Edge::bspline(points.map(at).iter(), cadrum::BSplineEnd::NotAKnot),
-                Seg::Circle(centre, r) => Edge::circle(r, c(plane.normal())).map(|e| e.translate(at(centre))),
-            }
-            .map_err(|e| format!("the profile has an edge the kernel rejects: {e}"))
-        })
-        .collect()
+    path.iter().map(|s| seg_edge(s, plane, z).map_err(|e| format!("the profile has an edge the kernel rejects: {e}"))).collect()
 }
+
+mod pipe;
+pub use pipe::{sweep, tag_swept};
 
 /// A profile's outer boundary followed by its holes.
 fn outline(p: &Profile, plane: &Plane, z: f64) -> R<Vec<Edge>> {

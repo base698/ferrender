@@ -66,7 +66,11 @@ Ordered roughly by how much each one cost.
 ## Missing shapes and features
 
 - [x] **Threads.** `thread` on a rod or hole, and `hole` with `"modeled": true`. A general
-      helix and sweep (springs, coils) is still not there.
+      helix (springs, coils) is still not there.
+- [x] **Sweep** a profile along a path in another sketch: tangent runs exactly, sharp corners
+      mitred, closed paths, Follow or Fixed orientation. Still missing: paths that leave one
+      plane (helix, 3D splines), twist and scale along the path, a guide rail, and rounded
+      instead of mitred corners.
 - [ ] **Loft** between profiles, for limbs, snouts and tails that change section.
 - [x] **Spline sketch items.** 0.2 adds editable curves through four fit points.
 - [ ] **Sphere and ellipse** sketch items or primitives. Joints, eyes and beads

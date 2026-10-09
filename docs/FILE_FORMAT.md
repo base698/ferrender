@@ -88,6 +88,7 @@ A dimension or feature value is `{"expr": "...", "v": 20.0}`: the expression as 
 | `sketch` | `plane` {`origin`,`x`,`y`}, `points` {id: [x,y]}, `entities` {id: entity}, `constraints` {id: constraint}, `next`, `visible`, `fixed` (array, optional), `arc_guides` (optional), `reference` (optional), `on` (optional plane feature id) | Point `0` is the fixed origin and is always `[0,0]`. `plane` is in the owner component's frame; `on` means the plane follows a construction plane and `plane` is the last resolved value. |
 | `extrude` | `sketch`, `profiles` [[entity ids]], `distance` value, `symmetric`, `op`, `through_all`, `taper` (value, optional) | `profiles` names each region by the entity ids on its outer boundary. `op` ∈ `new`/`join`/`cut`/`intersect`. |
 | `revolve` | `sketch`, `profiles`, `axis` (`"x"`, `"y"` or `{"line": id}`), `angle` value, `op` | |
+| `sweep` | `sketch`, `profiles`, `path_sketch`, `path` (entity ids of the path sketch; absent means every non-construction entity), `orient` (`"follow"` or `"fixed"`, default follow), `op` | Format 13. The path entities must join end to end into one unbranched run, or be one circle. Side faces along a path of several pieces are tagged `semantic` with role `sweep:<profile entity>:<path entity>`; along one piece they are `swept`, as for an extrude. |
 | `pattern` | `source` (feature id), `kind`: `{"linear": {axis, count, spacing, second?: {axis, count, spacing}}}`, `{"circular": {axis, count, angle}}` or `{"mirror": {axis}}` | Axes are the owner component's: `0` = X, `1` = Y, `2` = Z. |
 | `primitive` | `shape` (`{"box": {width, depth, height}}`, `{"cylinder": {diameter, height}}`, `{"sphere": {diameter}}`, `{"cone": {bottom_diameter, top_diameter, height}}`, `{"torus": {major_radius, tube_radius}}`; all values), `position` [3 values], `rotate` [3 values], `op` | |
 | `import` | base64 string (plain form) or `{"blob": "meshes/N.mesh", "triangles": T}` (container) | The plain form is the little-endian `f32` triangle soup of versions 3–8, 36 bytes per triangle, at most 1 000 000 triangles; readers weld it on load. Meshes larger than that only exist in containers. |
@@ -152,7 +153,7 @@ A plane reference is `{"origin": "XY"|"XZ"|"YZ"}`, `{"plane": id}`, `{"face": {b
 | 10 | 0.4.0 | Face and edge tags on references (`blend.tags`, `shell.tags`, `thread.tag`, `text.tag`, plane `face.tag`). |
 | 11 | 0.4.0 | `mesh_op` and `relief` features; the `free` plane reference. |
 | 12 | 0.4.0 | `script_run` features and `made_by` on features. |
-| 13 | 0.4.0 | Semantic/provenance topology tags (`schema: 2`) and persistent script output identities (`script_key`). |
+| 13 | 0.4.0 | Semantic/provenance topology tags (`schema: 2`), persistent script output identities (`script_key`) and `sweep` features. |
 
 The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". Older documents deserialize with absent fields taking their defaults. Legacy reference tags are upgraded only when the original pick has a unique verified match; ambiguous references remain errors for repair. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 
