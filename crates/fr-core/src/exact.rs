@@ -115,6 +115,13 @@ pub fn extrude(profiles: &[&Profile], plane: &Plane, z0: f64, z1: f64) -> R<Lump
     fuse(parts)
 }
 
+/// The refusal for a profile with points on both sides of the axis, with how far the
+/// smaller overhang reaches: usually one point placed just past the axis by hand.
+pub fn crosses_axis(lo: f64, hi: f64, axis: DVec2) -> String {
+    let past = lo.abs().min(hi) / axis.length().max(1e-12);
+    format!("the profile crosses the axis by {} mm; move the points beyond it onto the axis (points snap to the axes when drawn near them)", crate::units::trim_num(past, 3))
+}
+
 /// Turns profiles around the line through `a` and `b` (sketch coordinates) by `degrees`.
 pub fn revolve(profiles: &[&Profile], plane: &Plane, a: DVec2, b: DVec2, degrees: f64) -> R<Lumps> {
     if a.distance(b) < 1e-9 {
@@ -128,7 +135,7 @@ pub fn revolve(profiles: &[&Profile], plane: &Plane, a: DVec2, b: DVec2, degrees
     for p in profiles {
         let (lo, hi) = p.outer.iter().map(|q| side(*q)).fold((0.0f64, 0.0f64), |(lo, hi), v| (lo.min(v), hi.max(v)));
         if lo < -1e-6 && hi > 1e-6 {
-            return Err("the profile crosses the axis".into());
+            return Err(crosses_axis(lo, hi, b - a));
         }
     }
     let (origin, dir) = (plane.to_world(a), plane.to_world(b) - plane.to_world(a));

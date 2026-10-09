@@ -164,17 +164,17 @@ fn grid_step(app: &App) -> f64 {
 pub fn snap(app: &App, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Snap> {
     let raw = sketch_pos(app, sk, pos)?;
     if let Some((id,p)) = crate::sketch_capture::nearest_point(sk,pos,|p|on_screen(app,sk,p)) {
-        return Some(Snap { p,point:Some(id),on:None,h:false,v:false });
+        return Some(Snap { p,point:Some(id),on:None,h:false,v:false,axis:[false,false] });
     }
     if let Some(c) = sk.entities.keys().filter_map(|id| crate::sketch_capture::project_entity(sk,*id,pos,|p|on_screen(app,sk,p)))
         .filter(|c|c.distance<=6.0).min_by(|a,b|a.distance.total_cmp(&b.distance)) {
-        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false });
+        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false,axis:[false,false] });
     }
     Some(free_snap(app,raw,from,false))
 }
 
 fn free_snap(app: &App, raw: DVec2, from: Option<DVec2>, bypass: bool) -> Snap {
-    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false };
+    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false, axis: [false, false] };
     if bypass { return s; }
     if app.opts.snap_grid {
         let step = grid_step(app);
@@ -189,6 +189,17 @@ fn free_snap(app: &App, raw: DVec2, from: Option<DVec2>, bypass: bool) -> Snap {
             s.p.x = f.x;
             s.v = true;
         }
+    }
+    // The sketch axes snap like drawn lines: a point within a few pixels of one lands
+    // on it, so a revolve profile closes on its axis instead of just past it.
+    let near = |v: f64| v.abs() * app.cam.scale < 6.0;
+    if !s.h && near(s.p.y) {
+        s.p.y = 0.0;
+        s.axis[0] = true;
+    }
+    if !s.v && near(s.p.x) {
+        s.p.x = 0.0;
+        s.axis[1] = true;
     }
     s
 }
@@ -1059,13 +1070,14 @@ pub(crate) fn line_drawing_snap(sk: &Sketch, start: DVec2, mut snap: Snap, typed
             }
         }
     }
-    let inferred = if angle.is_none() && snap.point.is_none() && snap.on.is_none() { sticky_angle(raw, &candidates, typed) } else { typed.guide = None; raw };
+    let on_axis = snap.axis[0] || snap.axis[1];
+    let inferred = if angle.is_none() && snap.point.is_none() && snap.on.is_none() && !on_axis { sticky_angle(raw, &candidates, typed) } else { typed.guide = None; raw };
     let locked = update_angle_lock(typed, shift, angle.unwrap_or(inferred));
     let target = angle.or(locked).unwrap_or(inferred);
     if angle.is_some() || locked.is_some() || typed.guide.is_some() {
         let radians = target.rem_euclid(360.0).to_radians();
         snap.p = start + DVec2::from_angle(radians) * delta.length();
-        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on) = (None, None); }
+        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on, snap.axis) = (None, None, [false, false]); }
         snap.h = radians.sin().abs() < 1e-9;
         snap.v = radians.cos().abs() < 1e-9;
     }
@@ -1081,9 +1093,10 @@ pub(crate) fn tangent_drawing_snap(start: DVec2, tangent: DVec2, mut snap: Snap,
     let raw = 2.0 * delta.dot(tangent.perp()).atan2(delta.dot(tangent)).to_degrees();
     let candidates: Vec<_> = (-7..=7).filter(|i| *i != 0).map(|i| (i as f64 * 45.0, "Sweep")).collect();
     // Sweep values are signed and must not wrap: +315° and -45° are different arcs.
-    if sweep.is_some() || snap.point.is_some() || snap.on.is_some() { typed.guide = None; }
+    let on_axis = snap.axis[0] || snap.axis[1];
+    if sweep.is_some() || snap.point.is_some() || snap.on.is_some() || on_axis { typed.guide = None; }
     if typed.guide.is_some_and(|g| (raw - g.0).abs() > 6.0) { typed.guide = None; }
-    if sweep.is_none() && typed.guide.is_none() && snap.point.is_none() && snap.on.is_none() {
+    if sweep.is_none() && typed.guide.is_none() && snap.point.is_none() && snap.on.is_none() && !on_axis {
         typed.guide = candidates.into_iter().filter(|(a, _)| (raw - a).abs() <= 3.0).min_by(|a, b| (raw - a.0).abs().total_cmp(&(raw - b.0).abs()));
     }
     let inferred = typed.guide.map_or(raw, |g| g.0);
@@ -1098,7 +1111,7 @@ pub(crate) fn tangent_drawing_snap(start: DVec2, tangent: DVec2, mut snap: Snap,
     if sweep.is_some() || locked.is_some() || typed.guide.is_some() {
         let half = (target / 2.0).to_radians();
         snap.p = start + (tangent * half.cos() + tangent.perp() * half.sin()) * delta.length();
-        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on) = (None, None); }
+        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on, snap.axis) = (None, None, [false, false]); }
     }
     snap
 }
@@ -1124,7 +1137,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     }
     let hovered = resp.hover_pos().and_then(|p| captured_snap(app, ui, sk, p, from));
     // Over the boxes themselves the pointer is not over the sketch; the shape stays where it was.
-    let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false });
+    let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false, axis: [false, false] });
     let Some(mut s) = hovered.or(kept) else { return };
     let attachment = s;
     if let Some(t) = &mut app.typed {

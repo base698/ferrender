@@ -264,6 +264,63 @@ fn line_tool_constraints_and_revolve() {
 }
 
 #[test]
+fn points_near_an_axis_land_on_it_and_splines_carry_on() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    let sketch = |h: &H| h.state().session.doc.sketch(sid).unwrap().clone();
+    let px = 1.0 / h.state().cam.scale;
+
+    // A revolve profile on the left of the Y axis whose top corner is clicked two
+    // pixels past the axis: it lands on the axis and is held there.
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x, y) in [(0.0, 0.0), (-25.0, 0.0), (-30.0, 40.0), (2.0 * px, 40.0), (0.0, 0.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = sketch(&h);
+    assert_eq!(sk.entities.len(), 4, "the outline closes on the origin");
+    assert!(h.state().clicks.is_empty());
+    let top = sk.points.iter().find(|(_, p)| (p.y - 40.0).abs() < 1.0 && p.x > -1.0).map(|(id, p)| (*id, *p)).expect("the top corner");
+    assert!(top.1.x.abs() < 1e-9, "the corner snapped onto the Y axis: {}", top.1.x);
+    assert!(sk.constraints.values().any(|c| c.kind == CKind::Vertical && c.refs.contains(&top.0) && c.refs.contains(&0)), "and is held there, in line with the origin");
+    assert_eq!(fr_core::profile::profiles(&sk).len(), 1);
+    run(&mut h, Action::Revolve);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the revolve dialog should open") };
+    assert!(f.revolve && f.profiles.len() == 1);
+    h.run_steps(2);
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None, "a profile that closes on the axis revolves");
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    run(&mut h, Action::Undo);
+    assert!(h.state().session.built.bodies.is_empty());
+
+    // Seven clicks with the Spline tool make two splines sharing a point, and the tool
+    // is still going from that end until Escape.
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    run(&mut h, Action::Tool(Tool::Spline));
+    for (x, y) in [(5.0, 5.0), (15.0, 20.0), (25.0, 5.0), (35.0, 20.0), (45.0, 5.0), (55.0, 20.0), (65.0, 5.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let splines: Vec<_> = sk.entities.values().filter(|e| matches!(e.geom, Geom::Spline { .. })).collect();
+    assert_eq!(splines.len(), 2, "the second spline starts where the first ended");
+    assert_eq!(sk.points.len() - 1, 7, "the shared point is one point, plus the origin");
+    assert_eq!(h.state().clicks.len(), 1, "the spline carries on from its end");
+    let ends: Vec<(u32, u32)> = splines.iter().filter_map(|e| if let Geom::Spline { a, d, .. } = e.geom { Some((a, d)) } else { None }).collect();
+    let second = ends.iter().find(|(a, _)| ends.iter().any(|(_, d)| d == a)).expect("the second spline starts at the first one's end");
+    assert_eq!(h.state().clicks[0].point, Some(second.1), "the next spline would start at the second one's end");
+    run(&mut h, Action::Cancel);
+    assert!(h.state().clicks.is_empty(), "Escape ends the run");
+    assert_eq!(h.state().session.doc.sketch(sid).unwrap().entities.len(), 2);
+}
+
+#[test]
 fn sweep_covers_the_parts_of_its_path_set_in_the_dialog() {
     let mut h = harness();
     let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));

@@ -228,7 +228,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                     (icon::CIRCLE_NOTCH, "Arc", Tool::Arc, "Centre, start and end arc (A)"),
                     (icon::CIRCLE_NOTCH, "3-Point Arc", Tool::Arc3, "Arc: start, end, then a point that sets the bulge"),
                     (icon::CIRCLE_NOTCH, "Tangent Arc", Tool::TangentArc, "Continue a selected line or arc smoothly"),
-                    (icon::BEZIER_CURVE, "Spline", Tool::Spline, "Curve through four editable fit points"),
+                    (icon::BEZIER_CURVE, "Spline", Tool::Spline, "Curve through four editable fit points; keeps going from its end until Escape"),
                     (icon::DOT_OUTLINE, "Point", Tool::Point, "Point (P)"),
                     (icon::POLYGON, "Polygon", Tool::Polygon, "Regular polygon; set the sides in the Sketch Palette"),
                     (icon::STACK_SIMPLE, "Project", Tool::Project, "Copy the outline of a body's face into the sketch"),
@@ -236,6 +236,10 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                     if big(ui, glyph, label, app.tool == tool, tip).clicked() {
                         app.run(&ctx, Action::Tool(tool));
                     }
+                }
+                // Beside the drawing tools, since it decides what the next line, arc or spline is.
+                if big(ui, icon::LINE_SEGMENTS, "Construction", app.opts.construction, "Draw new geometry as construction (guide) lines; with a selection, toggle those instead (X)").clicked() {
+                    app.run(&ctx, Action::Construction);
                 }
             });
             group(ui, "MODIFY", |ui| {
@@ -253,9 +257,6 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
                 if big(ui, icon::SPLIT_HORIZONTAL, "Mirror", false, "Mirror the selection across the line selected last").clicked() {
                     app.run(&ctx, Action::MirrorSketch);
-                }
-                if big(ui, icon::LINE_SEGMENTS, "Construction", app.opts.construction, "Make the selection construction geometry, or draw new geometry as construction (X)").clicked() {
-                    app.run(&ctx, Action::Construction);
                 }
                 if big(ui, icon::FUNCTION, "Parameters", app.show_params, "Named values you can use in any size box as $name").clicked() {
                     app.run(&ctx, Action::Parameters);

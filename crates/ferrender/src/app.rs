@@ -95,6 +95,8 @@ pub struct Snap {
     /// The segment from the previous click is horizontal or vertical.
     pub h: bool,
     pub v: bool,
+    /// The point landed on the sketch's X axis (y = 0) or Y axis (x = 0), and stays there.
+    pub axis: [bool; 2],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1162,6 +1164,9 @@ impl App {
                 if let Some(e) = s.on {
                     let _ = sk.add_constraint(CKind::Coincident, &[id, e], None);
                 }
+                // A point snapped onto an axis is held there, level with or above the fixed origin.
+                if s.axis[0] { let _ = sk.add_constraint(CKind::Horizontal, &[id, 0], None); }
+                if s.axis[1] { let _ = sk.add_constraint(CKind::Vertical, &[id, 0], None); }
                 id
             }
         };
@@ -1259,6 +1264,7 @@ impl App {
                 Tool::Spline => {
                     let ids = [place(sk, &c[0]), place(sk, &c[1]), place(sk, &c[2]), place(sk, &c[3])];
                     sk.add_spline(ids, construction)?;
+                    last = Some(ids[3]);
                 }
                 Tool::Point => {
                     place(sk, &c[0]);
@@ -1275,9 +1281,12 @@ impl App {
             Ok(())
         });
         self.clicks.clear();
-        // A line carries on from its end until it lands on an existing point.
-        if let (true, Tool::Line, Some(b), Some(end)) = (done, tool, last, c.get(1).filter(|s| s.point.is_none())) {
-            self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false });
+        // A line or spline carries on from its end until it lands on an existing point
+        // (or Escape ends the run). A continued spline is a new four-point spline that
+        // shares the end point; it is not tangent to the last one.
+        let continues = matches!(tool, Tool::Line | Tool::Spline);
+        if let (true, true, Some(b), Some(end)) = (done, continues, last, c.get(tool.clicks() - 1).filter(|s| s.point.is_none())) {
+            self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false, axis: [false, false] });
         } else if !done && tool == Tool::Line {
             self.clicks.push(c[0]);
         }

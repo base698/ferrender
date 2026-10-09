@@ -1299,7 +1299,7 @@ pub fn revolve(profiles: &[&Profile], plane: &Plane, a: DVec2, b: DVec2, degrees
     let side = |p: DVec2| (b - a).perp_dot(p - a);
     let (lo, hi) = segs.iter().map(|s| side(s.0)).fold((0.0f64, 0.0f64), |(lo, hi), v| (lo.min(v), hi.max(v)));
     if lo < -1e-6 && hi > 1e-6 {
-        return Err("the profile crosses the axis".into());
+        return Err(crate::exact::crosses_axis(lo, hi, b - a));
     }
     let full = degrees.abs() > 360.0 - 1e-6;
     let steps = ((degrees.abs() / 360.0 * CIRCLE_SEGS as f64).ceil() as usize).max(3);
