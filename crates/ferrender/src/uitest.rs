@@ -16,6 +16,7 @@ mod body_ops;
 mod command_search;
 mod components_followup;
 mod face_extrusion_followup;
+mod loft;
 
 use std::path::PathBuf;
 
