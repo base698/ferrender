@@ -681,16 +681,30 @@ fn edge_table<'a>(lumps: &'a [Solid], tags: &Tags) -> Vec<(usize, &'a Edge, Opti
     out
 }
 
+/// The edge nearest a point, for a reference that has none yet: the point moved onto
+/// that edge, and the edge's tag. A reported or clicked point lies a little off the true
+/// curve (rounded, or on the drawn polyline); the moved point tells the edge apart from
+/// another with the same tag, which proximity alone must not do.
+pub fn edge_at(lumps: &[Solid], tags: &Tags, point: DVec3) -> Option<(DVec3, Option<EdgeTag>)> {
+    edge_table(lumps, tags).into_iter().map(|(_, e, t)| { let on = g(e.project(c(point)).0); (on.distance(point), on, t) })
+        .filter(|h| h.0 <= NEAR).min_by(|a, b| a.0.total_cmp(&b.0)).map(|h| (h.1, h.2))
+}
+
 /// The tag of the edge nearest a point, for a reference that has none yet.
 pub fn edge_tag_at(lumps: &[Solid], tags: &Tags, point: DVec3) -> Option<EdgeTag> {
-    edge_table(lumps, tags).into_iter().map(|(_, e, t)| (g(e.project(c(point)).0).distance(point), t)).filter(|h| h.0 <= NEAR).min_by(|a, b| a.0.total_cmp(&b.0)).and_then(|h| h.1)
+    edge_at(lumps, tags, point).and_then(|h| h.1)
+}
+
+/// The face nearest a point: the point moved onto it, and its tag (see [`edge_at`]).
+pub fn face_at(lumps: &[Solid], tags: &Tags, point: DVec3) -> Option<(DVec3, Option<Tag>)> {
+    lumps.iter().enumerate().flat_map(|(i, s)| s.iter_face().enumerate().map(move |(fi, f)| (i, fi, f)))
+        .map(|(i, fi, f)| { let on = g(f.project(c(point)).0); (on.distance(point), on, tags.get(i).and_then(|t| t.get(fi)).cloned().flatten()) })
+        .filter(|h| h.0 <= NEAR).min_by(|a, b| a.0.total_cmp(&b.0)).map(|h| (h.1, h.2))
 }
 
 /// The tag of the face nearest a point.
 pub fn face_tag_at(lumps: &[Solid], tags: &Tags, point: DVec3) -> Option<Tag> {
-    lumps.iter().enumerate().flat_map(|(i, s)| s.iter_face().enumerate().map(move |(fi, f)| (i, fi, f)))
-        .map(|(i, fi, f)| (g(f.project(c(point)).0).distance(point), tags.get(i).and_then(|t| t.get(fi)).cloned().flatten()))
-        .filter(|h| h.0 <= NEAR).min_by(|a, b| a.0.total_cmp(&b.0)).and_then(|h| h.1)
+    face_at(lumps, tags, point).and_then(|h| h.1)
 }
 
 /// A stored edge reference: where it was (and where it would be in the body's current bounds), and its tag.
@@ -776,6 +790,14 @@ pub struct Blended<T> {
     pub tags: Tags,
     pub level: Level,
     pub picked: Vec<Option<T>>,
+    /// Each pick's point moved onto the edge or face it found, one per pick.
+    pub points: Vec<DVec3>,
+}
+
+/// The pick's point moved onto what it found: whichever of its two points
+/// (as picked, and mapped into the body's current bounds) lands nearest.
+fn settled(points: &[DVec3; 2], onto: impl Fn(DVec3) -> DVec3) -> DVec3 {
+    points.iter().map(|p| (onto(*p), *p)).min_by(|a, b| a.0.distance(a.1).total_cmp(&b.0.distance(b.1))).map_or(points[0], |h| h.0)
 }
 
 /// A boolean whose result carries the tags of both inputs.
@@ -811,7 +833,9 @@ pub fn blend(lumps: &[Solid], tags: &Tags, picks: &[EdgePick], size: f64, chamfe
     if size <= 0.0 {
         return Err(format!("the {what} size must be greater than zero"));
     }
+    let asked = picks;
     let picks = find_edges(lumps, tags, picks)?;
+    let points = asked.iter().zip(&picks).map(|(pick, found)| settled(&pick.points, |p| g(found.1.project(c(p)).0))).collect();
     let level = crate::tag::weakest(picks.iter().map(|p| p.2)).unwrap_or(Level::Tag);
     let mut out = Vec::new();
     for (i, lump) in lumps.iter().enumerate() {
@@ -839,7 +863,7 @@ pub fn blend(lumps: &[Solid], tags: &Tags, picks: &[EdgePick], size: f64, chamfe
     // Unselected lumps are exact deep copies, whose kernel history is empty.
     // Their traversal is unchanged, so preserve their existing identities.
     for i in 0..out.len() {if !picks.iter().any(|p|p.0==i) {out_tags[i]=tags[i].clone();}}
-    Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect() })
+    Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect(), points })
 }
 
 /// Hollows the body to a wall of `thickness`, open at the picked faces.
@@ -850,7 +874,9 @@ pub fn shell(lumps: &[Solid], tags: &Tags, picks: &[FacePick], thickness: f64, f
     if picks.is_empty() {
         return Err("choose at least one face to leave open".into());
     }
+    let asked = picks;
     let picks = find_faces(lumps, tags, picks)?;
+    let points = asked.iter().zip(&picks).map(|(pick, found)| settled(&pick.points, |p| g(found.1.project(c(p)).0))).collect();
     let level = crate::tag::weakest(picks.iter().map(|p| p.2)).unwrap_or(Level::Tag);
     let mut out = Vec::new();
     for (i, lump) in lumps.iter().enumerate() {
@@ -886,7 +912,7 @@ pub fn shell(lumps: &[Solid], tags: &Tags, picks: &[FacePick], thickness: f64, f
         found.sort();found.dedup();
         if found.len()==1 {out_tags[li][fi]=Some(Tag::new(Origin::Derived {feature,sources:found},kind_of(face)));}
     }}
-    Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect() })
+    Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect(), points })
 }
 
 /// What a drill and its countersink or counterbore take out, in millimetres and degrees.
@@ -1146,6 +1172,10 @@ pub fn edges_tagged(lumps: &[Solid], tags: &Tags) -> Vec<EdgeInfo> {
                 }
                 left -= d;
             }
+            // The polyline is an approximation; a curved edge passes some way from it.
+            // Put the point on the edge itself, so that a reference made from it can be
+            // told from another edge with the same tag by where it is.
+            let mid = g(e.project(c(mid)).0);
             Some(EdgeInfo { mid, length, straight: pts.len() == 2, tag })
         })
         .collect()

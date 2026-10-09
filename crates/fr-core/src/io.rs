@@ -55,6 +55,8 @@ pub struct Extras {
     pub app: Option<String>,
     /// The built geometry, which makes the file a container (see `cache`).
     pub cache: Option<crate::cache::Cache>,
+    /// Why a wanted cache was not captured, reported back in [`Saved`].
+    pub cache_skipped: Option<String>,
 }
 
 /// What opening a file yields: the design when this build can read it, the
@@ -83,6 +85,9 @@ pub struct Saved {
     pub cached_bodies: usize,
     /// Where the previous plain-JSON file was copied when this save converted it to a container.
     pub backup: Option<PathBuf>,
+    /// Why no geometry cache was written although the session wanted one: the design
+    /// rebuilds when opened. `None` when a cache was written or none was wanted.
+    pub cache_skipped: Option<String>,
 }
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
@@ -513,7 +518,7 @@ pub fn save_with(doc: &Document, path: &Path, extras: &Extras) -> Result<Saved, 
     let result = file.write_all(&bytes).and_then(|_| file.sync_all()).and_then(|_| std::fs::rename(&tmp, path));
     if result.is_err() { let _ = std::fs::remove_file(&tmp); }
     result.map_err(|e| format!("could not save {}: {e}", path.display()))?;
-    Ok(Saved { path: path.to_owned(), container, backup, cached_bodies: extras.cache.as_ref().map_or(0, |c| c.body_count()) })
+    Ok(Saved { path: path.to_owned(), container, backup, cached_bodies: extras.cache.as_ref().map_or(0, |c| c.body_count()), cache_skipped: extras.cache_skipped.clone() })
 }
 
 fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>, String> {
@@ -643,7 +648,7 @@ mod cache_trust_tests {
         crate::api::execute(&mut s, &json!({"op":"primitive", "type":"box", "width":width, "depth":10, "height":10}), None).unwrap();
         s
     }
-    fn extras(s: &Session) -> Extras { Extras { cache: Cache::capture(&s.doc, &s.built).unwrap(), ..Default::default() } }
+    fn extras(s: &Session) -> Extras { Extras { cache: Some(Cache::capture(&s.doc, &s.built).unwrap()), ..Default::default() } }
     fn rewrite(bytes: &[u8], edit: impl Fn(&str, Vec<u8>) -> Vec<u8>) -> Vec<u8> {
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         let mut out = ZipWriter::new(Cursor::new(Vec::new()));

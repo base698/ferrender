@@ -53,6 +53,15 @@ S5. **Over MCP and in a script.** `{"op":"sweep","sketch":PROFILE,"path_sketch":
 
 S6. **Parts of a path.** On the S1 sketches open Sweep. The **Along path** row shows a track with one bar across it and `from 0.00 to 1.00`. Drag the right handle left: the preview shortens from the far end and the bar follows; the path in the viewport is drawn faint with the covered stretch bold. Drag the left handle right: the solid now starts further along the path, and what remains of it stays exactly where it was. Type `0.10` and `0.30`, press **Add part**, and set the new part to `0.60` and `0.70`. Expect two separate pieces, one on each leg, 0.2 and 0.1 of the path long, in one body. Handles cannot cross each other or a neighbouring part. OK, then double-click the chip: the same two parts are shown. **Whole path** returns the full mitred bar. Over the API, `"spans": [[0.1,0.3],[0.6,0.7]]` on `sweep` or `edit_feature` gives the same body, and `"spans": [[0.5,0.2]]` is refused.
 
+## Large assemblies and references
+
+Added 9 October after the large-assembly evaluation. Lettered L so they do not collide with the numbered checks.
+
+L1. **Display changes do not rebuild.** Open a design that takes a few seconds to rebuild (the turtle, or a script-made grid of a few hundred boxes). Hide and show a body, a sketch, a plane and a component from the browser; activate another component and the root; rename a feature in the timeline; Undo and Redo through those steps. Each should take effect at once, with no progress bar and no rebuild time reported by `get_scene_info`'s `from_cache` flipping on a cached design. Then edit one dimension: that rebuilds as before, and Undo of it rebuilds too.
+L2. **A failed feature leaves everything else alone.** On a design with several bodies, add a hole that does not touch its body (expect the "does not touch" error on the feature). Every other body keeps its id, order in the browser, volume and placement; delete the hole and the design is as before.
+L3. **Fillet all after a patterned cut.** Make a torus, cut a thin box through its middle, then Fillet with every edge (over MCP, `"edges": "all"`). Expect every edge rounded with no error. Copy one edge's `point` from `get_object_info` and fillet it alone: expect the same edge, not an "ambiguous" refusal.
+L4. **The save says why there is no cache.** Thread a rod, then save with the cache requested (`"cache": true` over MCP, or a design slow enough to want one in the app). Expect no cache, with the reason in the save message or `cache_skipped`, and a normal rebuild on reopening. Save a quick plain design without requesting a cache: no message.
+
 ## Review regressions to verify before shipping
 
 19. **Classic king.** Open `king-classic-75mm.ferr` from `~/Documents/3d/ferrender/models/chess/king-75mm/`. Inspect the turned base, curved stem, twelve crown flutes and rounded cross. Change `king_height` from `75 mm` to `90 mm`, then Undo. Expect one intact body at each size, no feature errors, and no detached jewel. Export STL and reopen the saved design.

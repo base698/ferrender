@@ -962,6 +962,91 @@ pub struct Built {
     pub resolutions: BTreeMap<Id, Level>,
 }
 
+/// The body list while one feature is applied. Changes are journaled: a body is
+/// copied only when the feature first changes or removes it, so a feature that
+/// fails part-way can be undone without copying every body beforehand.
+pub(crate) struct Bodies {
+    list: Vec<Body>,
+    /// The ids before the feature, in order.
+    order: Vec<Id>,
+    /// Bodies as they were before the feature, taken at their first change or removal.
+    saved: BTreeMap<Id, Body>,
+}
+
+impl Bodies {
+    fn new(list: Vec<Body>) -> Self {
+        let order = list.iter().map(|b| b.id).collect();
+        Bodies { list, order, saved: BTreeMap::new() }
+    }
+
+    /// Keeps the feature's changes.
+    fn commit(self) -> Vec<Body> {
+        self.list
+    }
+
+    /// The list as it was before the feature: saved copies where one was taken,
+    /// the untouched bodies as they are, and nothing the feature added.
+    fn rollback(self) -> Vec<Body> {
+        let Bodies { list, order, mut saved } = self;
+        let mut current: BTreeMap<Id, Body> = list.into_iter().map(|b| (b.id, b)).collect();
+        order.iter().filter_map(|id| saved.remove(id).or_else(|| current.remove(id))).collect()
+    }
+
+    fn original(&self, id: Id) -> bool {
+        self.order.contains(&id) && !self.saved.contains_key(&id)
+    }
+
+    fn push(&mut self, body: Body) {
+        self.list.push(body);
+    }
+
+    fn remove(&mut self, i: usize) -> Body {
+        let id = self.list[i].id;
+        if self.original(id) {
+            self.saved.insert(id, self.list[i].clone());
+        }
+        self.list.remove(i)
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&Body) -> bool) {
+        let mut i = 0;
+        while i < self.list.len() {
+            if keep(&self.list[i]) {
+                i += 1;
+            } else {
+                let body = self.list.remove(i);
+                if self.original(body.id) {
+                    self.saved.insert(body.id, body);
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for Bodies {
+    type Target = [Body];
+    fn deref(&self) -> &[Body] {
+        &self.list
+    }
+}
+
+impl std::ops::Index<usize> for Bodies {
+    type Output = Body;
+    fn index(&self, i: usize) -> &Body {
+        &self.list[i]
+    }
+}
+
+impl std::ops::IndexMut<usize> for Bodies {
+    fn index_mut(&mut self, i: usize) -> &mut Body {
+        let id = self.list[i].id;
+        if self.original(id) {
+            self.saved.insert(id, self.list[i].clone());
+        }
+        &mut self.list[i]
+    }
+}
+
 impl Built {
     pub fn body(&self, id: Id) -> Option<&Body> {
         self.bodies.iter().find(|b| b.id == id)
@@ -1301,6 +1386,39 @@ impl Document {
         self.rebuild_with(None)
     }
 
+    /// Recomputes which components are shown, after a change that touched no geometry.
+    /// A component is shown when it and every ancestor are; the root is always shown.
+    pub fn refresh_visibility(&self, built: &mut Built) {
+        if let Some(root) = built.components.get_mut(&0) { root.visible = true; }
+        for f in self.features.iter().take(self.active()) {
+            let FeatureKind::Component(c) = &f.kind else { continue };
+            if !built.components.contains_key(&f.id) { continue; }
+            let shown = built.components.get(&f.owner).is_some_and(|parent| parent.visible) && c.visible;
+            built.components.get_mut(&f.id).unwrap().visible = shown;
+        }
+    }
+
+    /// Whether two documents build the same geometry: they differ at most in what is
+    /// shown, which component is active, and feature names.
+    pub fn same_geometry(&self, other: &Document) -> bool {
+        fn display_free(doc: &Document) -> Document {
+            let mut d = doc.clone();
+            d.active_component = 0;
+            d.hidden_bodies.clear();
+            for f in &mut d.features {
+                f.name.clear();
+                match &mut f.kind {
+                    FeatureKind::Component(c) => c.visible = true,
+                    FeatureKind::Sketch(s) => s.visible = true,
+                    FeatureKind::Plane(p) => { p.visible = true; p.visibility_pinned = false; }
+                    _ => {}
+                }
+            }
+            d
+        }
+        display_free(self) == display_free(other)
+    }
+
     /// [`rebuild`](Self::rebuild), taking the bodies and planes from a verified geometry
     /// cache when one is given: expressions, sketches and components are still evaluated,
     /// and the cached results stand in for every body-making step.
@@ -1433,18 +1551,21 @@ impl Document {
                 continue;
             }
             // A feature can touch several bodies or drill several holes. Publish
-            // its result only after all of those operations have succeeded.
-            let mut bodies = built.bodies.clone();
+            // its result only after all of those operations have succeeded: the
+            // journal copies a body only when the feature first changes it, so a
+            // long history does not copy every body for every feature.
+            let mut bodies = Bodies::new(std::mem::take(&mut built.bodies));
             let mut next_count = counts.get(&f.owner).copied().unwrap_or(0);
             match self.apply(&mut f, &mut bodies, &mut next_count, &built) {
                 Ok(level) => {
-                    built.bodies = bodies;
+                    built.bodies = bodies.commit();
                     counts.insert(f.owner,next_count);
                     if let Some(level) = level { built.resolutions.insert(f.id, level); }
                     // References learn the tags of what they found, so later rebuilds can find it by name.
                     if f != self.features[index] { self.features[index] = f; }
                 }
                 Err(e) => {
+                    built.bodies = bodies.rollback();
                     built.errors.insert(f.id, e);
                 }
             }
@@ -1477,7 +1598,7 @@ impl Document {
 
     /// Applies a feature to the bodies. `f` is the feature's own copy: references that
     /// resolved by position write the tags they found into it. Returns how its picks resolved.
-    fn apply(&self, f: &mut Feature, bodies: &mut Vec<Body>, count: &mut usize, context: &Built) -> Result<Option<Level>, String> {
+    fn apply(&self, f: &mut Feature, bodies: &mut Bodies, count: &mut usize, context: &Built) -> Result<Option<Level>, String> {
         let find = |bodies: &[Body], id: Id| bodies.iter().position(|b| b.id == id).ok_or("a body it used no longer exists".to_owned());
         const MESH_ONLY: &str = "this body is a mesh (imported, tapered, or combined with one); this operation needs an exact body made from a sketch, primitive or text";
         let id = f.id;
@@ -1493,7 +1614,7 @@ impl Document {
                 let index=find(bodies,split.body)?;
                 let component=bodies[index].component;
                 if component!=f.owner {return Err("the split must belong to its target body's component".into());}
-                let (plane,_,level)=self.plane_reference_mut(&mut split.plane,context,component)?;
+                let (plane,_,level)=self.plane_reference_mut_in(&mut split.plane,context,bodies,component)?;
                 let pieces=crate::body_ops::pieces(&bodies[index],plane)?;
                 let tags=exact::split_tags(&bodies[index].solids,&bodies[index].tags,&pieces,plane,id);
                 let mut pieces=pieces.into_iter().zip(tags);
@@ -1548,12 +1669,12 @@ impl Document {
                     MeshOpKind::Decimate { target, method, preserve_boundary } => mo::decimate_by(&src, *target as usize, *method, *preserve_boundary)?,
                     MeshOpKind::Smooth { iterations, strength } => mo::smooth(&src, *iterations, *strength, mask.as_deref())?,
                     MeshOpKind::Subdivide { levels, scheme } => mo::subdivide(&src, *levels, *scheme)?,
-                    MeshOpKind::Mirror { plane, weld } => { let (plane, _) = self.plane_reference(plane, context, component)?; mo::mirror(&src, plane, *weld)? }
+                    MeshOpKind::Mirror { plane, weld } => { let (plane, _) = self.plane_reference_in(plane, context, bodies, component)?; mo::mirror(&src, plane, *weld)? }
                     MeshOpKind::Offset { distance, direction } => mo::offset(&src, distance.v, *direction)?,
                     MeshOpKind::ExtrudeRegion { distance, direction } => mo::extrude_region(&src, mask.as_deref().ok_or("extruding a region needs a \"region\"")?, distance.v, *direction)?,
                     MeshOpKind::Sculpt { brush, at, radius, strength } => mo::sculpt(&src, *brush, *at, radius.v, strength.v)?,
                     MeshOpKind::Cut { plane, keep, cap } => {
-                        let (plane, _) = self.plane_reference(plane, context, component)?;
+                        let (plane, _) = self.plane_reference_in(plane, context, bodies, component)?;
                         let mut pieces = mo::cut(&src, plane, *keep, *cap)?.into_iter();
                         let first = pieces.next().ok_or("the cut left nothing")?;
                         for (k, piece) in pieces.enumerate() {
@@ -1630,7 +1751,9 @@ impl Document {
                 }
                 let picks: Vec<exact::EdgePick> = exact::candidates(&bodies[i].solids, &b.edges, b.frame).into_iter().enumerate().map(|(k, points)| exact::EdgePick { points, tag: b.tags.get(k).cloned().flatten() }).collect();
                 let made = exact::blend(&bodies[i].solids, &bodies[i].tags, &picks, b.size.v, b.chamfer, id)?;
-                if b.tags.len() != b.edges.len() || b.tags.iter().any(|t|t.as_ref().is_none_or(crate::tag::EdgeTag::legacy)) { b.tags = made.picked; }
+                // Learning a reference also moves its point onto the edge it found, so that a
+                // point from a click or a rounded report later tells the edge from another with the same tag.
+                if b.tags.len() != b.edges.len() || b.tags.iter().any(|t|t.as_ref().is_none_or(crate::tag::EdgeTag::legacy)) { b.tags = made.picked; b.edges = made.points; }
                 bodies[i].set_exact(made.lumps, made.tags)?;
                 Ok(Some(made.level))
             }
@@ -1641,7 +1764,7 @@ impl Document {
                 }
                 let picks: Vec<exact::FacePick> = exact::candidates(&bodies[i].solids, &sh.faces, sh.frame).into_iter().enumerate().map(|(k, points)| exact::FacePick { points, tag: sh.tags.get(k).cloned().flatten() }).collect();
                 let made = exact::shell(&bodies[i].solids, &bodies[i].tags, &picks, sh.thickness.v, id)?;
-                if sh.tags.len() != sh.faces.len() || sh.tags.iter().any(|t|t.as_ref().is_none_or(Tag::legacy)) { sh.tags = made.picked; }
+                if sh.tags.len() != sh.faces.len() || sh.tags.iter().any(|t|t.as_ref().is_none_or(Tag::legacy)) { sh.tags = made.picked; sh.faces = made.points; }
                 bodies[i].set_exact(made.lumps, made.tags)?;
                 Ok(Some(made.level))
             }
@@ -1811,7 +1934,7 @@ impl Document {
     }
 
     /// Adds a feature's shape to the bodies it touches, as its operation says.
-    fn merge(tool: Shape, op: Op, id: Id, component: Id, bodies: &mut Vec<Body>, count: &mut usize) -> Result<(), String> {
+    fn merge(tool: Shape, op: Op, id: Id, component: Id, bodies: &mut Bodies, count: &mut usize) -> Result<(), String> {
         let reach = tool.bbox();
         let hits: Vec<usize> = (0..bodies.len()).filter(|i| bodies[*i].component==component && overlap(bodies[*i].mesh.bbox(), reach)).collect();
         // Exact against exact stays exact; a mesh on either side makes the result a mesh.
@@ -1985,18 +2108,25 @@ impl Session {
 
     /// Drops the last undo step and returns to it, abandoning a change in progress.
     pub fn abort(&mut self) {
-        let Some(checkpoint) = self.checkpoint.take() else { return };
-        if let Some(d) = self.undo.pop() {
-            self.doc = d;
-            self.redo = checkpoint.redo;
-            self.dirty = checkpoint.dirty;
-            if let Some(evicted) = checkpoint.evicted {
-                self.undo.insert(0, evicted);
-            }
+        if self.restore_checkpoint() {
             // Revisions stay monotonic: a cancelled drag may already have been
             // drawn, and recovery/rendering must observe the restored document.
             self.rebuild();
         }
+    }
+
+    /// Puts the document back as it was at the last snapshot, without rebuilding.
+    /// False when there is no change in progress to abandon.
+    fn restore_checkpoint(&mut self) -> bool {
+        let Some(checkpoint) = self.checkpoint.take() else { return false };
+        let Some(d) = self.undo.pop() else { return false };
+        self.doc = d;
+        self.redo = checkpoint.redo;
+        self.dirty = checkpoint.dirty;
+        if let Some(evicted) = checkpoint.evicted {
+            self.undo.insert(0, evicted);
+        }
+        true
     }
 
     /// The document as it was at the last snapshot.
@@ -2061,6 +2191,34 @@ impl Session {
         Ok(v)
     }
 
+    /// Applies a change that cannot alter geometry (what is shown, the active component,
+    /// a name) as one undo step without rebuilding. The bodies stay as they are, component
+    /// visibility is refreshed from the document, and the revision goes up so views redraw.
+    pub fn edit_without_rebuild<T>(&mut self, f: impl FnOnce(&mut Document) -> Result<T, String>) -> Result<T, String> {
+        if self.read_only {
+            return Err("this design was written by a newer version of Ferrender and is shown read-only; update Ferrender to edit it".into());
+        }
+        self.snapshot();
+        match f(&mut self.doc) {
+            Ok(v) => {
+                self.refresh_display();
+                Ok(v)
+            }
+            Err(e) => {
+                if self.restore_checkpoint() {
+                    self.refresh_display();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// After a change to what is shown: the same bodies, under the document's current visibility.
+    fn refresh_display(&mut self) {
+        self.doc.refresh_visibility(&mut self.built);
+        self.rev += 1;
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -2072,19 +2230,32 @@ impl Session {
     pub fn undo(&mut self) -> bool {
         self.checkpoint = None;
         let Some(d) = self.undo.pop() else { return false };
+        let same_geometry = d.same_geometry(&self.doc);
         self.redo.push(std::mem::replace(&mut self.doc, d));
         self.dirty = true;
-        self.rebuild();
+        self.restore_built(same_geometry);
         true
     }
 
     pub fn redo(&mut self) -> bool {
         self.checkpoint = None;
         let Some(d) = self.redo.pop() else { return false };
+        let same_geometry = d.same_geometry(&self.doc);
         self.undo.push(std::mem::replace(&mut self.doc, d));
         self.dirty = true;
-        self.rebuild();
+        self.restore_built(same_geometry);
         true
+    }
+
+    /// Brings the built state to the document after an undo or redo: a step that
+    /// changed only what is shown keeps its bodies; anything else rebuilds.
+    fn restore_built(&mut self, same_geometry: bool) {
+        if same_geometry && !self.read_only {
+            self.edits += 1;
+            self.refresh_display();
+        } else {
+            self.rebuild();
+        }
     }
 
     /// Saves as plain JSON, or as a container with a rendered thumbnail when the
@@ -2098,14 +2269,24 @@ impl Session {
         if self.read_only {
             return Err("this design was written by a newer version of Ferrender and is shown read-only; it cannot be saved from here".into());
         }
-        let mut extras = crate::io::Extras { thumbnail_png: None, app, cache: None };
+        let mut extras = crate::io::Extras { thumbnail_png: None, app, cache: None, cache_skipped: None };
         let wants_cache = match self.cache_policy {
             CachePolicy::Always => true,
             CachePolicy::Never => false,
             CachePolicy::Auto => crate::io::needs_container(&self.doc) || self.rebuild_ms >= crate::cache::WORTH_CACHING_MS,
         };
-        if wants_cache && !self.built.bodies.is_empty() && !self.built.errors.keys().any(|id| self.doc.feature(*id).is_some_and(|f| !f.suppressed)) {
-            extras.cache = crate::cache::Cache::capture(&self.doc, &self.built)?;
+        if wants_cache {
+            if self.built.bodies.is_empty() {
+                extras.cache_skipped = Some("there are no bodies to cache".into());
+            } else if self.built.errors.keys().any(|id| self.doc.feature(*id).is_some_and(|f| !f.suppressed)) {
+                extras.cache_skipped = Some("the design has feature errors".into());
+            } else {
+                match crate::cache::Cache::capture(&self.doc, &self.built) {
+                    Ok(cache) => extras.cache = Some(cache),
+                    Err(crate::cache::NoCache::Skipped(reason)) => extras.cache_skipped = Some(reason),
+                    Err(crate::cache::NoCache::Failed(e)) => return Err(e),
+                }
+            }
         }
         if (crate::io::needs_container(&self.doc) || extras.cache.is_some()) && self.built.bodies.iter().map(|b| b.mesh.len()).sum::<usize>() <= crate::io::THUMBNAIL_MAX_TRIANGLES {
             let size = crate::io::THUMBNAIL_SIZE;

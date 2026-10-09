@@ -39,7 +39,7 @@ DOCUMENT
 {"op":"set_parameter","name":"width","expr":"40 mm"}
 {"op":"delete_parameter","name":"width"}
 {"op":"undo"} {"op":"redo"}
-{"op":"save","path":"/abs/part.ferr"} {"op":"open","path":"/abs/part.ferr"}   save takes "cache":true|false to force or skip the geometry cache (by default it is written when the file is a container or the design is slow to rebuild); open uses a matching locally authenticated cache; foreign/unsigned files rebuild. get_scene_info reports "from_cache" and "geometry_trust"; newer unsupported files are an "unverified_preview" and remain read-only
+{"op":"save","path":"/abs/part.ferr"} {"op":"open","path":"/abs/part.ferr"}   save takes "cache":true|false to request or skip the geometry cache (by default it is written when the file is a container or the design is slow to rebuild); when a wanted cache cannot be written (modeled threads, geometry over the 32 MiB cache limit, feature errors) the response says why in "cache_skipped" and the design rebuilds when opened; open uses a matching locally authenticated cache; foreign/unsigned files rebuild. get_scene_info reports "from_cache" and "geometry_trust"; newer unsupported files are an "unverified_preview" and remain read-only
    A design with reference images or imported meshes is saved as a ZIP container (same JSON inside plus the blobs and a thumbnail); plain designs stay plain JSON. save returns "container" and, when it converted an older plain file, "backup" with the path of the kept original. open reads both forms.
    In the GUI, new and open refuse to discard unsaved work. Save first or set "discard_unsaved":true on that command to explicitly discard it, including inside a batch.
 {"op":"export_stl","path":"/abs/part.stl","units":"mm"}   units default to mm, which is what slicers expect
@@ -189,6 +189,12 @@ pub const OPS: &[&str] = &[
     "mesh_measure", "mesh_repair", "mesh_decimate", "mesh_smooth", "mesh_subdivide", "mesh_cut", "mesh_mirror", "mesh_offset",
     "mesh_extrude_region", "mesh_sculpt", "mesh_from_image", "transform", "combine", "set_visible", "run_script", "script_meta", "add_feature",
 ];
+
+/// An `edit_feature` that gives a name and nothing else.
+fn renames_only(c: &J) -> bool {
+    let keys = ["op", "feature", "name"];
+    c["name"].is_string() && c.as_object().is_some_and(|o| o.iter().all(|(k, v)| keys.contains(&k.as_str()) || v.is_null()))
+}
 
 fn id_of(c: &J, key: &str) -> R<Id> {
     c[key].as_u64().and_then(|v| Id::try_from(v).ok()).ok_or(format!("\"{key}\" should be an id"))
@@ -436,8 +442,11 @@ fn edge_picks(s: &Session, body: Id, v: &J, key: &str) -> R<(Vec<DVec3>, Vec<Opt
             let a = item.as_array().filter(|a| a.len() == 3).ok_or_else(|| format!("\"{key}\" entries must be [x,y,z] or {{\"tag\":...}}"))?;
             let u = s.doc.units.mm();
             let p = DVec3::new(a[0].as_f64().ok_or("bad coordinate")? * u, a[1].as_f64().ok_or("bad coordinate")? * u, a[2].as_f64().ok_or("bad coordinate")? * u);
-            tags.push(exact::edge_tag_at(&b.solids, &b.tags, b.to_local(p)));
-            points.push(p);
+            // The point is kept on the edge it names, so that it can be told from another edge with the same tag.
+            match exact::edge_at(&b.solids, &b.tags, b.to_local(p)) {
+                Some((on, tag)) => { tags.push(tag); points.push(b.placement.transform_point3(on)); }
+                None => { tags.push(None); points.push(p); }
+            }
         }
     }
     Ok((points, tags))
@@ -459,8 +468,10 @@ fn face_picks(s: &Session, body: Id, v: &J, key: &str) -> R<(Vec<DVec3>, Vec<Opt
             let a = item.as_array().filter(|a| a.len() == 3).ok_or_else(|| format!("\"{key}\" entries must be [x,y,z] or {{\"tag\":...}}"))?;
             let u = s.doc.units.mm();
             let p = DVec3::new(a[0].as_f64().ok_or("bad coordinate")? * u, a[1].as_f64().ok_or("bad coordinate")? * u, a[2].as_f64().ok_or("bad coordinate")? * u);
-            tags.push(exact::face_tag_at(&b.solids, &b.tags, b.to_local(p)));
-            points.push(p);
+            match exact::face_at(&b.solids, &b.tags, b.to_local(p)) {
+                Some((on, tag)) => { tags.push(tag); points.push(b.placement.transform_point3(on)); }
+                None => { tags.push(None); points.push(p); }
+            }
         }
     }
     Ok((points, tags))
@@ -1076,6 +1087,9 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             if let Some(backup) = saved.backup {
                 out["backup"] = json!(backup.display().to_string());
             }
+            if let Some(reason) = saved.cache_skipped {
+                out["cache_skipped"] = json!(reason);
+            }
             Ok(out)
         }
         "export_stl" => {
@@ -1399,7 +1413,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         }
         "activate_component" => {
             let id=if c["id"].is_null() {0} else {id_of(c,"id")?};
-            s.edit(|d|d.activate_component(id))?;
+            s.edit_without_rebuild(|d|d.activate_component(id))?;
             Ok(json!({"active_component":id}))
         }
         "move_component" => {
@@ -1745,6 +1759,16 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 Ok(json!({"new": made, "degrees_of_freedom": report.dof}))
             })
         }
+        // A new name alone changes no geometry, so it does not rebuild.
+        "edit_feature" if renames_only(c) => {
+            let id = id_of(c, "feature")?;
+            let name = c["name"].as_str().unwrap_or_default().to_owned();
+            s.edit_without_rebuild(|d| {
+                d.feature_mut(id).ok_or(format!("there is no feature {id}"))?.name = name;
+                Ok(())
+            })?;
+            feature_info(s, id)
+        }
         "edit_feature" => {
             if !c["owner"].is_null() {return Err("moving features between components is not supported; activate a component before creating features".into());}
             let id = id_of(c, "feature")?;
@@ -2079,7 +2103,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             if s.doc.sketch(id).is_none() && s.built.body(id).is_none() && !matches!(s.doc.feature(id).map(|f|&f.kind),Some(FeatureKind::Plane(_) | FeatureKind::Component(_))) {
                 return Err(format!("{id} is not a sketch, plane, component, or body"));
             }
-            s.edit(|d| {
+            s.edit_without_rebuild(|d| {
                 if let Some(sk) = d.sketch_mut(id) {
                     sk.visible = visible;
                 } else if let Some(FeatureKind::Plane(p))=d.feature_mut(id).map(|f|&mut f.kind) {

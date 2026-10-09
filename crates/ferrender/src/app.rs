@@ -1924,10 +1924,14 @@ impl App {
         match self.session.save_as(path, Some(crate::build_info::summary().lines().next().unwrap_or("Ferrender").to_owned())) {
             Ok(saved) => {
                 self.file_error = None;
-                match saved.backup {
-                    Some(backup) => self.toast(format!("Saved {} in the 0.4 format. The previous file was kept as {}", path.display(), backup.display())),
-                    None => self.toast(format!("Saved {}", path.display())),
+                let mut message = match saved.backup {
+                    Some(backup) => format!("Saved {} in the 0.4 format. The previous file was kept as {}", path.display(), backup.display()),
+                    None => format!("Saved {}", path.display()),
+                };
+                if let Some(reason) = &saved.cache_skipped {
+                    message.push_str(&format!(". No geometry cache was written ({reason}), so the design will rebuild when opened"));
                 }
+                self.toast(message);
                 self.remember_document();
             }
             Err(e) => self.file_error("Could not save design", path, e, "Your changes are still in memory. Save again to keep them."),

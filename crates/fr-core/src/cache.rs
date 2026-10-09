@@ -106,12 +106,21 @@ fn body_volume(b: &Body) -> f64 {
     if b.is_exact() { b.solids.iter().map(|s| s.volume()).sum() } else { b.mesh.volume() }
 }
 
+/// Why a save wrote no geometry cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoCache {
+    /// This design is not cached, for the reason given; the save itself is fine.
+    Skipped(String),
+    /// The kernel could not write the shapes.
+    Failed(String),
+}
+
 impl Cache {
-    /// Captures the built geometry. `None` when something cannot be cached:
+    /// Captures the built geometry. `Skipped` when something cannot be cached:
     /// a body with modeled threads (their meshes are not stored) or a cache over the size limit.
-    pub fn capture(doc: &Document, built: &Built) -> Result<Option<Cache>, String> {
+    pub fn capture(doc: &Document, built: &Built) -> Result<Cache, NoCache> {
         if built.bodies.iter().any(|b| !b.threads.is_empty()) {
-            return Ok(None);
+            return Err(NoCache::Skipped("a body has modeled threads, whose shapes are not cached".into()));
         }
         let mut blobs = HashMap::new();
         let mut total = 0usize;
@@ -121,7 +130,7 @@ impl Cache {
             let (mut brep, mut mesh) = (None, None);
             if b.is_exact() {
                 let mut out = Vec::new();
-                cadrum::Solid::write_brep(b.solids.iter(), &mut out).map_err(|e| format!("the kernel could not write the cache: {e}"))?;
+                cadrum::Solid::write_brep(b.solids.iter(), &mut out).map_err(|e| NoCache::Failed(format!("the kernel could not write the cache: {e}")))?;
                 total += out.len();
                 let name = format!("cache/{}.brep", b.id);
                 blobs.insert(name.clone(), out);
@@ -134,13 +143,13 @@ impl Cache {
                 mesh = Some(name);
             }
             if total > MAX_CACHE_BYTES {
-                return Ok(None);
+                return Err(NoCache::Skipped(format!("the geometry is over the {} MiB cache limit", MAX_CACHE_BYTES >> 20)));
             }
             bodies.push(BodyEntry { id: b.id, name: b.name.clone(), component: b.component, placement: b.placement, local_bounds: b.local_bounds, volume: body_volume(b), bounds: [lo, hi], triangles: b.mesh.len(), tags: b.tags.clone(), brep, mesh });
         }
         let planes = built.planes.iter().map(|(id, p)| PlaneEntry { id: *id, component: p.component, plane: p.plane, corners: p.corners }).collect();
         let index = Index { design_crc: design_crc(doc), kernel: KERNEL.into(), geometry_revision: GEOMETRY_REVISION, bodies, planes, errors: built.errors.clone(), resolutions: built.resolutions.clone() };
-        Ok(Some(Cache { index, blobs, trusted: true }))
+        Ok(Cache { index, blobs, trusted: true })
     }
 
     /// Whether this cache was made from exactly this design by this kernel and

@@ -150,7 +150,17 @@ fn cli(args: &[String]) -> i32 {
                 if !same { failed += 1; }
             }
             if flag("--save") && !s.read_only {
-                match s.save(&path) { Ok(saved) => println!("  saved{}", if saved.cached_bodies > 0 { format!(" with {} cached bodies", saved.cached_bodies) } else { String::new() }), Err(e) => { eprintln!("  could not save: {e}"); failed += 1; } }
+                match s.save(&path) {
+                    Ok(saved) => {
+                        let cache = match (saved.cached_bodies, &saved.cache_skipped) {
+                            (n, _) if n > 0 => format!(" with {n} cached bodies"),
+                            (_, Some(reason)) => format!(" without a geometry cache ({reason})"),
+                            _ => String::new(),
+                        };
+                        println!("  saved{cache}");
+                    }
+                    Err(e) => { eprintln!("  could not save: {e}"); failed += 1; }
+                }
             }
         }
         return if failed > 0 { 1 } else { 0 };

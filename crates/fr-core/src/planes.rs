@@ -136,16 +136,27 @@ pub fn face_tagged(body: &Body, at: DVec3, frame: Option<[DVec3;2]>, tag: Option
 
 impl Document {
     pub fn plane_reference(&self, reference: &PlaneRef, built: &Built, owner:Id) -> Result<(Plane,Vec<DVec3>),String> {
-        let mut copy=reference.clone();
-        self.plane_reference_mut(&mut copy,built,owner).map(|r|(r.0,r.1))
+        self.plane_reference_in(reference,built,&built.bodies,owner)
     }
 
     /// [`plane_reference`](Self::plane_reference) that lets a face reference learn the tag of the face it found.
     pub fn plane_reference_mut(&self, reference: &mut PlaneRef, built: &Built, owner:Id) -> Result<(Plane,Vec<DVec3>,Option<crate::tag::Level>),String> {
+        self.plane_reference_mut_in(reference,built,&built.bodies,owner)
+    }
+
+    /// [`plane_reference`](Self::plane_reference) with the bodies given separately: while a
+    /// feature is applied they are held apart from `built`.
+    pub fn plane_reference_in(&self, reference: &PlaneRef, built: &Built, bodies: &[crate::doc::Body], owner:Id) -> Result<(Plane,Vec<DVec3>),String> {
+        let mut copy=reference.clone();
+        self.plane_reference_mut_in(&mut copy,built,bodies,owner).map(|r|(r.0,r.1))
+    }
+
+    /// [`plane_reference_mut`](Self::plane_reference_mut) with the bodies given separately.
+    pub fn plane_reference_mut_in(&self, reference: &mut PlaneRef, built: &Built, bodies: &[crate::doc::Body], owner:Id) -> Result<(Plane,Vec<DVec3>,Option<crate::tag::Level>),String> {
         match reference {
             PlaneRef::Origin(origin) => {
                 let mut points=Vec::new();
-                for body in &built.bodies {
+                for body in bodies {
                     let t=built.component_placement(owner).inverse()*if built.placements_applied {glam::DAffine3::IDENTITY} else {built.component_placement(body.component)};
                     points.extend(bounds_points(body).into_iter().map(|p|t.transform_point3(p)));
                 }
@@ -158,7 +169,7 @@ impl Document {
             })
                 .ok_or_else(||format!("plane {id} is missing, rolled back, suppressed, or comes later in the timeline")),
             PlaneRef::Face {body,at,frame,tag} => {
-                let body=built.body(*body).ok_or("a body it used no longer exists")?;
+                let body=bodies.iter().find(|b|b.id==*body).ok_or("a body it used no longer exists")?;
                 let local=if built.placements_applied {std::borrow::Cow::Owned(body.local_copy()?)} else {std::borrow::Cow::Borrowed(body)};
                 let (f,found,level)=face_tagged(&local,*at,*frame,tag.as_ref())?;
                 if tag.as_ref().is_none_or(crate::tag::Tag::legacy) { *tag=found; }

@@ -58,7 +58,7 @@ impl App {
         self.finish_sketch();
         self.cancel_tool();
         self.dialog = Dialog::None;
-        match self.session.edit(|doc| doc.activate_component(id)) {
+        match self.session.edit_without_rebuild(|doc| doc.activate_component(id)) {
             Ok(()) => { self.sel_component = Some(id); self.sel_body = None; self.sel_face = None; self.refresh(); }
             Err(error) => self.toast(error),
         }
