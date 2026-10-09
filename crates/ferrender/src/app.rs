@@ -118,6 +118,8 @@ pub struct SweepDlg {
     pub path_sketch: Option<Id>,
     /// The entities to follow; empty means the whole sketch.
     pub path: Vec<Id>,
+    /// The parts of the path to sweep, as fractions of its length; empty means all of it.
+    pub spans: Vec<[f64; 2]>,
     pub orient: SweepOrient,
 }
 
@@ -492,7 +494,7 @@ impl Dialog {
                 let kind = if let Some(w) = &f.sweep {
                     let path_sketch = w.path_sketch.ok_or("Click a line or curve of the path, drawn in another sketch.")?;
                     if path_sketch == sketch { return Err("The profile and the path must be in different sketches.".into()); }
-                    FeatureKind::Sweep(Sweep { sketch, profiles: f.profiles.clone(), path_sketch, path: w.path.clone(), orient: w.orient, op: f.op })
+                    FeatureKind::Sweep(Sweep { sketch, profiles: f.profiles.clone(), path_sketch, path: w.path.clone(), spans: w.spans.clone(), orient: w.orient, op: f.op })
                 } else if f.revolve {
                     FeatureKind::Revolve(Revolve { sketch, profiles: f.profiles.clone(), axis: f.axis, angle: d.enter(&f.text, Kind::Angle)?, op: f.op })
                 } else {
@@ -1604,7 +1606,7 @@ impl App {
             }
             FeatureKind::Sweep(w) => {
                 self.finish_sketch();
-                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch: Some(w.path_sketch), path: w.path.clone(), orient: w.orient }), editing: Some(id), sketch: Some(w.sketch), profiles: w.profiles.clone(), text: String::new(), symmetric: false, op: w.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch: Some(w.path_sketch), path: w.path.clone(), spans: w.spans.clone(), orient: w.orient }), editing: Some(id), sketch: Some(w.sketch), profiles: w.profiles.clone(), text: String::new(), symmetric: false, op: w.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
             }
             FeatureKind::Revolve(r) => {
                 self.finish_sketch();
@@ -1636,7 +1638,7 @@ impl App {
         if let Some(id) = sketch && let [only] = closed(&id).as_slice() { profiles.push(only.edges.clone()); }
         let path_sketch = visible.iter().rev().copied().find(|id| Some(*id) != sketch && fr_core::profile::chain(doc.sketch(*id).unwrap(), &[]).is_ok());
         let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
-        self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch, path: Vec::new(), orient: SweepOrient::Follow }), editing: None, sketch, profiles, text: String::new(), symmetric: false, op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
+        self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch, path: Vec::new(), spans: Vec::new(), orient: SweepOrient::Follow }), editing: None, sketch, profiles, text: String::new(), symmetric: false, op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
     }
 
     fn open_feature_dialog(&mut self, revolve: bool) {

@@ -264,6 +264,84 @@ fn line_tool_constraints_and_revolve() {
 }
 
 #[test]
+fn sweep_covers_the_parts_of_its_path_set_in_the_dialog() {
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    let newest = |h: &H| h.state().doc().sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let path = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": path, "items": [{"type": "polyline", "points": [[0, 0], [50, 0], [50, 50]]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "YZ"}));
+    let profile = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": profile, "items": [{"type": "rect", "from": [-3, -3], "to": [3, 3]}]}));
+    h.state_mut().fit();
+    h.run_steps(3);
+    run(&mut h, Action::Sweep);
+    let sweep_of = |h: &H| match &h.state().dialog { Dialog::Feature(f) => f.sweep.clone().expect("the sweep dialog"), other => panic!("the sweep dialog should be open, not {other:?}") };
+    assert!(sweep_of(&h).spans.is_empty(), "a new sweep follows the whole path");
+    h.run_steps(2);
+    // The control is there, shows the whole path as one part and cannot add another yet.
+    h.get_by_label("Along path");
+    h.get_by_label("Add part");
+    let whole_volume = { let p = h.state().preview.as_ref().expect("a preview"); assert_eq!(p.2, None); p.1.bodies[0].solids.iter().map(|s| s.volume()).sum::<f64>() };
+    assert!((whole_volume - 36.0 * 100.0).abs() < 1e-6, "{whole_volume}");
+    // Drag the end handle of the only part from the right end of the track to its middle.
+    let track = h.get_by_label("Add part").rect();
+    // The track sits above the numbers row, which sits above the buttons; find its handle by trying the row heights.
+    let (left, width) = (track.left() + 6.0, 218.0);
+    let mut dragged = false;
+    for up in [38.0, 44.0, 50.0, 56.0, 62.0, 68.0] {
+        let y = track.top() - up;
+        drag(&mut h, &[egui::pos2(left + width, y), egui::pos2(left + width * 0.75, y), egui::pos2(left + width * 0.5, y)]);
+        h.run_steps(2);
+        if !sweep_of(&h).spans.is_empty() { dragged = true; break; }
+    }
+    assert!(dragged, "dragging the end handle shortens the part");
+    let spans = sweep_of(&h).spans;
+    assert_eq!(spans.len(), 1);
+    assert!(spans[0][0] == 0.0 && (spans[0][1] - 0.5).abs() < 0.03, "the part now ends about half way: {spans:?}");
+    // Set it to exactly the first 30 mm, then add a part with the button: it lands in the uncovered rest.
+    if let Dialog::Feature(f) = &mut h.state_mut().dialog { f.sweep.as_mut().unwrap().spans = vec![[0.1, 0.3]]; }
+    h.run_steps(2);
+    h.get_by_label("Add part").click();
+    h.run_steps(3);
+    let spans = sweep_of(&h).spans;
+    assert_eq!(spans.len(), 2, "{spans:?}");
+    assert!(spans[1][0] > 0.3 && spans[1][1] <= 1.0);
+    // The exact request: 0.1 to 0.3 and 0.6 to 0.7.
+    if let Dialog::Feature(f) = &mut h.state_mut().dialog { f.sweep.as_mut().unwrap().spans = vec![[0.1, 0.3], [0.6, 0.7]]; }
+    h.run_steps(3);
+    let preview = h.state().preview.as_ref().expect("the dialog previews the parts");
+    assert_eq!(preview.2, None, "the preview builds");
+    assert_eq!(preview.1.bodies[0].solids.len(), 2, "two separate pieces");
+    save(&mut h, "sweep-parts-dialog.png");
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None, "the sweep should apply cleanly");
+    let app = h.state();
+    let body = &app.session.built.bodies[0];
+    let volume: f64 = body.solids.iter().map(|s| s.volume()).sum();
+    // 100 mm of path: 20 mm on the first leg and 10 mm on the second.
+    assert!((volume - 36.0 * 30.0).abs() < 1e-6, "{volume}");
+    assert_eq!(body.mesh.open_edges(), 0);
+    let id = app.doc().features.last().unwrap().id;
+    let fr_core::FeatureKind::Sweep(w) = &app.doc().features.last().unwrap().kind else { panic!("a sweep") };
+    assert_eq!(w.spans, vec![[0.1, 0.3], [0.6, 0.7]]);
+    h.state_mut().fit();
+    save(&mut h, "sweep-parts.png");
+    // Editing shows the parts again; Whole path clears them.
+    h.state_mut().edit_feature(id);
+    assert_eq!(sweep_of(&h).spans, vec![[0.1, 0.3], [0.6, 0.7]]);
+    h.run_steps(2);
+    h.get_by_label("Whole path").click();
+    h.run_steps(3);
+    assert!(sweep_of(&h).spans.is_empty());
+    h.state_mut().apply_dialog();
+    let volume: f64 = h.state().session.built.bodies[0].solids.iter().map(|s| s.volume()).sum();
+    assert!((volume - 3600.0).abs() < 1e-6, "{volume}");
+}
+
+#[test]
 fn sweep_picks_its_profile_and_path_previews_and_edits() {
     let mut h = harness();
     let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));

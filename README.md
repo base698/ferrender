@@ -378,7 +378,12 @@ of a sketch. Pieces that meet tangentially are followed exactly. A sharp
 corner is mitred, as on a picture frame, and may turn by up to 150 degrees. A
 closed path gives a ring or a frame. The profile may sit anywhere along the
 path and off to one side of it. Follow path turns the profile with the path;
-Fixed keeps the orientation it was drawn in. A sweep is refused with the
+Fixed keeps the orientation it was drawn in. Along path limits the sweep to
+parts of the path: drag the handles on the track, or type the fractions, where
+0 is the start of the path and 1 its end. Add part sweeps another stretch as
+well, so 0.1 to 0.3 and 0.6 to 0.7 gives two separate pieces in one body. Each
+piece is the part of the whole sweep that lies there, so shortening a sweep
+never moves what is left. Parts that touch or overlap are joined. A sweep is refused with the
 reason when a bend is tighter than the profile reaches on its inside, when a
 stretch between two corners is too short for the mitres, or when the kernel's
 result does not have the volume the sweep must have. The path must lie in one

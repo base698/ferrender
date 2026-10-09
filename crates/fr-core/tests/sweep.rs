@@ -263,3 +263,52 @@ fn run(inputs) {
     assert!((volume(&s) - std::f64::consts::PI * 40.0).abs() < 0.5, "{}", volume(&s));
     assert!((volume(&s) - area * 40.0).abs() < 0.05 * area * 40.0);
 }
+
+#[test]
+fn a_sweep_can_cover_only_parts_of_its_path() {
+    let mut s = Session::default();
+    let (profile, path) = frame(&mut s, json!([[0, 0], [10, 0], [10, 10]]), false);
+    // 0.1 to 0.3 and 0.6 to 0.7 of the 20 mm path: 4 mm on the first leg and 2 mm on the second.
+    let id = cmd(&mut s, json!({"op": "sweep", "sketch": profile, "path_sketch": path, "spans": [[0.1, 0.3], [0.6, 0.7]]}))["feature"].as_u64().unwrap() as Id;
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    assert_eq!(s.built.bodies.len(), 1, "the pieces are one body");
+    assert_eq!(s.built.bodies[0].solids.len(), 2, "of two separate lumps");
+    close(volume(&s), 4.0 * 6.0);
+    let info = cmd(&mut s, json!({"op": "get_object_info", "id": id}));
+    assert_eq!(info["spans"], json!([[0.1, 0.3], [0.6, 0.7]]));
+    // Editing: the second half, then the whole path again.
+    cmd(&mut s, json!({"op": "edit_feature", "feature": id, "spans": [[0.5, 1.0]]}));
+    close(volume(&s), 4.0 * 10.0);
+    let (lo, hi) = s.built.bodies[0].mesh.bbox().unwrap();
+    assert!((lo.y - 0.0).abs() < 1e-6 && (hi.y - 10.0).abs() < 1e-6 && (lo.x - 9.0).abs() < 1e-6, "the second leg only: {lo:?} {hi:?}");
+    cmd(&mut s, json!({"op": "edit_feature", "feature": id, "spans": []}));
+    close(volume(&s), 80.0);
+    assert_eq!(cmd(&mut s, json!({"op": "get_object_info", "id": id}))["spans"], json!([]));
+    // Bad parts are refused and change nothing.
+    for bad in [json!([[0.5, 0.2]]), json!([[0.0, 2.0]]), json!([0.1, 0.3]), json!("half"), json!([[0.1]])] {
+        let err = execute(&mut s, &json!({"op": "edit_feature", "feature": id, "spans": bad}), None).unwrap_err();
+        assert!(err.contains("fraction") || err.contains("after its start"), "{bad}: {err}");
+        close(volume(&s), 80.0);
+    }
+    // Saved only when there are parts, so a whole-path sweep's file is as it was before parts existed.
+    let dir = std::env::temp_dir().join(format!("ferrender-sweep-spans-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    s.save(&dir.join("whole.ferr")).unwrap();
+    assert!(!std::fs::read_to_string(dir.join("whole.ferr")).unwrap().contains("spans"));
+    cmd(&mut s, json!({"op": "edit_feature", "feature": id, "spans": [[0.1, 0.3], [0.6, 0.7]]}));
+    s.save(&dir.join("parts.ferr")).unwrap();
+    assert!(std::fs::read_to_string(dir.join("parts.ferr")).unwrap().contains("spans"));
+    let reopened = Session::open(&dir.join("parts.ferr")).unwrap();
+    assert_eq!(reopened.doc, s.doc);
+    close(volume(&reopened), 24.0);
+    // A fillet on one piece keeps its edge when the other piece is resized.
+    let fillet = cmd(&mut s, json!({"op": "fillet_edges", "body": id, "edges": [[3, -1, 1]], "radius": 0.3}))["feature"].as_u64().unwrap() as Id;
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    let filleted = volume(&s);
+    assert!(filleted < 24.0 && filleted > 23.9, "{filleted}");
+    cmd(&mut s, json!({"op": "edit_feature", "feature": id, "spans": [[0.1, 0.3], [0.6, 0.9]]}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    assert_eq!(cmd(&mut s, json!({"op": "get_object_info", "id": fillet}))["resolved"], "tag");
+    assert!((volume(&s) - (filleted + 4.0 * 4.0)).abs() < 1e-6, "the fillet is still on the first piece: {}", volume(&s));
+}

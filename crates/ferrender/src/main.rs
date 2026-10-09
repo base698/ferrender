@@ -21,6 +21,7 @@ mod macos_open;
 mod panels;
 mod recovery;
 mod scripts_ui;
+mod sweep_ui;
 mod recent;
 mod reference;
 mod reference_drag;

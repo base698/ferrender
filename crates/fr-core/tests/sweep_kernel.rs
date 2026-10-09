@@ -28,10 +28,15 @@ fn polyline(points: &[(f64, f64)]) -> Sketch {
 }
 
 fn run(profile: &(Sketch, Plane), path: &Sketch, follow: bool) -> Result<(Lumps, Vec<Profile>, Chain), String> {
+    run_spans(profile, path, follow, &[])
+}
+
+/// Sweeps only the given parts of the path.
+fn run_spans(profile: &(Sketch, Plane), path: &Sketch, follow: bool, spans: &[[f64; 2]]) -> Result<(Lumps, Vec<Profile>, Chain), String> {
     let all = profile::profiles(&profile.0);
     let chain = profile::chain(path, &[])?;
     let picked: Vec<&Profile> = all.iter().filter(|p| p.depth == 0).collect();
-    let lumps = exact::sweep(&picked, &profile.1, &chain, &path.plane, follow)?;
+    let lumps = exact::sweep(&picked, &profile.1, &chain, &path.plane, follow, spans)?;
     Ok((lumps, all, chain))
 }
 
@@ -226,7 +231,7 @@ fn faces_are_named_by_the_profile_and_path_entities_that_made_them() {
     let path = polyline(&[(0.0, 0.0), (10.0, 0.0)]);
     let (l, all, chain) = run(&profile, &path, true).unwrap();
     let picked: Vec<&Profile> = all.iter().collect();
-    let tags = exact::tag_swept(&l, &picked, &profile.1, &chain, &path.plane, true, 7);
+    let tags = exact::tag_swept(&l, &picked, &profile.1, &chain, &path.plane, true, &[], 7);
     let origins: Vec<&Origin> = tags[0].iter().map(|t| &t.as_ref().unwrap().origin).collect();
     assert_eq!(origins.iter().filter(|o| matches!(o, Origin::Swept { feature: 7, .. })).count(), 4);
     assert_eq!(origins.iter().filter(|o| matches!(o, Origin::ProfileCap { feature: 7, end: false, .. })).count(), 1);
@@ -236,7 +241,7 @@ fn faces_are_named_by_the_profile_and_path_entities_that_made_them() {
     let path = polyline(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]);
     let (l, all, chain) = run(&profile, &path, true).unwrap();
     let picked: Vec<&Profile> = all.iter().collect();
-    let tags = exact::tag_swept(&l, &picked, &profile.1, &chain, &path.plane, true, 7);
+    let tags = exact::tag_swept(&l, &picked, &profile.1, &chain, &path.plane, true, &[], 7);
     assert_eq!(tags[0].len(), 8);
     let mut roles: Vec<String> = tags[0].iter().filter_map(|t| match &t.as_ref().unwrap().origin { Origin::Semantic { role, .. } => Some(role.clone()), _ => None }).collect();
     assert_eq!(roles.len(), 4, "{:?}", tags[0]);
@@ -251,4 +256,178 @@ fn faces_are_named_by_the_profile_and_path_entities_that_made_them() {
     all_tags.sort();
     all_tags.dedup();
     assert_eq!(all_tags.len(), 8, "every face of the sweep has a distinct tag");
+}
+
+/// Each lump's bounds, sorted along X then Y.
+fn boxes(l: &Lumps) -> Vec<(DVec3, DVec3)> {
+    let mut b: Vec<(DVec3, DVec3)> = l.iter().map(|s| exact::bounds(std::slice::from_ref(s)).unwrap()).collect();
+    b.sort_by(|a, b| (a.0.x, a.0.y).partial_cmp(&(b.0.x, b.0.y)).unwrap());
+    b
+}
+
+#[test]
+fn parts_of_a_straight_path() {
+    let profile = square(0.0, 0.0, 0.0, 1.0);
+    let path = polyline(&[(0.0, 0.0), (10.0, 0.0)]);
+    // 0.1 to 0.3 and 0.6 to 0.7 of a 10 mm path: 2 mm and 1 mm of bar.
+    let (l, ..) = run_spans(&profile, &path, true, &[[0.1, 0.3], [0.6, 0.7]]).unwrap();
+    assert_eq!(l.len(), 2, "two separate pieces");
+    close(volume(&l), 4.0 * 3.0);
+    let b = boxes(&l);
+    near(b[0].0, (1.0, -1.0, -1.0));
+    near(b[0].1, (3.0, 1.0, 1.0));
+    near(b[1].0, (6.0, -1.0, -1.0));
+    near(b[1].1, (7.0, 1.0, 1.0));
+    // Only the start, only the end.
+    let (l, ..) = run_spans(&profile, &path, true, &[[0.0, 0.25]]).unwrap();
+    near(bounds(&l).1, (2.5, 1.0, 1.0));
+    let (l, ..) = run_spans(&profile, &path, true, &[[0.75, 1.0]]).unwrap();
+    near(bounds(&l).0, (7.5, -1.0, -1.0));
+    close(volume(&l), 10.0);
+    // The order they are given in does not matter, and a fixed orientation cuts the same pieces here.
+    let (l, ..) = run_spans(&profile, &path, false, &[[0.6, 0.7], [0.1, 0.3]]).unwrap();
+    assert_eq!(l.len(), 2);
+    close(volume(&l), 12.0);
+}
+
+#[test]
+fn parts_are_joined_checked_and_the_whole_path_is_unchanged() {
+    let profile = square(0.0, 0.0, 0.0, 1.0);
+    let path = polyline(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]);
+    let whole = run(&profile, &path, true).unwrap().0;
+    // Nothing, and all of it, are the whole path.
+    for spans in [&[][..], &[[0.0, 1.0]][..], &[[0.0, 0.4], [0.4, 1.0]][..], &[[0.0, 0.7], [0.3, 1.0]][..]] {
+        let (l, ..) = run_spans(&profile, &path, true, spans).unwrap();
+        assert_eq!(l.len(), 1);
+        close(volume(&l), volume(&whole));
+    }
+    // Touching and overlapping parts are one part.
+    assert_eq!(exact::sweep_spans(&[[0.1, 0.3], [0.3, 0.5]]).unwrap(), vec![Some((0.1, 0.5))]);
+    assert_eq!(exact::sweep_spans(&[[0.4, 0.9], [0.1, 0.5]]).unwrap(), vec![Some((0.1, 0.9))]);
+    assert_eq!(exact::sweep_spans(&[]).unwrap(), vec![None]);
+    assert_eq!(exact::sweep_spans(&[[0.0, 1.0]]).unwrap(), vec![None]);
+    // Refusals.
+    for bad in [[0.5, 0.2], [0.3, 0.3], [-0.5, 0.5], [0.5, 1.5], [f64::NAN, 0.5]] {
+        assert!(exact::sweep_spans(&[bad]).is_err(), "{bad:?}");
+        assert!(run_spans(&profile, &path, true, &[bad]).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_part_beyond_a_corner_is_where_the_whole_sweep_would_be() {
+    let path = polyline(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]);
+    // 0.6 to 0.9 of 20 mm is y = 2 to 8 on the second leg. The profile was drawn at the start of the first.
+    let (l, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &path, true, &[[0.6, 0.9]]).unwrap();
+    assert_eq!(l.len(), 1);
+    close(volume(&l), 4.0 * 6.0);
+    near(bounds(&l).0, (9.0, 2.0, -1.0));
+    near(bounds(&l).1, (11.0, 8.0, 1.0));
+    // A profile 3 to the left of the path is 3 to the left of the second leg too: around x = 7.
+    let (l, ..) = run_spans(&square(0.0, 3.0, 0.0, 1.0), &path, true, &[[0.6, 0.9]]).unwrap();
+    close(volume(&l), 24.0);
+    near(bounds(&l).0, (6.0, 2.0, -1.0));
+    near(bounds(&l).1, (8.0, 8.0, 1.0));
+    // A part that spans the corner is mitred there: the same as the whole sweep between the two cuts.
+    let (l, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &path, true, &[[0.25, 0.75]]).unwrap();
+    assert_eq!(l.len(), 1);
+    close(volume(&l), 4.0 * 10.0);
+    near(bounds(&l).0, (5.0, -1.0, -1.0));
+    near(bounds(&l).1, (11.0, 5.0, 1.0));
+    assert!(l[0].contains(cadrum::DVec3::new(10.9, -0.9, 0.0)), "the outside of the corner is filled");
+    // One part on each leg, neither touching the corner.
+    let (l, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &path, true, &[[0.1, 0.3], [0.6, 0.7]]).unwrap();
+    assert_eq!(l.len(), 2);
+    close(volume(&l), 4.0 * 6.0);
+    let b = boxes(&l);
+    near(b[0].0, (2.0, -1.0, -1.0));
+    near(b[0].1, (6.0, 1.0, 1.0));
+    near(b[1].0, (9.0, 2.0, -1.0));
+    near(b[1].1, (11.0, 4.0, 1.0));
+    // A fixed profile is side-on to the second leg, so a part there is refused, but a part on the first leg is fine.
+    assert!(run_spans(&square(0.0, 0.0, 0.0, 1.0), &path, false, &[[0.6, 0.9]]).unwrap_err().contains("fixed orientation"));
+    let (l, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &path, false, &[[0.1, 0.4]]).unwrap();
+    close(volume(&l), 4.0 * 6.0);
+    // A hairpin elsewhere on the path does not stop a part that avoids it.
+    let hairpin = polyline(&[(0.0, 0.0), (10.0, 0.0), (0.0, 1.0)]);
+    assert!(run(&square(0.0, 0.0, 0.0, 1.0), &hairpin, true).is_err());
+    let (l, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &hairpin, true, &[[0.05, 0.3]]).unwrap();
+    assert_eq!(l.len(), 1);
+}
+
+#[test]
+fn parts_of_arcs_circles_and_splines() {
+    use std::f64::consts::FRAC_PI_2;
+    // A 10 mm line then a quarter arc of radius 5 turning left: 17.85 mm in all.
+    let mut path = polyline(&[(0.0, 0.0), (10.0, 0.0)]);
+    let (c, s, e) = (path.add_point(v(10.0, 5.0)), path.point_at(v(10.0, 0.0), 1e-6), path.add_point(v(15.0, 5.0)));
+    path.add(Geom::Arc { c, s, e }, false);
+    let total = 10.0 + FRAC_PI_2 * 5.0;
+    // From the middle of the line to the middle of the arc.
+    let (l, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &path, true, &[[5.0 / total, (10.0 + FRAC_PI_2 * 2.5) / total]]).unwrap();
+    assert_eq!(l.len(), 1);
+    close(volume(&l), 4.0 * (5.0 + FRAC_PI_2 * 2.5));
+    // It ends half way round the bend, at 45 degrees: the end of the path there is (10 + 5 sin 45, 5 - 5 cos 45).
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    assert!(l[0].contains(cadrum::DVec3::new(10.0 + 5.0 * h - 0.1 * h, 5.0 - 5.0 * h - 0.1 * h, 0.0)), "just inside the end");
+    assert!(!l[0].contains(cadrum::DVec3::new(10.0 + 5.0 * h + 0.1 * h, 5.0 - 5.0 * h + 0.1 * h, 0.0)), "just past the end");
+    assert!(!l[0].contains(cadrum::DVec3::new(4.9, 0.0, 0.0)), "before the start");
+    // Only on the arc, with the profile off to the left: the inside of the bend is shorter.
+    let (l, ..) = run_spans(&square(0.0, 3.0, 0.0, 1.0), &path, true, &[[10.0 / total, 1.0]]).unwrap();
+    close(volume(&l), 4.0 * FRAC_PI_2 * 2.0);
+    // A quarter of a ring. On a circle the fractions start at the sketch's +X side and run anticlockwise.
+    let mut ring = Sketch::new(Plane::XY);
+    let c = ring.add_point(v(0.0, 10.0));
+    ring.add(Geom::Circle { c, r: 10.0 }, false);
+    let (l, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &ring, true, &[[0.0, 0.25]]).unwrap();
+    assert_eq!(l.len(), 1);
+    close(volume(&l), 4.0 * TAU * 10.0 / 4.0);
+    assert!(l[0].contains(cadrum::DVec3::new(10.0 * h, 10.0 + 10.0 * h, 0.0)), "the middle of the first quarter, up and to the right of the centre");
+    assert!(!l[0].contains(cadrum::DVec3::new(-10.0 * h, 10.0 + 10.0 * h, 0.0)));
+    assert!(!l[0].contains(cadrum::DVec3::new(0.0, 0.0, 0.0)), "the profile's own place is not in this part");
+    // Two arcs of the ring.
+    let (l, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &ring, true, &[[0.1, 0.3], [0.6, 0.7]]).unwrap();
+    assert_eq!(l.len(), 2);
+    close(volume(&l), 4.0 * TAU * 10.0 * 0.3);
+    // A spline: a part of it is a part of the whole sweep, to the accuracy of the refitted curve.
+    let mut curve = Sketch::new(Plane::XY);
+    let pts = [v(0.0, 0.0), v(8.0, 4.0), v(16.0, -4.0), v(24.0, 0.0)].map(|p| curve.add_point(p));
+    curve.add_spline(pts, false).unwrap();
+    let whole = volume(&run(&square(0.0, 0.0, 0.0, 1.0), &curve, true).unwrap().0);
+    let (first, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &curve, true, &[[0.0, 0.4]]).unwrap();
+    let (rest, ..) = run_spans(&square(0.0, 0.0, 0.0, 1.0), &curve, true, &[[0.4, 1.0]]).unwrap();
+    assert!((volume(&first) + volume(&rest) - whole).abs() < 1e-3 * whole, "{} + {} against {whole}", volume(&first), volume(&rest));
+    assert!((volume(&first) - 0.4 * whole).abs() < 0.02 * whole, "{} is about 0.4 of {whole}", volume(&first));
+}
+
+#[test]
+fn a_hole_runs_through_each_part_and_every_face_has_its_own_name() {
+    let (mut sk, plane) = square(0.0, 0.0, 0.0, 2.0);
+    let c = sk.add_point(v(0.0, 0.0));
+    sk.add(Geom::Circle { c, r: 1.0 }, false);
+    let path = polyline(&[(0.0, 0.0), (10.0, 0.0)]);
+    let profile = (sk, plane);
+    let (l, all, chain) = run_spans(&profile, &path, true, &[[0.1, 0.3], [0.6, 0.7]]).unwrap();
+    assert_eq!(l.len(), 2);
+    assert!(l.iter().all(|s| !s.contains(cadrum::DVec3::new(2.0, 0.0, 0.0)) && !s.contains(cadrum::DVec3::new(6.5, 0.0, 0.0))), "the bore is open in both");
+    assert!(l.iter().any(|s| s.contains(cadrum::DVec3::new(2.0, 1.5, 0.0))));
+    let picked: Vec<&Profile> = all.iter().filter(|p| p.depth == 0).collect();
+    let tags = exact::tag_swept(&l, &picked, &profile.1, &chain, &path.plane, true, &[[0.1, 0.3], [0.6, 0.7]], 7);
+    let mut names: Vec<_> = tags.iter().flatten().flatten().cloned().collect();
+    let faces = names.len();
+    assert_eq!(faces, 14, "four sides, a bore and two caps on each piece");
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), faces, "no two faces share a name, across the two parts");
+    let roles: Vec<String> = tags.iter().flatten().flatten().filter_map(|t| match &t.origin { Origin::Semantic { role, .. } => Some(role.clone()), _ => None }).collect();
+    assert_eq!(roles.len(), faces, "{tags:?}");
+    for part in 0..2 {
+        assert_eq!(roles.iter().filter(|r| r.starts_with("sweep:cap:") && r.contains(&format!(":{part}:start:"))).count(), 1);
+        assert_eq!(roles.iter().filter(|r| r.starts_with("sweep:cap:") && r.contains(&format!(":{part}:end:"))).count(), 1);
+        assert_eq!(roles.iter().filter(|r| !r.starts_with("sweep:cap:") && r.ends_with(&format!(":{part}"))).count(), 5);
+    }
+    // The whole path keeps the names it had before parts existed.
+    let (l, ..) = run(&profile, &path, true).unwrap();
+    let tags = exact::tag_swept(&l, &picked, &profile.1, &chain, &path.plane, true, &[], 7);
+    assert_eq!(tags[0].iter().flatten().filter(|t| matches!(t.origin, Origin::Swept { .. })).count(), 5);
+    assert_eq!(tags[0].iter().flatten().filter(|t| matches!(t.origin, Origin::ProfileCap { .. })).count(), 2);
 }

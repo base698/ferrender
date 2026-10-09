@@ -1681,9 +1681,18 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 if let Some(sk) = w.path_sketch.and_then(|s| doc.sketch(s)) {
                     let chain = fr_core::profile::chain(sk, &w.path);
                     let ids: Vec<Id> = match &chain { Ok(c) => c.ids.clone(), Err(_) if w.path.is_empty() => sk.entities.iter().filter(|(_, e)| !e.construction).map(|(id, _)| *id).collect(), Err(_) => w.path.clone() };
+                    // When only parts of the path are swept, the whole path is drawn faintly and the parts in full.
+                    let partial = chain.as_ref().ok().filter(|_| !w.spans.is_empty());
                     for id in ids {
                         let line: Vec<Pos2> = sk.polyline(id).into_iter().map(|p| on_screen(app, sk, p)).collect();
-                        if chain.is_ok() { painter.add(Shape::line(line, stroke)); } else { painter.extend(Shape::dashed_line(&line, stroke, 8.0, 5.0)); }
+                        if partial.is_some() { painter.add(Shape::line(line, Stroke::new(1.4, colors.selected.gamma_multiply(0.45)))); }
+                        else if chain.is_ok() { painter.add(Shape::line(line, stroke)); }
+                        else { painter.extend(Shape::dashed_line(&line, stroke, 8.0, 5.0)); }
+                    }
+                    if let Some(chain) = partial {
+                        for part in crate::sweep_ui::covered(sk, chain, &w.spans) {
+                            painter.add(Shape::line(part.into_iter().map(|p| on_screen(app, sk, p)).collect(), Stroke::new(3.4, colors.selected)));
+                        }
                     }
                 }
                 if let Some((sid, _)) = over_path && w.path_sketch != Some(sid) && let Some(sk) = doc.sketch(sid) {
