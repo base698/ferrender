@@ -422,12 +422,7 @@ impl App {
     /// Exports the timeline as a script at `path`, with its sidecar files beside it.
     pub fn write_exported_script(&self, path: &std::path::Path, stem: &str) -> Result<fr_core::script::Export, String> {
         let export = fr_core::script::export_timeline_named(&self.session, stem)?;
-        let dir = path.parent().ok_or_else(|| format!("{} has no folder", path.display()))?;
-        for (name, bytes) in &export.files {
-            let p = dir.join(name);
-            std::fs::write(&p, bytes).map_err(|e| format!("Could not write {}: {e}", p.display()))?;
-        }
-        std::fs::write(path, &export.source).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+        fr_core::script::write_export(&export, path)?;
         Ok(export)
     }
 

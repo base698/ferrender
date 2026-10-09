@@ -27,7 +27,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -136,6 +136,16 @@ impl Request {
     pub fn new(source: impl Into<String>) -> Request {
         Request { source: source.into(), script_dir: None, inputs: json!({}), sandbox: Sandbox::default(), selection: json!({}), cancel: Arc::new(AtomicBool::new(false)), events: None, ask: None, time_limit: None }
     }
+}
+
+/// Parse an API/CLI timeout without panicking on finite but unrepresentable values.
+pub fn timeout_duration(seconds: f64) -> R<Duration> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err("timeout must be a positive number of seconds".into());
+    }
+    let duration = Duration::try_from_secs_f64(seconds).map_err(|_| "timeout is too large")?;
+    Instant::now().checked_add(duration).ok_or("timeout is too large")?;
+    Ok(duration)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
@@ -261,6 +271,9 @@ struct Staged {
     full: PathBuf,
     /// Whether the write that was meant for it actually happened.
     written: bool,
+    /// Automatic 0.3 compatibility backups are committed together, but do not
+    /// count as an additional user-requested export.
+    backup: bool,
 }
 
 #[derive(Default)]
@@ -286,7 +299,7 @@ impl Stage {
             let tmp = crate::sandboxfs::temp_name(&name);
             match dir.create_new(&tmp) {
                 Ok(file) => {
-                    self.entries.push(Staged { dir, name, tmp, full: r.full.clone(), written: false });
+                    self.entries.push(Staged { dir, name, tmp, full: r.full.clone(), written: false, backup: false });
                     return Ok((self.entries.len() - 1, file));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -319,26 +332,110 @@ impl Stage {
         self.entries[i].dir.open_read(&self.entries[i].tmp)
     }
 
-    /// Moves every written file onto its target; returns the targets.
-    fn commit(&mut self) -> R<Vec<PathBuf>> {
-        let mut done = Vec::new();
-        let mut failed = Vec::new();
-        for e in self.entries.drain(..) {
-            if !e.written { let _ = e.dir.unlink(&e.tmp); continue; }
-            let result = (|| -> R<()> {
-                // A design saved over a plain 0.3 file keeps the same backup a save from the app would.
-                if e.full.extension().is_some_and(|x| x == "ferr") {
-                    let tmp = e.dir.path().join(&e.tmp);
-                    crate::io::keep_backup(&e.full, crate::io::is_container(&tmp))?;
-                }
-                e.dir.rename(&e.tmp, &e.name)
-            })();
-            match result {
-                Ok(()) => done.push(e.full),
-                Err(err) => { let _ = e.dir.unlink(&e.tmp); failed.push(err); }
+    /// Prepare compatibility backups through the already-open directory, just
+    /// like the main save. They must not escape via a path swapped after staging.
+    fn prepare_backups(&mut self, check: &dyn Fn() -> R<()>) -> R<()> {
+        for i in 0..self.entries.len() {
+            check()?;
+            let e = &self.entries[i];
+            if !e.written || e.backup || e.full.extension().is_none_or(|x| x != "ferr") || e.dir.entry(&e.name) != Entry::File { continue; }
+            let mut header = [0; 2];
+            if e.dir.open_read(&e.tmp)?.read_exact(&mut header).is_err() || header != *b"PK" { continue; }
+            let mut original = e.dir.open_read(&e.name)?;
+            if original.read_exact(&mut header).is_ok() && header == *b"PK" { continue; }
+            original.rewind().map_err(|err| err.to_string())?;
+            let full = crate::io::backup_path(&e.full);
+            if self.find(&full).is_some() { return Err(format!("{} is also a compatibility backup; choose another output name", full.display())); }
+            let name = full.file_name().unwrap().to_owned();
+            match e.dir.entry(&name) {
+                Entry::File => continue,
+                Entry::Missing => {}
+                _ => return Err(format!("the backup path {} is not a regular file", full.display())),
             }
+            let dir = e.dir.try_clone()?;
+            let mut pending = None;
+            for _ in 0..16 {
+                let tmp = crate::sandboxfs::temp_name(&name);
+                match dir.create_new(&tmp) {
+                    Ok(file) => { pending = Some((tmp, file)); break; }
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(err) => return Err(err.to_string()),
+                }
+            }
+            let (tmp, mut file) = pending.ok_or("could not reserve a compatibility backup")?;
+            if let Err(err) = std::io::copy(&mut original, &mut file).and_then(|_| file.sync_all()) {
+                let _ = dir.unlink(&tmp);
+                return Err(format!("could not prepare {}: {err}", full.display()));
+            }
+            self.entries.push(Staged { dir, name, tmp, full, written: true, backup: true });
         }
-        if failed.is_empty() { Ok(done) } else { Err(format!("{} of its files could not be put in place: {}", failed.len(), failed.join("; "))) }
+        Ok(())
+    }
+
+    /// Publish the set, retaining every prior file until all renames succeed.
+    /// Ordinary failures roll the set back. A crash or an I/O failure during
+    /// rollback cannot be made atomic across multiple directories; retain the
+    /// recovery entries and report their names in that case.
+    fn commit(&mut self, check: &dyn Fn() -> R<()>) -> R<Vec<PathBuf>> {
+        self.prepare_backups(check)?;
+        let mut prior: Vec<(usize, Option<OsString>)> = Vec::new();
+        // Preflight all destinations and retain originals before publishing any.
+        let prepare = (|| -> R<()> {
+            for (i, e) in self.entries.iter().enumerate().filter(|(_, e)| e.written) {
+                check()?;
+                let previous = match e.dir.entry(&e.name) {
+                    Entry::Missing => None,
+                    Entry::File => {
+                        let mut previous = None;
+                        for _ in 0..16 {
+                            let name = crate::sandboxfs::temp_name(&e.name);
+                            match e.dir.link(&e.name, &name) {
+                                Ok(()) => { previous = Some(name); break; }
+                                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                                Err(err) => return Err(format!("could not retain {} for rollback: {err}", e.full.display())),
+                            }
+                        }
+                        Some(previous.ok_or("could not reserve a rollback file")?)
+                    }
+                    _ => return Err(format!("{} is not a regular file destination", e.full.display())),
+                };
+                prior.push((i, previous));
+            }
+            Ok(())
+        })();
+        if let Err(error) = prepare {
+            for (i, backup) in prior { if let Some(name) = backup { let _ = self.entries[i].dir.unlink(&name); } }
+            return Err(error);
+        }
+        let mut published = 0;
+        let publish = (|| -> R<()> {
+            for (i, _) in &prior {
+                check()?;
+                let e = &self.entries[*i];
+                e.dir.rename(&e.tmp, &e.name)?;
+                published += 1;
+            }
+            check()
+        })();
+        if let Err(error) = publish {
+            let mut recovery = Vec::new();
+            for (j, (i, backup)) in prior.iter().enumerate().rev() {
+                let e = &self.entries[*i];
+                let result = if j < published {
+                    match backup { Some(name) => e.dir.rename(name, &e.name), None => e.dir.unlink(&e.name) }
+                } else {
+                    match backup { Some(name) => e.dir.unlink(name), None => Ok(()) }
+                };
+                if let Err(err) = result {
+                    recovery.push(format!("{}: {err}; recovery entry: {}", e.full.display(), backup.as_ref().map(|n| e.dir.path().join(n).display().to_string()).unwrap_or_else(|| "none (new output)".into())));
+                }
+            }
+            return Err(if recovery.is_empty() { format!("{error}; previous outputs restored") } else { format!("{error}; rollback incomplete: {}", recovery.join("; ")) });
+        }
+        let outputs = self.entries.iter().filter(|e| e.written && !e.backup).map(|e| e.full.clone()).collect();
+        for (i, backup) in prior { if let Some(name) = backup { let _ = self.entries[i].dir.unlink(&name); } }
+        self.discard();
+        Ok(outputs)
     }
 
     fn discard(&mut self) {
@@ -368,6 +465,9 @@ impl Host {
 
     /// Fails once the time limit has passed; checked before every command and helper.
     fn check_time(&self) -> Result<(), Box<EvalAltResult>> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(runtime("cancelled"));
+        }
         if self.deadline.is_some_and(|d| Instant::now() >= d) {
             self.timed_out.store(true, Ordering::Relaxed);
             return Err(runtime("time limit"));
@@ -418,6 +518,10 @@ fn dynamic_to_json(d: &Dynamic) -> Result<Value, Box<EvalAltResult>> {
 pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     if session.read_only { return Err("this newer design is read-only; scripts cannot run against it".into()); }
     if req.source.len() > MAX_SOURCE_BYTES { return Err("the script is larger than 1 MB".into()); }
+    // Validate before transferring the session into callbacks. Instant addition
+    // can overflow even for a valid Duration supplied by an embedding caller.
+    let started = Instant::now();
+    let deadline = req.time_limit.map(|t| started.checked_add(t).ok_or("timeout is too large")).transpose()?;
     let meta = meta(&req.source)?;
     // Validate before moving the session into the host callbacks: an invalid
     // input must never replace the caller's document with Session::default().
@@ -429,14 +533,13 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     let mut engine = engine_with_limits();
     let ast = engine.compile(&req.source).map_err(|e| format!("the script does not parse: {e}"))?;
 
-    let started = Instant::now();
     let host = Arc::new(Host {
         shared: Mutex::new(std::mem::take(session)),
         outcome: Mutex::new(Outcome::default()),
         sandbox: req.sandbox.clone(),
         stage: Mutex::new(Stage::default()),
         cancel: req.cancel.clone(),
-        deadline: req.time_limit.map(|t| started + t),
+        deadline,
         timed_out: AtomicBool::new(false),
     });
     let script_dir = req.script_dir.clone();
@@ -653,6 +756,9 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     // Restore ownership on every evaluation result, including a failed top level.
     let result = engine.run_ast_with_scope(&mut scope, &ast)
         .and_then(|_| engine.call_fn::<Dynamic>(&mut scope, &ast, "run", (inputs_dynamic,)));
+    // A final native call or question may return after cancellation/the deadline
+    // without another Rhai operation. Never publish its staged writes as success.
+    let result = host.check_time().and(result);
     drop(engine);
     let host = Arc::try_unwrap(host).map_err(|_| "the script engine kept a handle on the session".to_string())?;
     let Host { shared, outcome, mut stage, timed_out, .. } = host;
@@ -664,7 +770,16 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     match result {
         Ok(v) => {
             out.result = rhai::serde::from_dynamic(&v).unwrap_or(Value::Null);
-            out.exports = stage.commit().map_err(|e| format!("{} finished, but {e}", meta.name))?;
+            let check = || {
+                if cancel.load(Ordering::Relaxed) { Err("cancelled".to_string()) }
+                else if deadline.is_some_and(|d| Instant::now() >= d) { Err("time limit".to_string()) }
+                else { Ok(()) }
+            };
+            match stage.commit(&check) {
+                Ok(exports) => out.exports = exports,
+                Err(error) if cancel.load(Ordering::Relaxed) && !error.contains("rollback incomplete") => out.cancelled = true,
+                Err(error) => return Err(format!("{} finished, but {error}", meta.name)),
+            }
         }
         Err(_) if timed_out.load(Ordering::Relaxed) => {
             stage.discard();
@@ -844,13 +959,61 @@ pub struct Export {
     pub notes: Vec<String>,
 }
 
+/// Write an exported script and its assets as one staged set. Existing assets
+/// are reused only when their bytes match; a colliding user file is refused.
+pub fn write_export(export: &Export, path: &Path) -> R<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let sandbox = Sandbox { allowed: vec![parent.to_path_buf()], yes: false };
+    let mut stage = Stage::default();
+    for (name, bytes) in &export.files {
+        if Path::new(name).components().count() != 1 || !matches!(Path::new(name).components().next(), Some(std::path::Component::Normal(_))) {
+            return Err("an exported asset must have a plain filename".into());
+        }
+        let resolved = allowed(&sandbox, &parent.join(name), true)?;
+        let dir = resolved.dir()?;
+        match dir.entry(resolved.name()) {
+            Entry::Missing => {}
+            Entry::File => {
+                let mut file = dir.open_read(resolved.name())?;
+                let same = file.metadata().map_err(|e| e.to_string())?.len() == bytes.len() as u64;
+                let mut buffer = [0u8; 65536];
+                let mut offset = 0;
+                if same {
+                    while offset < bytes.len() {
+                        let end = (offset + buffer.len()).min(bytes.len());
+                        file.read_exact(&mut buffer[..end - offset]).map_err(|e| e.to_string())?;
+                        if buffer[..end - offset] != bytes[offset..end] { break; }
+                        offset = end;
+                    }
+                    if offset == bytes.len() { continue; }
+                }
+                return Err(format!("{} already contains different data; choose another script name or move that file", resolved.full.display()));
+            }
+            _ => return Err(format!("{} is not a regular asset file", resolved.full.display())),
+        }
+        let (i, mut file) = stage.prepare(&resolved)?;
+        file.write_all(bytes).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+        stage.mark_written(i);
+    }
+    let resolved = allowed(&sandbox, path, true)?;
+    let (i, mut file) = stage.prepare(&resolved)?;
+    file.write_all(export.source.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+    stage.mark_written(i);
+    stage.commit(&|| Ok(())).map(|_| ())
+}
+
+fn sidecar_name(stem: &str, id: Id, extension: &str, bytes: &[u8]) -> String {
+    let digest: String = ring::digest::digest(&ring::digest::SHA256, bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    format!("{stem}-{id}-{digest}.{extension}")
+}
+
 /// A script that rebuilds the document: every parameter becomes an expression
 /// input and every feature a command. Sidecar files are named after `design`.
 pub fn export_timeline(session: &Session) -> R<Export> {
     export_timeline_named(session, "design")
 }
 
-/// Like [`export_timeline`], naming sidecar files `<stem>-<feature id>.<ext>`.
+/// Like [`export_timeline`], naming sidecars by stem, feature id and content hash.
 ///
 /// Failed features are exported suppressed with a note, a timeline marker that
 /// is not at the end is restored at the end of the script, hidden bodies that no
@@ -860,6 +1023,14 @@ pub fn export_timeline_named(session: &Session, stem: &str) -> R<Export> {
     let doc = &session.doc;
     if session.read_only { return Err("a read-only cached design has no editable timeline to export".into()); }
     crate::validation::document(doc)?;
+    // The saved marker hides later errors from session.built. Inspect the full
+    // timeline so the exported replay can suppress those failures too.
+    let errors = if doc.rollback.is_some_and(|at| at < doc.features.len()) {
+        let mut full = session.fork();
+        full.doc.rollback = None;
+        full.rebuild();
+        full.built.errors
+    } else { session.built.errors.clone() };
     let stem: String = stem.chars().filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')).collect::<String>().trim().to_owned();
     let stem = if stem.is_empty() { "design".to_owned() } else { stem };
     let mut export = Export::default();
@@ -898,16 +1069,18 @@ pub fn export_timeline_named(session: &Session, stem: &str) -> R<Export> {
         let mut sidecar: Option<(&str, String)> = None;
         let mut value = match &f.kind {
             crate::FeatureKind::Import(mesh) if mesh.len() * 48 > SIDECAR_BYTES => {
-                let file = format!("{stem}-{}.stl", f.id);
-                export.files.push((file.clone(), crate::io::mesh_stl_bytes(mesh, crate::units::Unit::Mm)));
+                let bytes = crate::io::mesh_stl_bytes(mesh, crate::units::Unit::Mm);
+                let file = sidecar_name(&stem, f.id, "stl", &bytes);
+                export.files.push((file.clone(), bytes));
                 export.notes.push(format!("the mesh of \"{}\" ({} triangles) is written as {file} beside the script", f.name, mesh.len()));
                 sidecar = Some(("mesh_path", file));
                 let head = crate::Feature { id: f.id, name: f.name.clone(), suppressed: f.suppressed, owner: f.owner, made_by: f.made_by, script_key: f.script_key.clone(), kind: crate::FeatureKind::Import(crate::mesh::Mesh::default()) };
                 serde_json::to_value(&head).map_err(|e| format!("cannot export feature {}: {e}", f.name))?
             }
             crate::FeatureKind::Relief(r) if r.image.embedded_len() > SIDECAR_BYTES => {
-                let file = format!("{stem}-{}.png", f.id);
-                export.files.push((file.clone(), r.image.png_bytes()?));
+                let bytes = r.image.png_bytes()?;
+                let file = sidecar_name(&stem, f.id, "png", &bytes);
+                export.files.push((file.clone(), bytes));
                 export.notes.push(format!("the image of \"{}\" is written as {file} beside the script", f.name));
                 sidecar = Some(("image_path", file));
                 let mut v = serde_json::to_value(f).map_err(|e| format!("cannot export feature {}: {e}", f.name))?;
@@ -915,8 +1088,9 @@ pub fn export_timeline_named(session: &Session, stem: &str) -> R<Export> {
                 v
             }
             crate::FeatureKind::Sketch(sk) if sk.reference.as_ref().is_some_and(|i| i.embedded_len() > SIDECAR_BYTES) => {
-                let file = format!("{stem}-{}.png", f.id);
-                export.files.push((file.clone(), sk.reference.as_ref().unwrap().png_bytes()?));
+                let bytes = sk.reference.as_ref().unwrap().png_bytes()?;
+                let file = sidecar_name(&stem, f.id, "png", &bytes);
+                export.files.push((file.clone(), bytes));
                 export.notes.push(format!("the reference image of \"{}\" is written as {file} beside the script", f.name));
                 sidecar = Some(("image_path", file));
                 let mut v = serde_json::to_value(f).map_err(|e| format!("cannot export feature {}: {e}", f.name))?;
@@ -929,7 +1103,7 @@ pub fn export_timeline_named(session: &Session, stem: &str) -> R<Export> {
                 serde_json::from_slice(&bytes.bytes).map_err(|e| e.to_string())?
             }
         };
-        if let Some(error) = session.built.errors.get(&f.id).filter(|_| !f.suppressed) {
+        if let Some(error) = errors.get(&f.id).filter(|_| !f.suppressed) {
             // A failing feature would stop the replay; it goes in suppressed, so the
             // rest builds and the user can fix it and unsuppress it afterwards.
             value["suppressed"] = json!(true);
@@ -1027,6 +1201,40 @@ fn _keep2() { let _ = to_value; }
 #[cfg(test)]
 mod sandbox_tests {
     use super::*;
+
+    #[test]
+    fn publication_failure_and_cancellation_restore_already_published_files() {
+        for mode in ["rename", "cancel"] {
+            let folder = std::env::temp_dir().join(format!("ferrender-stage-{}-{mode}", std::process::id()));
+            std::fs::create_dir(&folder).unwrap();
+            let first = folder.join("first.ferr");
+            let second = folder.join("second.txt");
+            std::fs::write(&first, "old JSON").unwrap();
+            let host = Host {
+                shared: Mutex::new(Session::default()), outcome: Mutex::new(Outcome::default()),
+                sandbox: Sandbox { allowed: vec![folder.clone()], yes: false }, stage: Mutex::new(Stage::default()),
+                cancel: Arc::new(AtomicBool::new(false)), deadline: None, timed_out: AtomicBool::new(false),
+            };
+            host.write(first.to_str().unwrap(), b"PKnew container").unwrap();
+            host.write(second.to_str().unwrap(), b"second").unwrap();
+            let injected = AtomicBool::new(false);
+            let check = || {
+                if std::fs::read(&first).unwrap() == b"PKnew container" && !injected.swap(true, Ordering::Relaxed) {
+                    if mode == "cancel" { return Err("cancelled".into()); }
+                    std::fs::create_dir(&second).unwrap();
+                }
+                Ok(())
+            };
+            let err = host.stage.lock().unwrap().commit(&check).unwrap_err();
+            assert!(err.contains("previous outputs restored"), "{err}");
+            drop(host);
+            assert!(injected.load(Ordering::Relaxed));
+            assert_eq!(std::fs::read(&first).unwrap(), b"old JSON");
+            assert!(!crate::io::backup_path(&first).exists(), "automatic backup also rolls back");
+            assert_eq!(std::fs::read_dir(&folder).unwrap().count(), if mode == "cancel" { 1 } else { 2 });
+            std::fs::remove_dir_all(folder).unwrap();
+        }
+    }
 
     #[test]
     fn dynamic_commands_cannot_expand_script_authority() {

@@ -127,6 +127,13 @@ fn a_failed_feature_is_exported_suppressed_with_a_note() {
     assert_eq!(again.doc.features.len(), 3);
     assert!(again.doc.feature(failed).unwrap().suppressed);
     assert_eq!(again.built.bodies.len(), 2);
+    // A marker before the failed feature must not hide its error from export.
+    cmd(&mut s, json!({"op":"rollback", "to": body}));
+    assert!(s.built.errors.is_empty());
+    let rolled = replay_export(&script::export_timeline(&s).unwrap(), &dir("future-failed"), json!({}));
+    assert_eq!(rolled.doc.rollback, Some(1));
+    assert!(rolled.doc.feature(failed).unwrap().suppressed);
+    assert!(rolled.built.errors.is_empty());
 }
 
 #[test]
@@ -145,7 +152,7 @@ fn a_large_imported_mesh_becomes_a_sidecar_stl_the_script_reads_back() {
     cmd(&mut s, json!({"op":"mesh_decimate", "body": scan, "target": 400}));
     let export = script::export_timeline_named(&s, "ball").unwrap();
     assert_eq!(export.files.len(), 1);
-    assert_eq!(export.files[0].0, format!("ball-{scan}.stl"));
+    assert!(export.files[0].0.starts_with(&format!("ball-{scan}-")) && export.files[0].0.ends_with(".stl"));
     assert!(export.source.contains("mesh_path: join(script_dir(), \"ball-"), "{}", export.source);
     assert!(export.source.len() < 20_000, "the mesh must not be inline: {} bytes", export.source.len());
     let again = replay_export(&export, &dir("sidecar"), json!({}));

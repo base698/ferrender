@@ -1806,7 +1806,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             req.sandbox.yes = c["yes"].as_bool().unwrap_or(true);
             req.time_limit = match &c["timeout"] {
                 J::Null => None,
-                v => Some(std::time::Duration::from_secs_f64(v.as_f64().filter(|t| t.is_finite() && *t > 0.0).ok_or("\"timeout\" is a positive number of seconds")?)),
+                v => Some(crate::script::timeout_duration(v.as_f64().ok_or("\"timeout\" is a positive number of seconds")?)?),
             };
             req.sandbox.allowed = c["allow"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(std::path::PathBuf::from).collect()).unwrap_or_default();
             if let Some(d) = dir { req.sandbox.allowed.push(d); }

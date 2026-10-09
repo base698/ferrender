@@ -70,6 +70,10 @@ mod imp {
     }
 
     impl Dir {
+        pub fn try_clone(&self) -> R<Dir> {
+            Ok(Dir { file: self.file.try_clone().map_err(|e| e.to_string())?, path: self.path.clone() })
+        }
+
         pub(super) fn open_root(root: &Path) -> R<Dir> {
             let c = cstr(root.as_os_str()).map_err(|e| e.to_string())?;
             let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
@@ -86,14 +90,16 @@ mod imp {
         /// Opens an existing regular file for reading; links and devices are refused.
         pub fn open_read(&self, name: &OsStr) -> R<File> {
             let path = self.path.join(name);
-            let file = open_at(&self.file, name, libc::O_RDONLY, 0).map_err(|e| describe("could not open", &path, e))?;
+            // A FIFO must not block before fstat can reject it. O_NONBLOCK has
+            // no effect on regular files.
+            let file = open_at(&self.file, name, libc::O_RDONLY | libc::O_NONBLOCK, 0).map_err(|e| describe("could not open", &path, e))?;
             if !file.metadata().map_err(|e| e.to_string())?.is_file() { return Err(format!("{} is not a regular file", path.display())); }
             Ok(file)
         }
 
         /// Creates a file that did not exist; an existing entry of any kind is an error.
         pub fn create_new(&self, name: &OsStr) -> std::io::Result<File> {
-            open_at(&self.file, name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o644)
+            open_at(&self.file, name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)
         }
 
         /// Renames one entry of this directory onto another, replacing the target entry
@@ -102,6 +108,12 @@ mod imp {
             let (f, t) = (cstr(from).map_err(|e| e.to_string())?, cstr(to).map_err(|e| e.to_string())?);
             check(unsafe { libc::renameat(self.file.as_raw_fd(), f.as_ptr(), self.file.as_raw_fd(), t.as_ptr()) })
                 .map_err(|e| format!("could not move {} into place: {e}", self.path.join(to).display()))
+        }
+
+        /// Retain the old directory entry for rollback without following links.
+        pub fn link(&self, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
+            let (f, t) = (cstr(from)?, cstr(to)?);
+            check(unsafe { libc::linkat(self.file.as_raw_fd(), f.as_ptr(), self.file.as_raw_fd(), t.as_ptr(), 0) })
         }
 
         pub fn unlink(&self, name: &OsStr) -> R<()> {
@@ -146,6 +158,8 @@ mod imp {
     }
 
     impl Dir {
+        pub fn try_clone(&self) -> R<Dir> { Ok(Dir { path: self.path.clone() }) }
+
         pub(super) fn open_root(root: &Path) -> R<Dir> {
             if !root.is_dir() { return Err(format!("{} is not a folder", root.display())); }
             Ok(Dir { path: root.to_path_buf() })
@@ -172,6 +186,10 @@ mod imp {
 
         pub fn rename(&self, from: &OsStr, to: &OsStr) -> R<()> {
             std::fs::rename(self.path.join(from), self.path.join(to)).map_err(|e| format!("could not move {} into place: {e}", self.path.join(to).display()))
+        }
+
+        pub fn link(&self, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
+            std::fs::hard_link(self.path.join(from), self.path.join(to))
         }
 
         pub fn unlink(&self, name: &OsStr) -> R<()> {

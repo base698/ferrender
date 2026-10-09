@@ -172,9 +172,13 @@ fn cli(args: &[String]) -> i32 {
     }
     req.inputs = serde_json::Value::Object(inputs);
     req.sandbox.yes = flag("--yes");
+    if flag("--timeout") && values("--timeout").is_empty() {
+        eprintln!("--timeout needs a positive number of seconds");
+        return 2;
+    }
     if let Some(t) = values("--timeout").last() {
-        match t.parse::<f64>() {
-            Ok(secs) if secs > 0.0 && secs.is_finite() => req.time_limit = Some(std::time::Duration::from_secs_f64(secs)),
+        match t.parse::<f64>().ok().and_then(|secs| fr_core::script::timeout_duration(secs).ok()) {
+            Some(duration) => req.time_limit = Some(duration),
             _ => { eprintln!("--timeout takes a positive number of seconds, not {t}"); return 2; }
         }
     }
