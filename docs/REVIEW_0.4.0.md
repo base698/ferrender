@@ -1,17 +1,31 @@
 # Ferrender 0.4 independent review
 
-Reviewed the implementation at `f38e1f7` on `0.4-dev` on 8–9 October 2026. The review used an isolated clone, three scoped review agents and a separate native app/configuration. The fixes, regressions and documentation are intended for the same 0.4 development branch. This review does not publish or approve a release by itself.
+Review baseline: `f38e1f7` on `0.4-dev`, inspected on 8–9 October 2026. The latest code fixes are in `5c0eb8c`; the delivered clean release build is `7a9fd6eb19d5cf43c356b429184e253d2ea063c6`, whose additional changes are documentation. The review used an isolated clone, three scoped review agents and a separate native app/configuration. This review does not publish or approve a release by itself.
 
 The baseline had significant correctness and security defects despite its passing feature tests. Reproductions included successful script filesystem escapes, document identity loss after failed scripts, wrong Boolean volumes, decimation holes, stale GPU geometry and permanently suppressed script results. The reviewed candidate fixes these cases and adds explicit refusal where a reliable result is unavailable. No finite suite proves the absence of other bugs.
 
+## Current assessment
+
+Updated against the completed native UI evidence and repository state on **9 October 2026, 10:25 UTC**. No additional source changes were present after `7a9fd6e`. This update reconciles recorded results; it does not claim another full test or security-audit run.
+
+The reproduced script, recovery, geometry, cache and rendering defects listed as fixed now have passing targeted checks. The final local suite passed **417 tests with zero failures**. Actual native workflows include king resizing/export, turtle sculpt/Undo and timeline rollback, large-scan selection/movement/save, script reruns with downstream edits, future-version refusal and large-mesh recovery after a forced stop.
+
+| Status | Result or remaining work |
+|---|---|
+| Verified locally | Clean Apple Silicon release build; About shows `7a9fd6e`. Four native-saved designs rebuild successfully. Both native-exported STLs reimport with zero open edges. |
+| Hosted verification pending | The exact delivered build's [macOS/Linux CI](https://github.com/base698/ferrender/actions/runs/37917098628) and the [code-fix CI](https://github.com/base698/ferrender/actions/runs/37916523681) are still running. Earlier CI success does not establish a pass for these commits. |
+| Remaining human check | Continuous orbit/drag feel and the coarse moving display; 5 M/12 M interactive frame-rate targets remain unmeasured. Discrete view controls, Fit and numeric movement passed. |
+| Known functional limitation | The private face-relief example still fails safely at its final mesh Combine: 173 open edges and 5 non-manifold edges in the attempted result. Do not mark that tutorial as an end-to-end pass. |
+| Release decision | Keep CI and the remaining manual check open. Consider the documented mesh-Boolean and script-isolation limits before shipping. Main has not been merged and no release was published by this review. |
+
 ## Evidence and coverage
 
-- **All-target build: passed.**
-- **Hosted CI: passed on macOS and Ubuntu for commit `4858b6a`**, including the full Linux suite with software rendering. [Workflow and job results](https://github.com/base698/ferrender/actions/runs/37876475897); archived logs are in `evidence/hosted-ci.log`.
+- **All-target build: passed.** The final clean release build also completed without warnings; its About dialog was checked in the native app.
+- **Hosted CI:** earlier macOS/Ubuntu runs for [`4858b6a`](https://github.com/base698/ferrender/actions/runs/37876475897) and [`c7dd232`](https://github.com/base698/ferrender/actions/runs/37878285251) passed, including the Linux offscreen suite. The latest `5c0eb8c`/`7a9fd6e` runs remain pending as recorded above; archived earlier logs are in `evidence/hosted-ci.log`.
 - **Latest full standard suite: 417 passed, zero failed, five ignored** after the unlocked-screen fixes, including native E2E/rendering tests. The ignored cases are three optional visual demonstrations and two fixture-driven stress tests; the turtle and 5 M/12 M opt-in tests were run separately and passed.
 - **Dependency-verifier tests: four passed.** The real Apple Silicon archive also passed size/hash/extraction verification.
 - **Doc-test command: passed; the crate currently contains no runnable doc tests.**
-- **Clippy: completed without errors**, with style, complexity and dead-code warnings still present. This review did not reformat the entire project to silence them.
+- **Clippy:** the initial review run completed without errors but reported style, complexity and dead-code warnings. The reported Cargo build warnings were subsequently addressed; the final release build is warning-free. A new full Clippy pass was not run for this documentation update.
 - Logs and detailed model/compatibility measurements are supplied with the test pack. No physical print was made during this review.
 
 Test machine: Apple M3 Max, 48 GiB RAM, macOS 26.2 (25C56), arm64. Native rendering tests use the local Metal adapter. The first unprivileged run could not create sockets or access a graphics adapter; those environmental failures were rerun with the required local access. A subsequent real timeline regression was fixed and its original assertions retained.
@@ -33,6 +47,8 @@ The test pack includes `king-classic-75mm.ferr/.stl/.step`, `king-classic-genera
 | Script transactions | A failed API script could leave the original design pointing at another file; invalid typed inputs could empty the session. | Validate before ownership transfer; run on a session fork, commit success as one Undo, retain original file identity and history on failure. |
 | Worker adoption | A finished worker could overwrite edits/open/Undo that happened while it ran. | Check source document, revision and path before adoption; decline stale results. |
 | Script history | Suppressing a chip permanently altered its children; reruns broke downstream references; deletion orphaned children. | Derive suppression from ownership, reuse compatible output IDs, infer component ownership and share deletion cascade. |
+| Script UI | Valid sample inputs showed “Nothing to apply” and disabled Run. | Exclude scripts from geometry previews, preserve Enter-to-run and test actual Run/Run again clicks. Native sample execution and rerun passed. |
+| Large-design recovery | Mesh autosave expanded to legacy JSON, exceeded its size limit and left a stale warning after Save. | Store compact native payloads with bounded metadata, CRC, atomic replacement and legacy loading; 13 recovery tests and real native forced-stop/Recover passed. |
 | Script exporter | Scalar/radian/reference parameters, keyword names and document state were lost; large embedded payloads produced unusable scripts. | Preserve expression inputs and supported state, bound serialization before large allocations, validate generated source, explicitly refuse unsupported states. |
 | Resource bounds | Sources, logs and aggregate ZIP expansion had incomplete limits; small 3MF component graphs could expand exponentially. | Bounded regular-file reads/events, aggregate container/cache budgets, finite transforms and bounded component expansion. |
 | 3MF coordinates | Inch-model vertices converted to millimetres but component/build translations did not. | Convert translations consistently; nested inch-model bounds regression. |
@@ -105,13 +121,13 @@ Use [the updated acceptance plan](TEST_PLAN_0.4.0.md), especially tests 19–26,
 
 The existing private face-relief design was also checked read-only after the main report was committed. Its final `Combine1` is now safely refused: the attempted result has **173 open edges and 5 non-manifold edges**. The original file hash is unchanged; no portrait/image data was copied into this pack or the repository. This is a concrete remaining limitation of the mesh Boolean solver, and the original face-relief tutorial cannot currently be treated as passing end-to-end on this fixture. Evidence: `evidence/private-relief-check.json`.
 
-The final signed app at commit `4858b6a` completed the live command-bridge sequence: turtle Smooth/Undo, cached king open, future-version editing refusal with both bodies retained, 3.5 M Beethoven import, and replacement by the turtle. The Mac was still locked, so no final mouse/keyboard or frame-rate claim is made. Native command timings in this state were slower than the isolated headless measurements (about 12.4 s for Beethoven import and 11 s for its scene query versus 2.1/1.6 s headless through MCP). These preliminary locked-screen timings need an unlocked interactive retest before drawing performance conclusions.
+The earlier signed app at commit `4858b6a` completed the live command-bridge sequence: turtle Smooth/Undo, cached king open, future-version editing refusal with both bodies retained, 3.5 M Beethoven import, and replacement by the turtle. The Mac was still locked, so no final mouse/keyboard or frame-rate claim is made. Native command timings in this state were slower than the isolated headless measurements (about 12.4 s for Beethoven import and 11 s for its scene query versus 2.1/1.6 s headless through MCP). These are historical locked-screen measurements. The unlocked follow-up below measured about 2.3 seconds from native Import click to the returned UI state; neither measurement establishes continuous viewport frame rate.
 
 ## Unlocked-screen follow-up — 9 October 2026
 
 This follow-up used a separate **Ferrender UI Review** app and private settings. Native file dialogs, menus, numeric fields, viewport clicks and timeline menus were driven through macOS UI automation; the local command bridge was used read-only to record the resulting geometry. Original user designs were not overwritten. Evidence and test copies are under `~/Documents/ferr-tests/ferrender-0.4-review/evidence/unlocked/`, outside Git.
 
-Initial checks used clean release `c7dd232`. Two defects found through the real UI were corrected in **`5c0eb8cac28c0681a324542f8e44355a3642a20c`**. The retest executable used that source plus only the in-progress review Markdown, so About reported local changes. The delivered build's exact identity is recorded in the test pack's `BUILD-INFO.txt`.
+Initial checks used clean release `c7dd232`. Two defects found through the real UI were corrected in **`5c0eb8cac28c0681a324542f8e44355a3642a20c`**. The retest executable used that source plus only the in-progress review Markdown, so About reported local changes. A subsequent clean build at `7a9fd6e` was packaged and opened with the saved king. Its actual Help → About dialog showed the full commit above, “Source: Clean checkout” and “Build: release”, matching `BUILD-INFO.txt`. No model logic changed between this build and the `5c0eb8c` retest.
 
 ### New defects fixed
 
@@ -134,9 +150,15 @@ Recovery payloads are limited to 2 GiB and metadata to 64 KiB. Encoding remains 
 
 Geometry evidence includes `king-90mm.json`, `king-undo.json`, `turtle-undo.json`, `turtle-rollback.json`, `turtle-inch-smooth.json`, `beethoven-moved.json`, `gear-rerun.json`, `beethoven-recovery-envelope.json` and `beethoven-recovered.json`. Native exports and saved test copies are alongside them.
 
+### Saved-file and delivery verification
+
+The four copies saved through native dialogs—king, turtle, gear and recovered Beethoven—each passed a fresh `check --rebuild` using the final clean packaged executable. The native king STL export reimported with **108,946 triangles and zero open edges**; the future-cache STL export reimported with **3,546 triangles and zero open edges**. Evidence: `evidence/unlocked/final-file-validation.json` and its log.
+
+The packaged app's ad-hoc signature verified in both the output pack and the Documents test pack. All **117 recorded file checksums** matched at delivery. The app bundle is excluded from that file manifest and verified by its signature instead. These checks confirm the delivered artifacts, not a physical print or every possible geometric property.
+
 ### Verification boundaries
 
-The full workspace suite after these fixes passed **417 tests, zero failures, five intentionally ignored**. The release build completed without warnings. The fix was pushed to `0.4-dev`; its [macOS/Linux CI run](https://github.com/base698/ferrender/actions/runs/37916523681) was still running when this follow-up was written. Earlier `c7dd232` [CI passed](https://github.com/base698/ferrender/actions/runs/37878285251). The local full-suite log is `evidence/unlocked/full-suite.log`.
+The full workspace suite after these fixes passed **417 tests, zero failures, five intentionally ignored**. The release build completed without warnings. The fixes and report were pushed to `0.4-dev`. At the status check above, both the [code-fix CI](https://github.com/base698/ferrender/actions/runs/37916523681) and [delivered-build CI](https://github.com/base698/ferrender/actions/runs/37917098628) were still running; the delivered-build macOS and Ubuntu jobs were building all workspace targets. Earlier `c7dd232` [CI passed](https://github.com/base698/ferrender/actions/runs/37878285251). The local full-suite log is `evidence/unlocked/full-suite.log`.
 
 Discrete Front/Top/isometric controls, Fit, selection and numeric movement were verified. The automation tool's continuous drag gestures did not produce a reliably observable orbit, so **coarse-LOD interaction, continuous orbit frame rate and drag feel remain human checks**. This is not evidence of a Ferrender orbit defect. One native unsaved-changes confirmation blocked accessibility automation until the user clicked Cancel; no app crash was inferred from that tool limitation. Subsequent tests saved their copies before opening another file.
 
