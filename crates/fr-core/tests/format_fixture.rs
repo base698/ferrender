@@ -19,8 +19,9 @@ fn tiny_stl() -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("scan.stl");
     let mut bytes = vec![b' '; 80];
-    bytes.extend(2u32.to_le_bytes());
-    for t in [[[0.0f32, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]], [[0.0, 0.0, 0.0], [0.0, 10.0, 0.0], [10.0, 0.0, 0.0]]] {
+    bytes.extend(4u32.to_le_bytes());
+    // A tetrahedron: four triangles sharing four corners, closed and outward.
+    for t in [[[0.0f32, 0.0, 0.0], [0.0, 10.0, 0.0], [10.0, 0.0, 0.0]], [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 0.0, 10.0]], [[0.0, 0.0, 0.0], [0.0, 0.0, 10.0], [0.0, 10.0, 0.0]], [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]]] {
         bytes.extend([0u8; 12]);
         for v in t { for c in v { bytes.extend(c.to_le_bytes()); } }
         bytes.extend([0u8; 2]);

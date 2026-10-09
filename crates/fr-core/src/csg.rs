@@ -154,7 +154,7 @@ impl Node {
 
 fn tree(m: &Mesh) -> Node {
     let mut n = Node::default();
-    n.build(m.tris.iter().filter_map(|t| Poly::new(t.to_vec())).collect());
+    n.build(m.tris().filter_map(|t| Poly::new(t.to_vec())).collect());
     n
 }
 
@@ -166,7 +166,7 @@ fn mesh(n: &Node) -> Mesh {
         for i in 1..p.v.len() - 1 {
             let t = [p.v[0], p.v[i], p.v[i + 1]];
             if (t[1] - t[0]).cross(t[2] - t[0]).length_squared() > 1e-20 {
-                m.tris.push(t);
+                m.push(t);
             }
         }
     }
@@ -184,8 +184,8 @@ pub enum Bool {
 pub const MAX_TRIS: usize = 400_000;
 
 pub fn boolean(a: &Mesh, b: &Mesh, op: Bool) -> Result<Mesh, String> {
-    if a.tris.len() + b.tris.len() > MAX_TRIS {
-        return Err(format!("the meshes have {} triangles; booleans are limited to {MAX_TRIS}", a.tris.len() + b.tris.len()));
+    if a.len() + b.len() > MAX_TRIS {
+        return Err(format!("the meshes have {} triangles; booleans are limited to {MAX_TRIS}", a.len() + b.len()));
     }
     // The trees recurse as deep as the mesh is convex, so give them room.
     let (a, b) = (a.clone(), b.clone());

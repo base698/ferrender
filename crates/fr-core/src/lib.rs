@@ -13,6 +13,7 @@ pub mod face;
 pub mod io;
 pub mod measure;
 pub mod mesh;
+pub mod meshfile;
 pub mod ops;
 pub mod profile;
 pub mod primitives;

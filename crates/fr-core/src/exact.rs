@@ -174,8 +174,7 @@ pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> {
         // Deflection times surface area is a conservative volume error bound;
         // it also avoids false failures on tiny or very thin curved bodies.
         let (mesh,_)=tessellate(&out)?;
-        let origin=mesh.tris.first().map_or(DVec3::ZERO,|t|t[0]);
-        let mesh_volume=mesh.tris.iter().map(|t|(t[0]-origin).dot((t[1]-origin).cross(t[2]-origin))).sum::<f64>()/6.0;
+        let mesh_volume=mesh.volume();
         let tolerance=2.0*FINE.deflection_linear*out.iter().map(Solid::area).sum::<f64>()+slack;
         if !mesh_volume.is_finite() || mesh_volume < -slack || (mesh_volume-v).abs()>tolerance {
             return Err("the kernel could not make a reliable closed surface for that operation; try simplifying the intersecting faces".into());
@@ -198,15 +197,18 @@ pub fn tessellate(lumps: &[Solid]) -> R<(Mesh, Vec<Vec<DVec3>>)> {
         return Ok((Mesh::default(), Vec::new()));
     }
     let m = Solid::mesh(lumps.iter(), FINE).map_err(|e| format!("the kernel could not triangulate the body: {e}"))?;
-    let mut mesh = Mesh::default();
+    let mut tris = Vec::with_capacity(m.indices.len() / 3);
+    let mut face_ids = Vec::with_capacity(m.indices.len() / 3);
     for (i, t) in m.indices.chunks_exact(3).enumerate() {
         let tri = [g(m.vertices[t[0]]), g(m.vertices[t[1]]), g(m.vertices[t[2]])];
         // Blend surfaces can collapse a triangle to nothing at a pole.
         if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() > 1e-20 {
-            mesh.tris.push(tri);
-            mesh.face_ids.push(m.face_ids[i]);
+            tris.push(tri);
+            face_ids.push(m.face_ids[i]);
         }
     }
+    let mut mesh = Mesh::from_tris(tris);
+    mesh.face_ids = face_ids;
     let edges = lumps.iter().flat_map(real_edges).map(|e| e.approximation_segments(FINE).into_iter().map(g).collect::<Vec<_>>()).filter(|e| e.len() >= 2).collect();
     Ok((mesh, edges))
 }

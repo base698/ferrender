@@ -115,8 +115,9 @@ fn an_imported_mesh_is_stored_as_a_binary_blob() {
     let d = dir("mesh");
     let stl = d.join("tri.stl");
     let mut bytes = vec![b' '; 80];
-    bytes.extend(2u32.to_le_bytes());
-    for t in [[[0.0f32, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]], [[0.0, 0.0, 0.0], [0.0, 10.0, 0.0], [10.0, 0.0, 0.0]]] {
+    bytes.extend(4u32.to_le_bytes());
+    // A tetrahedron: four triangles sharing four corners, closed and outward.
+    for t in [[[0.0f32, 0.0, 0.0], [0.0, 10.0, 0.0], [10.0, 0.0, 0.0]], [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 0.0, 10.0]], [[0.0, 0.0, 0.0], [0.0, 0.0, 10.0], [0.0, 10.0, 0.0]], [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]]] {
         bytes.extend([0u8; 12]);
         for v in t { for c in v { bytes.extend(c.to_le_bytes()); } }
         bytes.extend([0u8; 2]);
@@ -126,12 +127,14 @@ fn an_imported_mesh_is_stored_as_a_binary_blob() {
     run(&mut s, json!({"op": "import_stl", "path": stl.display().to_string(), "units": "mm"}));
     let path = d.join("scan.ferr");
     assert!(s.save(&path).unwrap().container);
-    assert_eq!(entries(&path), ["design.json", "manifest.json", "meshes/1.tris", "thumbnail.png"]);
-    assert_eq!(entry(&path, "meshes/1.tris").len(), 2 * 36, "raw little-endian f32 triples, 36 bytes a triangle");
+    assert_eq!(entries(&path), ["design.json", "manifest.json", "meshes/1.mesh", "thumbnail.png"]);
+    // Four triangles sharing four corners: a 32-byte header, four f32 positions, four u32 index triples.
+    assert_eq!(entry(&path, "meshes/1.mesh").len(), 32 + 4 * 12 + 4 * 12);
     let again = Session::open(&path).unwrap();
     assert_eq!(again.doc, s.doc);
     assert_eq!(again.built.bodies.len(), 1);
-    assert_eq!(again.built.bodies[0].mesh.tris.len(), 2);
+    assert_eq!(again.built.bodies[0].mesh.len(), 4);
+    assert!(again.built.bodies[0].mesh.is_welded() && again.built.bodies[0].mesh.open_edges() == 0);
 }
 
 #[test]

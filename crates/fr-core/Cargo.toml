@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 base64 = "0.23.1"
+crc32fast = "1"
 cadrum = { version = "=0.8.20", default-features = false }
 earcutr = "0.5.0"
 glam = { version = "0.34.1", features = ["serde"] }

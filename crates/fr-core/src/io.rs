@@ -13,13 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use glam::DVec3;
 use serde_json::{Value, json};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::doc::{Body, Document, FeatureKind};
-use crate::mesh::Mesh;
 use crate::units::Unit;
 
 /// Written into every native file so other tools can recognise it.
@@ -31,17 +29,20 @@ pub const CONTAINER_VERSION: u32 = 9;
 pub const CONTAINER_FORMAT: &str = "ferrender-container";
 
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_CONTAINER_BYTES: usize = 512 * 1024 * 1024;
+const MAX_CONTAINER_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 const MAX_IMAGE_BLOB: usize = 20 * 1024 * 1024;
-/// One million triangles of f32 triples, the mesh limit `Mesh::validate` enforces.
-const MAX_MESH_BLOB: usize = 1_000_000 * 36;
+/// A mesh blob at the triangle limit, every vertex unshared (see `meshfile`).
+const MAX_MESH_BLOB: usize = crate::meshfile::MAX_BLOB_BYTES;
 const MAX_THUMBNAIL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 /// Thumbnails are rendered in software; a scene this large is skipped rather than slow down every save.
 pub const THUMBNAIL_MAX_TRIANGLES: usize = 2_000_000;
 pub const THUMBNAIL_SIZE: usize = 256;
-const MAX_STL_BYTES: usize = 128 * 1024 * 1024;
+/// Mesh blobs above this are deflated at the fastest level: a 5 million triangle save must not wait on the compressor.
+const FAST_DEFLATE_ABOVE: usize = 8 * 1024 * 1024;
+
+pub use crate::meshfile::{parse_stl, read_mesh_file as import_mesh, read_stl};
 
 /// What a save adds beyond the document.
 #[derive(Default, Clone)]
@@ -91,6 +92,15 @@ fn json_value(doc: &Document) -> Value {
     v
 }
 
+/// The document's JSON with every mesh taken out: markers `{"blob": "#k"}` stand in, and the
+/// k-th encoded mesh is in the returned list. Meshes never pass through base64 this way.
+fn json_value_detached(doc: &Document) -> (Value, Vec<Vec<u8>>) {
+    crate::mesh::BLOBS.with(|b| { let mut b = b.borrow_mut(); b.detaching = true; b.out.clear(); });
+    let v = json_value(doc);
+    let out = crate::mesh::BLOBS.with(|b| { let mut b = b.borrow_mut(); b.detaching = false; std::mem::take(&mut b.out) });
+    (v, out)
+}
+
 /// The plain-JSON form, payloads inline, as every version before 9 wrote it.
 pub fn to_json(doc: &Document) -> String {
     serde_json::to_string_pretty(&json_value(doc)).unwrap()
@@ -113,7 +123,8 @@ struct Blob {
 }
 
 /// Moves the binary payloads out of the JSON into blobs, leaving markers behind.
-fn detach_blobs(v: &mut Value) -> Result<Vec<Blob>, String> {
+/// `meshes` are the encoded meshes `json_value_detached` took out, in marker order.
+fn detach_blobs(v: &mut Value, mut meshes: Vec<Vec<u8>>) -> Result<Vec<Blob>, String> {
     let mut blobs = Vec::new();
     let Some(features) = v["features"].as_array_mut() else { return Ok(blobs) };
     for f in features {
@@ -124,17 +135,18 @@ fn detach_blobs(v: &mut Value) -> Result<Vec<Blob>, String> {
             f["kind"]["sketch"]["reference"]["png"] = json!({"blob": name});
             blobs.push(Blob { name, bytes, stored: true });
         }
-        if let Some(mesh) = f["kind"]["import"].as_str() {
-            let bytes = B64.decode(mesh).map_err(|_| "an imported mesh is not valid base64")?;
-            let name = format!("meshes/{id}.tris");
-            f["kind"]["import"] = json!({"blob": name});
+        if let Some(k) = f["kind"]["import"]["blob"].as_str().and_then(|m| m.strip_prefix('#')).and_then(|k| k.parse::<usize>().ok()) {
+            let bytes = std::mem::take(meshes.get_mut(k).ok_or("a mesh marker points past the detached meshes")?);
+            let name = format!("meshes/{id}.mesh");
+            f["kind"]["import"]["blob"] = json!(name);
             blobs.push(Blob { name, bytes, stored: false });
         }
     }
     Ok(blobs)
 }
 
-/// Puts blobs back where `detach_blobs` took them from. `read` is given the entry name and its byte limit.
+/// Reads the blobs `detach_blobs` left markers for: images go back inline, meshes are decoded into
+/// the thread-local store the document reader takes them from. `read` is given the entry name and its byte limit.
 fn attach_blobs(v: &mut Value, mut read: impl FnMut(&str, usize) -> Result<Vec<u8>, String>) -> Result<(), String> {
     let Some(features) = v["features"].as_array_mut() else { return Ok(()) };
     for f in features {
@@ -144,7 +156,8 @@ fn attach_blobs(v: &mut Value, mut read: impl FnMut(&str, usize) -> Result<Vec<u
         }
         if let Some(name) = f["kind"]["import"]["blob"].as_str().map(str::to_owned) {
             let bytes = read(&name, MAX_MESH_BLOB)?;
-            f["kind"]["import"] = json!(B64.encode(bytes));
+            let mesh = if name.ends_with(".tris") { crate::meshfile::decode_tris_blob(&bytes) } else { crate::meshfile::decode_blob(&bytes) }.map_err(|e| format!("{name}: {e}"))?;
+            crate::mesh::BLOBS.with(|b| b.borrow_mut().incoming.insert(name, mesh));
         }
     }
     Ok(())
@@ -154,8 +167,8 @@ fn attach_blobs(v: &mut Value, mut read: impl FnMut(&str, usize) -> Result<Vec<u
 /// Returns the bytes and whether they are a container.
 pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String> {
     crate::validation::document(doc)?;
-    let mut v = json_value(doc);
-    let blobs = detach_blobs(&mut v)?;
+    let (mut v, meshes) = json_value_detached(doc);
+    let blobs = detach_blobs(&mut v, meshes)?;
     if blobs.is_empty() {
         let text = serde_json::to_string_pretty(&v).unwrap();
         if text.len() > MAX_NATIVE_BYTES { return Err("the Ferrender file exceeds 64 MiB".into()); }
@@ -163,8 +176,9 @@ pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String
     }
     let design = serde_json::to_string_pretty(&v).unwrap();
     if design.len() > MAX_NATIVE_BYTES { return Err("the Ferrender design exceeds 64 MiB".into()); }
-    let deflate = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let store = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let deflate = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated).large_file(true);
+    let fast = deflate.compression_level(Some(1));
+    let store = SimpleFileOptions::default().compression_method(CompressionMethod::Stored).large_file(true);
     let mut entries: Vec<&str> = vec!["manifest.json", "design.json"];
     entries.extend(blobs.iter().map(|b| b.name.as_str()));
     let thumbnail = extras.thumbnail_png.as_ref().filter(|t| !t.is_empty() && t.len() <= MAX_THUMBNAIL_BYTES);
@@ -186,13 +200,13 @@ pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String
     put(&mut zip, "manifest.json", serde_json::to_string_pretty(&manifest).unwrap().as_bytes(), deflate)?;
     put(&mut zip, "design.json", design.as_bytes(), deflate)?;
     for b in &blobs {
-        put(&mut zip, &b.name, &b.bytes, if b.stored { store } else { deflate })?;
+        put(&mut zip, &b.name, &b.bytes, if b.stored { store } else if b.bytes.len() > FAST_DEFLATE_ABOVE { fast } else { deflate })?;
     }
     if let Some(t) = thumbnail {
         put(&mut zip, "thumbnail.png", t, store)?;
     }
     let bytes = zip.finish().map_err(|e| format!("could not finish the container: {e}"))?.into_inner();
-    if bytes.len() > MAX_CONTAINER_BYTES { return Err("the Ferrender file exceeds 512 MiB".into()); }
+    if bytes.len() > MAX_CONTAINER_BYTES { return Err("the Ferrender file exceeds 2 GiB".into()); }
     Ok((bytes, true))
 }
 
@@ -221,7 +235,7 @@ fn entry_allowed(name: &str) -> bool {
         return false;
     }
     let numbered = |dir: &str, ext: &str| name.strip_prefix(dir).and_then(|r| r.strip_suffix(ext)).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    matches!(name, "manifest.json" | "design.json" | "thumbnail.png") || numbered("images/", ".png") || numbered("meshes/", ".tris")
+    matches!(name, "manifest.json" | "design.json" | "thumbnail.png") || numbered("images/", ".png") || numbered("meshes/", ".mesh") || numbered("meshes/", ".tris")
 }
 
 /// Reads one entry, refusing before decompression if it declares more than `max` bytes.
@@ -262,13 +276,15 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
     if !bytes.starts_with(b"PK") {
         return from_json(std::str::from_utf8(bytes).map_err(|_| "the Ferrender file is not UTF-8")?);
     }
-    if bytes.len() > MAX_CONTAINER_BYTES { return Err("the Ferrender file exceeds 512 MiB".into()); }
+    if bytes.len() > MAX_CONTAINER_BYTES { return Err("the Ferrender file exceeds 2 GiB".into()); }
     let mut archive = open_container(bytes)?;
     read_manifest(&mut archive)?;
     let design = read_entry(&mut archive, "design.json", MAX_NATIVE_BYTES)?;
     let mut v: Value = serde_json::from_slice(&design).map_err(|e| format!("the container's design is damaged: {e}"))?;
-    attach_blobs(&mut v, |name, max| read_entry(&mut archive, name, max))?;
-    from_value(v)
+    crate::mesh::BLOBS.with(|b| b.borrow_mut().incoming.clear());
+    let result = attach_blobs(&mut v, |name, max| read_entry(&mut archive, name, max)).and_then(|_| from_value(v));
+    crate::mesh::BLOBS.with(|b| b.borrow_mut().incoming.clear());
+    result
 }
 
 /// The same structural and size guarantees apply to save, recovery and open.
@@ -374,11 +390,13 @@ fn iso_now() -> String {
 
 /// Binary STL of the bodies, with coordinates written in `unit`.
 pub fn stl_bytes<'a>(bodies: impl IntoIterator<Item = &'a Body>, unit: Unit) -> Vec<u8> {
-    let tris: Vec<&[DVec3; 3]> = bodies.into_iter().flat_map(|b| &b.mesh.tris).collect();
+    let bodies: Vec<&Body> = bodies.into_iter().collect();
+    let count: usize = bodies.iter().map(|b| b.mesh.len()).sum();
     let mut out = format!("Ferrender STL, units: {}", unit.name()).into_bytes();
     out.resize(80, b' ');
-    out.extend((tris.len() as u32).to_le_bytes());
-    for t in tris {
+    out.reserve(count * 50 + 4);
+    out.extend((count as u32).to_le_bytes());
+    for t in bodies.iter().flat_map(|b| b.mesh.tris()) {
         let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
         for v in [n, t[0] / unit.mm(), t[1] / unit.mm(), t[2] / unit.mm()] {
             for c in v.to_array() {
@@ -398,47 +416,4 @@ pub fn write_stl<'a>(bodies: impl IntoIterator<Item = &'a Body>, unit: Unit, pat
     }
     std::fs::write(path, bytes).map_err(|e| format!("could not write {}: {e}", path.display()))?;
     Ok(n)
-}
-
-/// Reads a binary or ASCII STL; `unit` says what its numbers mean.
-pub fn parse_stl(bytes: &[u8], unit: Unit) -> Result<Mesh, String> {
-    if bytes.len() > MAX_STL_BYTES { return Err("the STL exceeds 128 MiB".into()); }
-    let s = unit.mm();
-    let mut m = Mesh::default();
-    let count = bytes.get(80..84).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
-    if let Some(n) = count
-        && bytes.len() == 84 + n * 50
-    {
-        for t in bytes[84..].chunks_exact(50) {
-            let f = |i: usize| f32::from_le_bytes([t[i], t[i + 1], t[i + 2], t[i + 3]]) as f64 * s;
-            let v = |i: usize| DVec3::new(f(i), f(i + 4), f(i + 8));
-            m.tris.push([v(12), v(24), v(36)]);
-        }
-    } else {
-        let text = std::str::from_utf8(bytes).map_err(|_| "not an STL file".to_owned())?;
-        let mut vs = Vec::new();
-        for line in text.lines() {
-            let mut w = line.split_whitespace();
-            if w.next() == Some("vertex") {
-                let c: Vec<f64> = w.map(str::parse).collect::<Result<_, _>>().map_err(|_| "the STL has a malformed vertex")?;
-                if c.len() != 3 {
-                    return Err("the STL has a malformed vertex".into());
-                }
-                vs.push(DVec3::new(c[0], c[1], c[2]) * s);
-            }
-        }
-        if vs.len() % 3 != 0 { return Err("the STL has an incomplete triangle".into()); }
-        m.tris = vs.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
-    }
-    if m.tris.is_empty() || m.tris.iter().flatten().any(|v| !v.is_finite()) {
-        return Err("the STL has no usable triangles".into());
-    }
-    // Meshes are saved as 32-bit floats; settle on those values now.
-    m.map(|v| v.as_vec3().as_dvec3());
-    m.validate()?;
-    Ok(m)
-}
-
-pub fn read_stl(path: &Path, unit: Unit) -> Result<Mesh, String> {
-    parse_stl(&read_bounded(path, MAX_STL_BYTES)?, unit)
 }

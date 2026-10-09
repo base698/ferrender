@@ -58,7 +58,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Save As\u{2026}", &cmd("\u{21e7}S"), Action::SaveAs);
             item(app, ui, "Recover Unsaved\u{2026}", "", Action::Recover);
             ui.separator();
-            item(app, ui, "Import STL\u{2026}", &cmd("I"), Action::Import);
+            item(app, ui, "Import Mesh\u{2026}", &cmd("I"), Action::Import);
             item(app, ui, "Export STL\u{2026}", &cmd("E"), Action::Export);
             item(app, ui, "Export STEP\u{2026}", "", Action::ExportStep);
         });
@@ -346,7 +346,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "MESH", |ui| {
-                if big(ui, icon::DOWNLOAD_SIMPLE, "Import STL", false, "Bring a mesh in as a body").clicked() {
+                if big(ui, icon::DOWNLOAD_SIMPLE, "Import Mesh", false, "Bring an STL, OBJ or 3MF in as a body").clicked() {
                     app.run(&ctx, Action::Import);
                 }
                 if big(ui, icon::EXPORT, "Export STL", false, "Write the visible bodies for 3D printing").clicked() {
@@ -382,7 +382,7 @@ pub fn status(app: &mut App, ui: &mut Ui) {
                     let u = app.doc().units;
                     let size = b.mesh.bbox().map_or(glam::DVec3::ZERO, |(lo, hi)| hi - lo) / u.mm();
                     let n = |v: f64| fr_core::units::trim_num(v, 3);
-                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", format!("{} › {}", app.doc().component_name(b.component), b.name), if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.tris.len())).color(colors.muted));
+                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", format!("{} › {}", app.doc().component_name(b.component), b.name), if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.len())).color(colors.muted));
                 }
                 if let Some(f) = &app.sel_face
                     && let Some(b) = app.session.built.body(f.body)
@@ -1157,14 +1157,18 @@ fn dialogs(app: &mut App, ctx: &Context) {
             });
         }
         Dialog::Import(path, mut unit) => {
-            dialog_window(app, "Import STL").show(ctx, |ui| {
+            dialog_window(app, "Import mesh").show(ctx, |ui| {
                 ui.label(path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()));
-                ui.label("The file's numbers are in:");
-                ui.horizontal(|ui| {
-                    for u in Unit::ALL {
-                        ui.selectable_value(&mut unit, u, u.name());
-                    }
-                });
+                if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("3mf")) {
+                    ui.label("A 3MF carries its own unit.");
+                } else {
+                    ui.label("The file's numbers are in:");
+                    ui.horizontal(|ui| {
+                        for u in Unit::ALL {
+                            ui.selectable_value(&mut unit, u, u.name());
+                        }
+                    });
+                }
                 app.dialog = Dialog::Import(path.clone(), unit);
                 ui.horizontal(|ui| {
                     if ui.button("Import").clicked() {

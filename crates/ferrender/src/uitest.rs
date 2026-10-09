@@ -907,7 +907,7 @@ fn holes_and_threads_from_the_catalog() {
     h.state_mut().session.save(&path).unwrap();
     let again = fr_core::Session::open(&path).unwrap();
     assert!(again.built.errors.is_empty(), "{:?}", again.built.errors);
-    assert_eq!((again.built.bodies[0].threads.len(), again.built.bodies[0].mesh.tris.len()), (2, h.state().session.built.bodies[0].mesh.tris.len()));
+    assert_eq!((again.built.bodies[0].threads.len(), again.built.bodies[0].mesh.len()), (2, h.state().session.built.bodies[0].mesh.len()));
 }
 
 #[test]
@@ -1217,6 +1217,61 @@ fn appearance_renders_sketch_dialog_and_model_in_both_themes() {
     }
 }
 
+/// A binary STL of a closed sphere with about `n` triangles.
+fn sphere_stl(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
+    let rows = ((n / 2) as f64).sqrt() as usize;
+    let at = |i: usize, j: usize| {
+        // Exact poles, so the fan triangles there share one vertex.
+        if i == 0 { return DVec3::new(0.0, 0.0, 30.0); }
+        if i == rows { return DVec3::new(0.0, 0.0, -30.0); }
+        let (u, v) = (i as f64 / rows as f64 * std::f64::consts::PI, j as f64 / rows as f64 * std::f64::consts::TAU);
+        DVec3::new(30.0 * u.sin() * v.cos(), 30.0 * u.sin() * v.sin(), 30.0 * u.cos())
+    };
+    let mut bytes = vec![b' '; 80];
+    bytes.extend([0u8; 4]);
+    let mut count = 0u32;
+    for i in 0..rows {
+        for j in 0..rows {
+            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, (j + 1) % rows), at(i, (j + 1) % rows));
+            for t in [[a, b, c], [a, c, d]] {
+                bytes.extend([0u8; 12]);
+                for v in t { for x in v.to_array() { bytes.extend((x as f32).to_le_bytes()); } }
+                bytes.extend([0u8; 2]);
+                count += 1;
+            }
+        }
+    }
+    bytes[80..84].copy_from_slice(&count.to_le_bytes());
+    let path = dir.join("sphere.stl");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn large_meshes_draw_through_the_indexed_path() {
+    let dir = out_dir().join("large-mesh");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = sphere_stl(&dir, 300_000);
+    let mut h = harness();
+    h.state_mut().opts.grid = false;
+    h.state_mut().import_stl(&path, fr_core::Unit::Mm);
+    h.run_steps(3);
+    let (body_id, tris, welded, open) = { let b = &h.state().session.built.bodies[0]; (b.id, b.mesh.len(), b.mesh.is_welded(), b.mesh.open_edges()) };
+    assert!(tris > crate::gpu::BIG, "the sphere must be big enough for the indexed path: {tris}");
+    assert!(welded && open == 0);
+    assert!(h.state().gpu);
+    let img = save(&mut h, "large-mesh-gpu.png");
+    assert_eq!(h.state().scene.big_count(), 1, "the sphere goes through the indexed path");
+    let bg = crate::theme::Palette::from_ctx(&h.ctx).background.to_array();
+    let centre = crate::view::to_screen(h.state(), DVec3::ZERO);
+    let px = img.get_pixel(centre.x as u32, centre.y as u32).0;
+    assert!((0..3).any(|i| px[i].abs_diff(bg[i]) > 60), "the large mesh must be shaded on screen: {px:?} vs {bg:?}");
+    // Picking goes through the BVH and lands on the sphere's surface.
+    let (id, at, _) = crate::view::pick_body(h.state(), &h.state().session.built, centre).expect("the sphere is under the pointer");
+    assert_eq!(id, body_id);
+    assert!((at.length() - 30.0).abs() < 0.5, "hit point {at} should lie on the sphere");
+}
+
 #[test]
 fn editing_extrusions_preserves_taper_and_through_all() {
     let mut h = state_harness();
@@ -1356,7 +1411,7 @@ fn failed_file_open_and_import_remain_visible_and_keep_the_design() {
     h.run_steps(3);
     assert_eq!(h.state().doc(), &original);
     assert_eq!(h.state().session.rev, revision);
-    h.get_by_label("Could not import STL");
+    h.get_by_label("Could not import the mesh");
     assert!(h.state().file_error.as_ref().is_some_and(|e| !e.message.is_empty()));
     key(&mut h, Key::Escape);
     assert!(h.state().file_error.is_none());

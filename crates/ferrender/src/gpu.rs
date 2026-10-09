@@ -53,19 +53,47 @@ struct G {
     @location(1) id: vec4f,
 };
 
-@fragment
-fn fs_geom(v: V) -> G {
+fn geom_out(plane: vec4f, id: vec3f, world: vec3f) -> G {
     if (u.cut.x > 0.5) {
-        if (dot(u.section.xyz, v.world) > u.section.w) {
+        if (dot(u.section.xyz, world) > u.section.w) {
             discard;
         }
         // With the near side cut away, an inside-out surface means we are looking into
         // a solid: draw that as the flat cut face.
-        if (dot(v.plane.xyz, u.eye.xyz) < 0.0) {
-            return G(u.section, vec4f(v.id.x, 2.0, -2.0, 0.0));
+        if (dot(plane.xyz, u.eye.xyz) < 0.0) {
+            return G(u.section, vec4f(id.x, 2.0, -2.0, 0.0));
         }
     }
-    return G(v.plane, vec4f(v.id, 0.0));
+    return G(plane, vec4f(id, 0.0));
+}
+
+@fragment
+fn fs_geom(v: V) -> G {
+    return geom_out(v.plane, v.id, v.world);
+}
+
+// Large meshes send positions only; the face plane comes from the position's
+// screen derivatives, turned outward by the triangle's winding.
+@vertex
+fn vs_big(@location(0) p: vec4f) -> V {
+    var o: V;
+    o.pos = vec4f(dot(u.right.xyz, p.xyz) + u.right.w, dot(u.up.xyz, p.xyz) + u.up.w, dot(u.depth.xyz, p.xyz) + u.depth.w, 1.0);
+    o.plane = vec4f(0.0);
+    o.id = vec3f(p.w, 0.0, -1.0);
+    o.world = p.xyz;
+    return o;
+}
+
+@fragment
+fn fs_big(v: V, @builtin(front_facing) front: bool) -> G {
+    var n = normalize(cross(dpdx(v.world), dpdy(v.world)));
+    if (dot(n, u.eye.xyz) < 0.0) {
+        n = -n;
+    }
+    if (!front) {
+        n = -n;
+    }
+    return geom_out(vec4f(n, dot(n, v.world)), v.id, v.world);
 }
 
 @group(0) @binding(1) var t_plane: texture_2d<f32>;
@@ -147,6 +175,39 @@ const UNIFORM_FLOATS: usize = 44;
 
 /// Floats per vertex: position, face normal and plane offset, body id, selected flag, exact face.
 const STRIDE: usize = 10;
+/// Bodies with more triangles than this are drawn indexed, positions only, with no face highlight.
+pub const BIG: usize = 200_000;
+/// Above this many triangles a body also carries a coarse copy for drawing while the view moves.
+pub const LOD_ABOVE: usize = 2_000_000;
+const COARSE_TARGET: usize = 400_000;
+
+/// A large mesh body as the GPU takes it: xyz and body id per vertex, u32 indices, and an optional coarse copy.
+pub struct BigMesh {
+    pub verts: Vec<f32>,
+    pub indices: Vec<u32>,
+    pub coarse: Option<(Vec<f32>, Vec<u32>)>,
+}
+
+impl BigMesh {
+    pub fn new(b: &Body) -> BigMesh {
+        let pack = |m: &fr_core::mesh::Mesh| {
+            let mut verts = Vec::with_capacity(m.vertex_count() * 4);
+            for p in m.positions() {
+                verts.extend([p.x as f32, p.y as f32, p.z as f32, b.id as f32]);
+            }
+            let indices: Vec<u32> = m.indices().iter().flatten().copied().collect();
+            (verts, indices)
+        };
+        let (verts, indices) = pack(&b.mesh);
+        let coarse = (b.mesh.len() > LOD_ABOVE).then(|| pack(&b.mesh.clustered_to(COARSE_TARGET)));
+        BigMesh { verts, indices, coarse }
+    }
+}
+
+struct BigBuffers {
+    full: (wgpu::Buffer, wgpu::Buffer, u32),
+    coarse: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+}
 
 struct Targets {
     size: [u32; 2],
@@ -159,12 +220,14 @@ struct Targets {
 /// Lives in egui's callback resources for the life of the window.
 pub struct Gpu {
     geom: wgpu::RenderPipeline,
+    big: wgpu::RenderPipeline,
     show: wgpu::RenderPipeline,
     show_layout: wgpu::BindGroupLayout,
     uniforms: wgpu::Buffer,
     geom_bind: wgpu::BindGroup,
     targets: Option<Targets>,
     verts: Option<(wgpu::Buffer, u32)>,
+    bigs: Vec<BigBuffers>,
     rev: u64,
 }
 
@@ -229,6 +292,33 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
+        let big = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ferrender big meshes"),
+            layout: Some(&layout(&geom_layout)),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_big"),
+                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 16, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x4] })],
+                compilation_options: Default::default(),
+            },
+            primitive,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_big"),
+                targets: &[Some(PLANE_FORMAT.into()), Some(ID_FORMAT.into())],
+                compilation_options: Default::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let show = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ferrender show"),
             layout: Some(&layout(&show_layout)),
@@ -245,7 +335,7 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
-        Gpu { geom, show, show_layout, uniforms, geom_bind, targets: None, verts: None, rev: 0 }
+        Gpu { geom, big, show, show_layout, uniforms, geom_bind, targets: None, verts: None, bigs: Vec::new(), rev: 0 }
     }
 
     fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) {
@@ -280,13 +370,13 @@ impl Gpu {
     }
 }
 
-/// Vertex data for a set of bodies. `face` marks one body's selected triangles.
+/// Vertex data for a set of bodies, skipping the large ones (see [`BigMesh`]). `face` marks one body's selected triangles.
 pub fn vertices<'a>(bodies: impl IntoIterator<Item = &'a Body>, face: Option<(u32, &[usize])>) -> Vec<f32> {
     let mut out = Vec::new();
-    for b in bodies {
+    for b in bodies.into_iter().filter(|b| b.mesh.len() <= BIG) {
         let picked = face.filter(|f| f.0 == b.id).map_or(&[][..], |f| f.1);
         let groups = b.mesh.groups();
-        for (i, t) in b.mesh.tris.iter().enumerate() {
+        for (i, t) in b.mesh.tris().enumerate() {
             let n = b.mesh.normal(i);
             let group = groups.as_ref().map_or(-1.0, |g| g[i] as f32);
             let w = n.dot(t[0]);
@@ -304,9 +394,12 @@ pub struct Frame {
     /// Reuse the last geometry image while previewing a timeline position.
     pub frozen: bool,
     pub painted: Option<Arc<AtomicBool>>,
-    /// Changes when `verts` does.
+    /// Changes when `verts` or `big` does.
     pub rev: u64,
     pub verts: Arc<Vec<f32>>,
+    pub big: Arc<Vec<BigMesh>>,
+    /// Draw the coarse copies of the large meshes (the view is moving).
+    pub coarse: bool,
     pub cam: Camera,
     /// Top-left corner and size of the viewport in physical pixels.
     pub origin: [f32; 2],
@@ -354,6 +447,10 @@ fn bytes(f: &[f32]) -> Vec<u8> {
     f.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
+fn index_bytes(i: &[u32]) -> Vec<u8> {
+    i.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
 impl egui_wgpu::CallbackTrait for Frame {
     fn prepare(&self, device: &wgpu::Device, queue: &wgpu::Queue, _screen: &egui_wgpu::ScreenDescriptor, encoder: &mut wgpu::CommandEncoder, resources: &mut egui_wgpu::CallbackResources) -> Vec<wgpu::CommandBuffer> {
         let Some(gpu) = resources.get_mut::<Gpu>() else { return Vec::new() };
@@ -370,6 +467,12 @@ impl egui_wgpu::CallbackTrait for Frame {
                 let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("ferrender bodies"), contents: &bytes(&self.verts), usage: wgpu::BufferUsages::VERTEX });
                 (buf, (self.verts.len() / STRIDE) as u32)
             });
+            let upload = |verts: &[f32], indices: &[u32]| {
+                let v = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("ferrender big mesh"), contents: &bytes(verts), usage: wgpu::BufferUsages::VERTEX });
+                let i = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("ferrender big mesh indices"), contents: &index_bytes(indices), usage: wgpu::BufferUsages::INDEX });
+                (v, i, indices.len() as u32)
+            };
+            gpu.bigs = self.big.iter().map(|m| BigBuffers { full: upload(&m.verts, &m.indices), coarse: m.coarse.as_ref().map(|(v, i)| upload(v, i)) }).collect();
         }
         queue.write_buffer(&gpu.uniforms, 0, &bytes(&self.uniforms()));
         let t = gpu.targets.as_ref().unwrap();
@@ -392,6 +495,19 @@ impl egui_wgpu::CallbackTrait for Frame {
             pass.set_bind_group(0, &gpu.geom_bind, &[]);
             pass.set_vertex_buffer(0, buf.slice(..));
             pass.draw(0..*count, 0..1);
+        }
+        if !gpu.bigs.is_empty() {
+            pass.set_pipeline(&gpu.big);
+            pass.set_bind_group(0, &gpu.geom_bind, &[]);
+            for b in &gpu.bigs {
+                let (v, i, n) = match (&b.coarse, self.coarse) {
+                    (Some(c), true) => c,
+                    _ => &b.full,
+                };
+                pass.set_vertex_buffer(0, v.slice(..));
+                pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*n, 0, 0..1);
+            }
         }
         Vec::new()
     }

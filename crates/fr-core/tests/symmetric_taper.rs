@@ -22,7 +22,7 @@ fn frustum(width: f64, depth: f64, t: f64, h: f64) -> f64 {
 }
 
 fn ring_points(mesh: &Mesh, plane: &Plane, z: f64) -> Vec<DVec2> {
-    mesh.tris.iter().flatten().filter(|p| (((**p - plane.origin).dot(plane.normal())) - z).abs() < 1e-8).map(|p| plane.to_local(*p)).collect()
+    mesh.tris().flatten().filter(|p| (((*p - plane.origin).dot(plane.normal())) - z).abs() < 1e-8).map(|p| plane.to_local(p)).collect()
 }
 
 fn assert_ring(mesh: &Mesh, plane: &Plane, z: f64, width: f64, depth: f64) {
@@ -42,7 +42,7 @@ fn assert_closed(mesh: &Mesh) {
     // counts: duplicate internal caps must not pass as a closed surface.
     let key = |p: DVec3| ((p.x * 1e7).round() as i64, (p.y * 1e7).round() as i64, (p.z * 1e7).round() as i64);
     let mut edges = BTreeMap::<_, (usize, i32)>::new();
-    for tri in &mesh.tris {
+    for tri in mesh.tris() {
         assert!((tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() > 1e-16);
         for i in 0..3 {
             let (a, b) = (key(tri[i]), key(tri[(i + 1) % 3]));
@@ -64,7 +64,7 @@ fn symmetric_taper_keeps_the_sketch_section_and_tapers_both_halves() {
             assert_ring(&mesh, &Plane::XY, 0.0, 20.0, 12.0);
             for z in [-6.0_f64, 6.0] { assert_ring(&mesh, &Plane::XY, z, 20.0 + 2.0 * z.abs() * t, 12.0 + 2.0 * z.abs() * t); }
             close(mesh.volume(), 2.0 * frustum(20.0, 12.0, t, 6.0));
-            assert!(!mesh.tris.iter().any(|tri| tri.iter().all(|p| p.z.abs() < 1e-8)), "the sketch plane must be a wall seam, not an internal cap");
+            assert!(!mesh.tris().any(|tri| tri.iter().all(|p| p.z.abs() < 1e-8)), "the sketch plane must be a wall seam, not an internal cap");
             assert_closed(&mesh);
         }
     }
@@ -119,7 +119,7 @@ fn one_sided_taper_keeps_its_existing_frustum_geometry() {
             assert_ring(&mesh, &Plane::XY, 0.0, 20.0, 12.0);
             assert_ring(&mesh, &Plane::XY, distance, 20.0 + 2.0 * distance.abs() * t, 12.0 + 2.0 * distance.abs() * t);
             close(mesh.volume(), frustum(20.0, 12.0, t, distance.abs()));
-            assert_eq!(mesh.tris.len(), 12, "one-sided rectangular extrusion should need no extra wall seam");
+            assert_eq!(mesh.len(), 12, "one-sided rectangular extrusion should need no extra wall seam");
             assert_closed(&mesh);
         }
     }

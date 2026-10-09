@@ -43,7 +43,7 @@ DOCUMENT
    A design with reference images or imported meshes is saved as a ZIP container (same JSON inside plus the blobs and a thumbnail); plain designs stay plain JSON. save returns "container" and, when it converted an older plain file, "backup" with the path of the kept original. open reads both forms.
    In the GUI, new and open refuse to discard unsaved work. Save first or set "discard_unsaved":true on that command to explicitly discard it, including inside a batch.
 {"op":"export_stl","path":"/abs/part.stl","units":"mm"}   units default to mm, which is what slicers expect
-{"op":"import_stl","path":"/abs/in.stl","units":"mm"}     adds the mesh as a body
+{"op":"import_mesh","path":"/abs/in.stl","units":"mm"}    adds an STL, OBJ or 3MF as a mesh body, repaired (degenerate and duplicate triangles dropped, orientation made consistent) with a report; import_stl is the same command
 {"op":"export_stl","path":"...","union":true}      merges overlapping bodies into one shell first (exact bodies only)
 {"op":"export_step","path":"/abs/part.step"}       exact bodies as true surfaces; meshes are skipped
 {"op":"batch","commands":[...]}                    runs several commands; stops at the first error
@@ -287,7 +287,7 @@ fn body_info(s: &Session, id: Id) -> Option<J> {
         "visible": !s.doc.hidden_bodies.contains(&id) && s.built.component_visible(b.component),
         // Exact bodies can be filleted, chamfered, shelled and written to STEP; meshes cannot.
         "kind": if b.is_exact() { "exact" } else { "mesh" },
-        "triangles": b.mesh.tris.len(),
+        "triangles": b.mesh.len(),
         "volume": r(volume / u.powi(3)),
         "surface_area": r(b.mesh.area() / u.powi(2)),
         "min": (lo / u).to_array().map(r),
@@ -317,8 +317,10 @@ fn marks(s: &Session) -> Vec<(Id, u64)> {
         .iter()
         .map(|b| {
             let mut mark = DefaultHasher::new();
-            b.mesh.tris.len().hash(&mut mark);
-            for vertex in b.mesh.tris.iter().flatten() {
+            b.mesh.len().hash(&mut mark);
+            // Every vertex of a small body; a sample of a large mesh, whose edits are features of their own anyway.
+            let step = (b.mesh.vertex_count() / 100_000).max(1);
+            for vertex in b.mesh.positions().iter().step_by(step) {
                 vertex.to_array().map(f64::to_bits).hash(&mut mark);
             }
             // Kernel face IDs contain process-local identities that change on every
@@ -437,7 +439,7 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             if let Some(body) = t.body { o["body"] = json!(body); }
             if let Some(face) = t.face { o["face"] = json!((face / doc.units.mm()).to_array()); }
         }
-        FeatureKind::Import(m) => o["triangles"] = json!(m.tris.len()),
+        FeatureKind::Import(m) => { o["triangles"] = json!(m.len()); o["vertices"] = json!(m.vertex_count()); }
         FeatureKind::Transform(t) => {
             o["body"] = json!(t.body);
             o["translate"] = json!(t.translate.iter().map(|v| v.expr.clone()).collect::<Vec<_>>());
@@ -722,7 +724,7 @@ fn text_fields(s: &Session, c: &J, t: &mut Text) -> R<()> {
             if !point.is_finite() { return Err("the text face point must be finite".into()); }
             let face = Face::near(body, point).ok_or("the body has no faces")?;
             let mut plane = face.plane.ok_or("text can only attach to a flat face")?;
-            let surface = Item::Surface(face.tris.iter().map(|i| body.mesh.tris[*i]).collect());
+            let surface = Item::Surface(face.tris.iter().map(|i| body.mesh.tri(*i)).collect());
             if measure::between(&Item::Point(point), &surface).distance > 1e-5 { return Err("the text face point must lie on the body's flat face".into()); }
             plane.origin = point - plane.normal() * (point - plane.origin).dot(plane.normal());
             t.plane = body.plane_to_local(plane);
@@ -749,8 +751,8 @@ fn text_face_edit_context(s: &Session, feature: Id, c: &J) -> R<Option<Session>>
         // just after this text with the currently displayed result to detect
         // later changes. Ignore kernel face IDs, which change on each rebuild.
         let same = context.built.body(body).zip(s.built.body(body)).is_some_and(|(before, now)| {
-            before.mesh.tris.len() == now.mesh.tris.len()
-                && before.mesh.tris.iter().flatten().zip(now.mesh.tris.iter().flatten()).all(|(a, b)| a.distance_squared(*b) <= 1e-14)
+            before.mesh.len() == now.mesh.len()
+                && before.mesh.tris().flatten().zip(now.mesh.tris().flatten()).all(|(a, b)| a.distance_squared(b) <= 1e-14)
         });
         if !same {
             return Err(format!("face coordinates for text feature {feature} are ambiguous because other timeline features changed the selected body; rollback to immediately before or after this text feature, select its base face again, then restore the timeline to end"));
@@ -920,7 +922,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 }
                 let mut mesh = exact::tessellate(&all)?.0;
                 // Threads are shells of their own and go along as they are.
-                mesh.tris.extend(picked.iter().flat_map(|b| b.threads.iter().flat_map(|t| t.tris.iter().copied())));
+                mesh.extend(picked.iter().flat_map(|b| b.threads.iter().flat_map(|t| t.tris())));
                 mesh.face_ids.clear();
                 let merged = crate::doc::Body { id: 0, name: "union".into(), component:0, placement:glam::DAffine3::IDENTITY, local_bounds:None, mesh, solids: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
                 let n = io::write_stl([&merged], unit, path.as_ref())?;
@@ -1035,7 +1037,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                     return b.edges.iter().min_by(|x, y| near(x).total_cmp(&near(y))).map(|e| Item::Path(e.clone())).ok_or("that body is a mesh and has no edges to measure; use a face or a point".into());
                 }
                 let face = Face::near(b, at("face")?).ok_or("the body has no faces")?;
-                Ok(Item::Surface(face.tris.iter().map(|t| b.mesh.tris[*t]).collect()))
+                Ok(Item::Surface(face.tris.iter().map(|t| b.mesh.tri(*t)).collect()))
             };
             let m = measure::between(&item("from")?, &item("to")?);
             let r = |v: f64| trim_num(v / u, 4).parse::<f64>().unwrap_or(0.0);
@@ -1623,9 +1625,9 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let removed=s.edit(|d|d.delete_feature(id))?;
             let mut out=changed(s,&before);out["removed_features"]=json!(removed);Ok(out)
         }
-        "import_stl" => {
-            let path = c["path"].as_str().ok_or("import_stl needs a \"path\"")?;
-            let mesh = io::read_stl(path.as_ref(), unit_of(c, Unit::Mm)?)?;
+        "import_stl" | "import_mesh" => {
+            let path = c["path"].as_str().ok_or("import_mesh needs a \"path\"")?;
+            let (mesh, report) = io::import_mesh(path.as_ref(), unit_of(c, Unit::Mm)?)?;
             let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
             let id = s.edit(|d| {
                 let id = d.add_feature(FeatureKind::Import(mesh));
@@ -1634,7 +1636,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 }
                 Ok(id)
             })?;
-            Ok(json!({"feature": id, "body": body_info(s, id)}))
+            Ok(json!({"feature": id, "body": body_info(s, id), "report": report, "summary": report.summary()}))
         }
         "transform" => {
             let body = id_of(c, "body")?;

@@ -44,7 +44,7 @@ impl Face {
         let plane = body.mesh.face_plane(&tris).map(|(p, n)| Plane::from_normal(n * n.dot(p), n));
         let outline = body.mesh.face_loops(&tris);
         let loops = plane.map_or(Vec::new(), |pl| outline.iter().map(|l| l.iter().map(|p| pl.to_local(*p)).collect()).collect());
-        let at = body.mesh.tris[tri].iter().sum::<DVec3>() / 3.0;
+        let at = body.mesh.tri(tri).iter().sum::<DVec3>() / 3.0;
         let exact_id = body.mesh.face_ids.get(tri).copied();
         Face { body: body.id, area: body.mesh.face_area(&tris), tris, plane, outline, loops, exact_edges: None, exact_id, at }
     }

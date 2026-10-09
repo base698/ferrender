@@ -133,7 +133,7 @@ pub fn commands(app: &App) -> Vec<Command> {
     for (title,action,hint) in [
         ("New Design",Action::New,"Start a new design."),("Open Design",Action::Open,"Open a saved Ferrender design."),
         ("Save",Action::Save,"Save the current design."),("Save As",Action::SaveAs,"Save the design to another file."),
-        ("Recover Unsaved Work",Action::Recover,"Open available recovery copies."),("Import STL",Action::Import,"Import a mesh body."),
+        ("Recover Unsaved Work",Action::Recover,"Open available recovery copies."),("Import Mesh",Action::Import,"Import an STL, OBJ or 3MF as a mesh body."),
         ("Parameters",Action::Parameters,"Edit named dimensions and values."),("Assistant",Action::Assistant,"Open the modeling assistant."),
         ("About Ferrender",Action::About,"Check version and commit information."),
     ] {add(title,action,"",hint,"file edit help",None);}

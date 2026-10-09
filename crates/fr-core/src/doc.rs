@@ -625,10 +625,10 @@ impl Body {
 
     /// Puts the threads back on a mesh that has just been rebuilt without them.
     fn dress(&mut self) {
-        self.plain = self.mesh.tris.len();
+        self.plain = self.mesh.len();
         let faces = !self.mesh.face_ids.is_empty();
         for (k, t) in self.threads.iter().enumerate() {
-            self.mesh.tris.extend(&t.tris);
+            self.mesh.append(t);
             if faces {
                 // Clear of anything the kernel numbers its faces with.
                 self.mesh.face_ids.extend(t.face_ids.iter().map(|part| u64::MAX - (k as u64 * 8 + part)));
@@ -637,12 +637,15 @@ impl Body {
     }
 
     /// The body without its threads, as booleans need it.
-    fn bare(&self) -> Mesh {
-        Mesh { tris: self.mesh.tris[..self.plain].to_vec(), face_ids: Vec::new() }
+    pub fn bare(&self) -> Mesh {
+        if self.threads.is_empty() { let mut m = self.mesh.clone(); m.face_ids.clear(); return m; }
+        let mut m = self.mesh.head(self.plain);
+        m.face_ids.clear();
+        m
     }
 
     fn add_thread(&mut self, thread: Mesh) {
-        let mesh = Mesh { tris: self.mesh.tris[..self.plain].to_vec(), face_ids: self.mesh.face_ids[..self.plain.min(self.mesh.face_ids.len())].to_vec() };
+        let mesh = self.mesh.head(self.plain);
         self.mesh = mesh;
         self.threads.push(thread);
         self.dress();
@@ -655,7 +658,8 @@ impl Body {
             return self.set_exact(made);
         }
         let tool = exact::tessellate(tool)?.0;
-        let made = csg::boolean(&self.bare(), &Mesh { tris: tool.tris, face_ids: Vec::new() }, Bool::Subtract)?;
+        let mut tool = tool; tool.face_ids.clear();
+        let made = csg::boolean(&self.bare(), &tool, Bool::Subtract)?;
         self.set_mesh(made);
         Ok(())
     }
@@ -703,7 +707,7 @@ impl Shape {
 
     fn mesh(&self) -> Result<Mesh, String> {
         match self {
-            Shape::Exact(l) => exact::tessellate(l).map(|t| Mesh { tris: t.0.tris, face_ids: Vec::new() }),
+            Shape::Exact(l) => exact::tessellate(l).map(|t| { let mut m = t.0; m.face_ids.clear(); m }),
             Shape::Mesh(m) => Ok(m.clone()),
         }
     }
@@ -1188,7 +1192,7 @@ impl Document {
                 let tool = exact::extrude(&refs, &plane, z0, z1)?;
                 let made = exact::boolean(&bodies[i].solids, &tool, operation)?;
                 bodies[i].set_exact(made)?;
-                bodies.retain(|b| !b.mesh.tris.is_empty());
+                bodies.retain(|b| !b.mesh.is_empty());
                 Ok(())
             }
             FeatureKind::Transform(t) => {
@@ -1244,7 +1248,7 @@ impl Document {
                 if !c.keep_tools {
                     bodies.retain(|b| !c.tools.contains(&b.id));
                 }
-                bodies.retain(|b| !b.mesh.tris.is_empty());
+                bodies.retain(|b| !b.mesh.is_empty());
                 Ok(())
             }
             FeatureKind::Blend(b) => {
@@ -1471,7 +1475,7 @@ impl Document {
                         }
                     }
                 }
-                bodies.retain(|b| !b.mesh.tris.is_empty());
+                bodies.retain(|b| !b.mesh.is_empty());
             }
         }
         Ok(())
@@ -1632,7 +1636,7 @@ impl Session {
     /// Like [`Session::save`], naming the application in the container manifest.
     pub fn save_as(&mut self, path: &Path, app: Option<String>) -> Result<crate::io::Saved, String> {
         let mut extras = crate::io::Extras { thumbnail_png: None, app };
-        if crate::io::needs_container(&self.doc) && self.built.bodies.iter().map(|b| b.mesh.tris.len()).sum::<usize>() <= crate::io::THUMBNAIL_MAX_TRIANGLES {
+        if crate::io::needs_container(&self.doc) && self.built.bodies.iter().map(|b| b.mesh.len()).sum::<usize>() <= crate::io::THUMBNAIL_MAX_TRIANGLES {
             let size = crate::io::THUMBNAIL_SIZE;
             extras.thumbnail_png = Some(crate::render::snapshot(self, None, size, size).png());
         }

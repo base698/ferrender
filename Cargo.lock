@@ -1362,6 +1362,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "cadrum",
+ "crc32fast",
  "earcutr",
  "glam",
  "image",

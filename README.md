@@ -366,7 +366,7 @@ These are exact solids that support subsequent sketches, fillets, holes, transfo
 
 An untapered sketch extrusion, revolve or primitive creates an exact solid: true
 planes, cylinders and blends, turned into triangles only for display and STL.
-An imported STL, a tapered extrude, and anything combined with one of those is
+An imported mesh, a tapered extrude, and anything combined with one of those is
 a mesh body. Both kinds work with extrude, revolve, cut, join, move and
 pattern. Only exact bodies can be filleted, chamfered, shelled or written to
 STEP. The status bar says which kind the selected body is.
@@ -501,9 +501,15 @@ works between Ferrender windows.
 
 ### Meshes
 
-Import STL (binary or ASCII) brings a mesh in as a body. Bodies
-can be moved, rotated and scaled, combined with each other, sketched on and
-cut. Export STL asks whether to write millimetres, centimetres or inches;
+Import Mesh reads STL (binary or ASCII), OBJ and 3MF and brings the mesh in
+as a body, streaming the file and sharing vertices as it goes, so scans of
+millions of triangles import in a few seconds and stay quick to orbit and
+pick. On import the mesh is repaired (degenerate and duplicate triangles
+dropped, neighbouring triangles turned to agree, closed shells turned
+outward) and the toast reports shells, open edges and non-manifold edges.
+Bodies above two million triangles draw a coarse copy while the view moves.
+Bodies can be moved, rotated and scaled, combined with each other, sketched
+on and cut. Export STL asks whether to write millimetres, centimetres or inches;
 slicers read STL as millimetres. Export STEP writes the exact bodies as true
 surfaces for other CAD programs; mesh bodies are left out.
 

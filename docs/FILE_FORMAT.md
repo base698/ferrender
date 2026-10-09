@@ -14,14 +14,14 @@ One UTF-8 JSON object, pretty-printed with two-space indentation, at most 64 MiB
 
 ### Container (first bytes `PK`)
 
-A ZIP archive, at most 512 MiB and 4096 entries, written when the design carries a reference image or an imported mesh. Entries, in the order written:
+A ZIP archive, at most 2 GiB and 4096 entries, written when the design carries a reference image or an imported mesh. Entries, in the order written:
 
 | Entry | Compression | Content |
 |---|---|---|
 | `manifest.json` | Deflate | `{"format":"ferrender-container","version":9,"min_reader":9,"design_version":N,"app":"Ferrender 0.4.0","kernel":{"cadrum":"0.8.20"},"saved":"2026-10-08T21:14:03Z","entries":[...]}`. `min_reader` is the lowest format version that can open the container; `design_version` is the version the JSON inside would carry as a plain file. |
 | `design.json` | Deflate | The document object exactly as the plain form, except that payload fields hold a marker object `{"blob": "<entry name>"}` instead of their base64 string. At most 64 MiB. |
 | `images/<feature id>.png` | Stored | A sketch's reference image, as the normalised RGBA8 PNG the plain form embeds in base64. At most 20 MiB each. |
-| `meshes/<feature id>.tris` | Deflate | An imported mesh: consecutive triangles of three vertices of three little-endian IEEE 754 `f32` values, 36 bytes per triangle, no header. At most 1 000 000 triangles. |
+| `meshes/<feature id>.mesh` | Deflate (fastest level above 8 MiB) | An imported mesh, indexed. A 32-byte header: the magic `FRMESH01`, then little-endian `u32` vertex count, triangle count, flags (bit 0: vertices are welded) and CRC-32 (IEEE, of everything after the header), then 8 reserved zero bytes. Then the vertices as three little-endian IEEE 754 `f32` each, then the triangles as three little-endian `u32` vertex indices each, counter-clockwise seen from outside. At most 16 000 000 triangles and three vertices per triangle. Readers also accept the pre-release `meshes/<id>.tris` entry: unindexed `f32` triangle triples, 36 bytes per triangle, no header. |
 | `thumbnail.png` | Stored | Optional. A 256 × 256 isometric render of the visible bodies at save time. At most 4 MiB. |
 
 Only these names are allowed; any other entry, any entry whose name contains `\`, starts with `/` or has a `.`/`..`/empty path segment, and any entry declaring more than its limit make the reader refuse the file before decompressing anything. Entry names use `/` as the separator. Entries are not encrypted and never use a compression method other than Deflate or Stored.
@@ -75,7 +75,7 @@ A dimension or feature value is `{"expr": "...", "v": 20.0}`: the expression as 
 | `revolve` | `sketch`, `profiles`, `axis` (`"x"`, `"y"` or `{"line": id}`), `angle` value, `op` | |
 | `pattern` | `source` (feature id), `kind`: `{"linear": {axis, count, spacing, second?: {axis, count, spacing}}}`, `{"circular": {axis, count, angle}}` or `{"mirror": {axis}}` | Axes are the owner component's: `0` = X, `1` = Y, `2` = Z. |
 | `primitive` | `shape` (`{"box": {width, depth, height}}`, `{"cylinder": {diameter, height}}`, `{"sphere": {diameter}}`, `{"cone": {bottom_diameter, top_diameter, height}}`, `{"torus": {major_radius, tube_radius}}`; all values), `position` [3 values], `rotate` [3 values], `op` | |
-| `import` | base64 string (plain form) or `{"blob": "meshes/N.tris"}` (container) | Little-endian `f32` triangle soup, 36 bytes per triangle. |
+| `import` | base64 string (plain form) or `{"blob": "meshes/N.mesh", "triangles": T}` (container) | The plain form is the little-endian `f32` triangle soup of versions 3–8, 36 bytes per triangle, at most 1 000 000 triangles; readers weld it on load. Meshes larger than that only exist in containers. |
 | `transform` | `body`, `translate` [3 values], `rotate` [3 values], `scale` value | Scale about the origin, rotate about X then Y then Z, then translate. |
 | `combine` | `target`, `tools` [body ids], `op`, `keep_tools` | |
 | `blend` | `body`, `edges` [[x,y,z]], `size` value, `chamfer` (bool), `frame` | A fillet when `chamfer` is false. Edges are named by a point on them; see References. |
@@ -119,12 +119,12 @@ The writer computes the lowest version that covers what the document uses; a rea
 | Limit | Value |
 |---|---|
 | Plain file or `design.json` | 64 MiB |
-| Container | 512 MiB, 4096 entries |
+| Container | 2 GiB, 4096 entries |
 | Features | 10 000 |
 | Parameters | 1024 |
 | Items in one sketch (points + entities + constraints + guides) | 10 000 |
 | Expression length | 4096 bytes |
-| Imported mesh | 1 000 000 triangles |
+| Imported mesh | 16 000 000 triangles (1 000 000 in the inline plain form); import files up to 800 MB |
 | Reference image | 4 megapixels, 8192 px per side, 20 MiB as PNG |
 | Document ids | `next_id` below `u32::MAX / 1000 − 10 000`, because pattern copies take `id * 1000 + k` |
 

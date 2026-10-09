@@ -57,6 +57,12 @@ pub struct Scene {
     key: Option<(u64, Option<Dialog>, Vec<Id>, Option<(Id, usize, usize)>)>,
     rev: u64,
     verts: Arc<Vec<f32>>,
+    /// The large mesh bodies, uploaded indexed and never re-sent for a selection change.
+    big_key: Option<(u64, Option<Dialog>, Vec<Id>)>,
+    big: Arc<Vec<gpu::BigMesh>>,
+    /// When the camera last changed, so large meshes draw coarse while the view moves.
+    moved: Option<std::time::Instant>,
+    last_cam: Option<Camera>,
     bounds: Option<(DVec3, DVec3)>,
     /// Software-rendered fallback, with what it was rendered for.
     /// Its background is transparent, so appearance changes do not invalidate it.
@@ -64,6 +70,9 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// How many bodies are drawn through the indexed large-mesh path.
+    pub fn big_count(&self) -> usize { self.big.len() }
+
     /// A new document can reuse session revisions; keep GPU revisions monotonic.
     pub fn invalidate(&mut self) {
         self.key = None;
@@ -387,14 +396,33 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
         let bodies: Vec<&Body> = app.shown().bodies.iter().filter(|b| !hidden.contains(&b.id) && app.body_visible(b)).collect();
         let verts = Arc::new(gpu::vertices(bodies.iter().copied(), face.as_ref().map(|f| (f.body, f.tris.as_slice()))));
         let bounds = bodies.iter().filter_map(|b| b.mesh.bbox()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let big_key = (key.0, key.1.clone(), key.2.clone());
+        if app.scene.big_key.as_ref() != Some(&big_key) {
+            app.scene.big = Arc::new(bodies.iter().filter(|b| b.mesh.len() > gpu::BIG).map(|b| gpu::BigMesh::new(b)).collect());
+            app.scene.big_key = Some(big_key);
+        }
         app.scene.verts = verts;
         app.scene.bounds = bounds;
         app.scene.rev += 1;
         app.scene.key = Some(key);
     }
-    if app.scene.verts.is_empty() {
+    if app.scene.verts.is_empty() && app.scene.big.is_empty() {
         app.timeline.software_done();
         return;
+    }
+    // While the camera is moving, meshes above the level-of-detail size draw their coarse copy;
+    // a repaint shortly after it stops brings the full mesh back.
+    let mut coarse = false;
+    if app.scene.big.iter().any(|b| b.coarse.is_some()) {
+        let now = std::time::Instant::now();
+        if app.scene.last_cam != Some(app.cam) {
+            app.scene.last_cam = Some(app.cam);
+            app.scene.moved = Some(now);
+        }
+        if let Some(t) = app.scene.moved && now.duration_since(t) < std::time::Duration::from_millis(150) {
+            coarse = true;
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(160));
+        }
     }
     let ppp = ui.ctx().pixels_per_point();
     let size = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
@@ -404,7 +432,7 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
         let reach = app.scene.bounds.map_or(100.0, |(lo, hi)| (0..8).map(|i| DVec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z }).distance(app.cam.target)).fold(0.0, f64::max)) * 1.05 + 1.0;
         painter.add(eframe::egui_wgpu::Callback::new_paint_callback(
             rect,
-            gpu::Frame { frozen: app.timeline.preview.is_some(), painted: app.timeline.paint_signal(), rev: app.scene.rev, verts: app.scene.verts.clone(), cam: app.cam, origin: [(rect.min.x * ppp).round(), (rect.min.y * ppp).round()], size, selected: app.sel_body, pixels_per_point: ppp, reach, section: section_plane(app) },
+            gpu::Frame { frozen: app.timeline.preview.is_some(), painted: app.timeline.paint_signal(), rev: app.scene.rev, verts: app.scene.verts.clone(), big: app.scene.big.clone(), coarse, cam: app.cam, origin: [(rect.min.x * ppp).round(), (rect.min.y * ppp).round()], size, selected: app.sel_body, pixels_per_point: ppp, reach, section: section_plane(app) },
         ));
         return;
     }
@@ -1504,7 +1532,7 @@ fn pick_item(app: &App, doc: &Document, pos: Pos2) -> Option<Picked> {
     let (id, at, tri) = pick_body(app, &app.session.built, pos)?;
     let body = app.session.built.body(id)?;
     let face = Face::pick(body, tri);
-    let item = Item::Surface(face.tris.iter().map(|t| body.mesh.tris[*t]).collect());
+    let item = Item::Surface(face.tris.iter().map(|t| body.mesh.tri(*t)).collect());
     // A round face says how big round it is, which is how a hole or a rod is measured.
     let round = fr_core::exact::barrel(&body.solids, &[at, at]).ok().filter(|_| body.is_exact() && face.plane.is_none());
     let label = match round {

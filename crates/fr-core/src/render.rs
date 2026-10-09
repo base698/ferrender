@@ -200,7 +200,7 @@ pub fn draw_bodies<'a>(img: &mut Image, bodies: impl IntoIterator<Item = &'a Bod
     let mut faces: Vec<(DVec3, f64, Id, Option<u32>)> = Vec::new();
     for b in bodies {
         let groups = b.mesh.groups();
-        for (ti, t) in b.mesh.tris.iter().enumerate() {
+        for (ti, t) in b.mesh.tris().enumerate() {
             let n = b.mesh.normal(ti);
             let p: Vec<(DVec2, f64)> = t.iter().map(|v| cam.project(*v)).map(|(s, d)| (s + half, d)).collect();
             let (a, bb, c) = (p[0].0, p[1].0, p[2].0);

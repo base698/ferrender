@@ -1748,14 +1748,14 @@ impl App {
         if self.file_error.is_some() { return; }
         let Some(request) = self.open_requests.pop() else { return; };
         match request {
-            Ok(path) if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) || confirm(self) => self.open_path(&path),
+            Ok(path) if is_mesh_file(&path) || confirm(self) => self.open_path(&path),
             Ok(_) => {},
             Err(error) => self.toast(error),
         }
     }
 
     pub fn open_path(&mut self, path: &Path) {
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) {
+        if is_mesh_file(path) {
             self.dialog = Dialog::Import(path.to_owned(), Unit::Mm);
             return;
         }
@@ -1808,25 +1808,24 @@ impl App {
     }
 
     pub fn import_stl(&mut self, path: &Path, unit: Unit) {
-        let r = io::read_stl(path, unit).and_then(|mesh| {
-            let tris = mesh.tris.len();
+        let r = io::import_mesh(path, unit).and_then(|(mesh, report)| {
             let name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
             self.session.edit(|d| {
                 let id = d.add_feature(FeatureKind::Import(mesh));
                 if let Some(n) = name {
                     d.feature_mut(id).unwrap().name = n;
                 }
-                Ok((id, tris))
+                Ok((id, report))
             })
         });
         match r {
-            Ok((id, tris)) => {
+            Ok((id, report)) => {
                 self.file_error = None;
                 self.sel_body = Some(id);
                 self.fit_pending = true;
-                self.toast(format!("Imported {tris} triangles."));
+                self.toast(format!("Imported {}.", report.summary()));
             }
-            Err(e) => self.file_error("Could not import STL", path, e, "Your current design has been kept."),
+            Err(e) => self.file_error("Could not import the mesh", path, e, "Your current design has been kept."),
         }
         self.refresh();
     }
@@ -1916,7 +1915,7 @@ impl App {
                 }
             }
             Action::Import => {
-                if let Some(p) = rfd::FileDialog::new().add_filter("STL mesh", &["stl"]).pick_file() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (STL, OBJ, 3MF)", &["stl", "obj", "3mf"]).pick_file() {
                     self.finish_sketch();
                     self.dialog = Dialog::Import(p, Unit::Mm);
                 }
@@ -2328,7 +2327,7 @@ impl eframe::App for App {
         self.process_open_request(Self::confirm_discard);
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             if let Some(p) = Some(f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()) {
-                if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) || self.confirm_discard() {
+                if is_mesh_file(&p) || self.confirm_discard() {
                     self.open_path(&p);
                 }
             }
@@ -2383,4 +2382,9 @@ impl eframe::App for App {
             }
         }
     }
+}
+
+/// A file the mesh importer reads rather than a design.
+pub fn is_mesh_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["stl", "obj", "3mf"].iter().any(|m| e.eq_ignore_ascii_case(m)))
 }
