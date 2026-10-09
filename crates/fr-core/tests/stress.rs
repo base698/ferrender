@@ -60,6 +60,9 @@ fn files() -> Vec<PathBuf> {
 const IMPORT_S_PER_M: f64 = 6.0;
 const PICK_MS_PER_M: f64 = 60.0;
 const SAVE_OPEN_S_PER_M: f64 = 8.0;
+/// The cut takes about 2 s per million on the development Mac and has taken 10.5 s on a hosted
+/// Intel runner. This catches an order-of-magnitude slowdown without failing on a slow machine.
+const BOOLEAN_S_PER_M: f64 = 30.0;
 
 #[test]
 fn large_meshes_import_pick_and_round_trip_within_budget() {
@@ -150,7 +153,7 @@ fn large_meshes_import_pick_and_round_trip_within_budget() {
                 assert!(check.built.errors.is_empty());
             }
         }
-        assert!(bool_s < 10.0 * m.max(0.5), "the robust boolean took {bool_s:.1} s");
+        assert!(bool_s < BOOLEAN_S_PER_M * m.max(0.5), "the robust boolean took {bool_s:.1} s");
 
         let mut s = Session::default();
         execute(&mut s, &json!({"op": "import_stl", "path": path.display().to_string(), "units": "mm"}), None).unwrap();
