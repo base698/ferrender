@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 fn cmd(s: &mut Session, c: Value) -> Value { execute(s, &c, None).unwrap_or_else(|e| panic!("{c}: {e}")) }
 
 fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ferrender-export-{}-{name}", std::process::id()));
+    // Tests run in parallel and several share a name: number each folder.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let d = std::env::temp_dir().join(format!("ferrender-export-{}-{name}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

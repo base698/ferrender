@@ -215,7 +215,7 @@ It is early, and smaller than what it imitates: no joints or linked component in
 
 ## Additions in 0.4.0
 
-**Ferrender 0.4.0** makes meshes a first-class body kind: indexed scans of millions of triangles support fast imports, BVH picking and a coarse display while orbiting, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans reject invalid inputs or results; complex scan intersections can still be refused. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and a geometry cache that opens without a rebuild, and a file from a newer Ferrender can still be viewed. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline. See the [0.4 review](docs/REVIEW_0.4.0.md) for measured test coverage, security boundaries and known limitations.
+**Ferrender 0.4.0** makes meshes a first-class body kind: indexed scans of millions of triangles support fast imports, BVH picking and a coarse display while orbiting, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans reject invalid inputs or results; complex scan intersections can still be refused. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and an authenticated local geometry cache that can skip rebuilding. Foreign or modified supported designs rebuild, while newer unsupported files are visibly unverified previews. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline. See the [0.4 review](docs/REVIEW_0.4.0.md) for measured test coverage, security boundaries and known limitations.
 
 See the [0.4.0 release notes](docs/releases/0.4.0.md), the [manual test plan](docs/TEST_PLAN_0.4.0.md), the [file format](docs/FILE_FORMAT.md), the [face relief tutorial](docs/tutorials/FACE_RELIEF_0.4.md) and the [0.4 plan with what shipped and what did not](docs/0.4-release.md).
 
@@ -373,19 +373,15 @@ These are exact solids that support subsequent sketches, fillets, holes, transfo
 
 ### Faces and edges
 
-Every face of an exact body carries a tag saying how it was made: swept from a
-particular sketch entity, the start or end cap of an extrude, or made by a
-fillet, hole, primitive or other feature, with split pieces and pattern copies
-numbered. Fillets, chamfers, shells, threads, text on a face and face-based
-construction planes store the tag beside the picked point and look for the
-face by tag first, by tag family second, and by position only when the body
-has no tags at all. So a fillet stays on the far edge of a block when the block
-grows, and a feature whose face has been cut away reports that it is gone
-rather than landing on the nearest thing. `get_object_info` on a body lists
-every face and edge with its tag, commands accept `{"tag": ...}` instead of a
-point, and a feature's info says whether its picks were resolved by tag, by
-family or by position. Designs from before 0.4 learn their tags when they are
-first opened.
+Faces of exact bodies carry identities based on sketch entities, primitive roles,
+source faces and the boundaries of split pieces. Fillets, chamfers, shells,
+threads, text and face planes use these identities through upstream edits.
+Pattern copies stay distinct and kernel face order is not an identity. A removed
+or ambiguous reference reports an error instead of choosing an unrelated face.
+`get_object_info` lists these tags and how picks resolved. Old files learn modern
+tags when the saved pick uniquely identifies its original face. Geometry without
+unique provenance uses a conservative signature and may need reselection after
+its shape changes; see the [review](docs/REVIEW_0.4.0.md) for the remaining limits.
 
 ### Exact and mesh bodies
 
@@ -543,9 +539,10 @@ from Image builds a height field from a photo or a depth map, bright pixels
 high, on a slab; inverted and thin it is a lithophane. Sculpt opens a brush
 (pull, push, inflate, smooth, flatten) and every click on the body adds one
 stroke to the timeline. Applying a mesh operation to an exact body makes it
-a mesh. Booleans between meshes split only the triangles near the other
-surface, so cutting a small tool out of a scan of millions of triangles takes
-a second or two. Over the command API the same
+a mesh. Mesh Booleans use Manifold with an exact rational fallback for difficult
+intersections. Results are checked again after conversion to the stored mesh
+precision. Work and triangle limits produce an error instead of a partial result.
+Over the command API the same
 operations take regions (a sphere, box, plane side, normal cone or connected
 shell) and `mesh_measure` reports shells, open edges, watertightness, volume
 and wall thickness. Export STL asks whether to write millimetres, centimetres or inches;
@@ -580,6 +577,15 @@ the script, a failed feature is exported suppressed, and a timeline marker is
 put back where it was). Headless, `ferrender run script.rhai design.ferr
 --input teeth=24 --save` runs a script and `ferrender check design.ferr` lists
 timeline errors for CI; over MCP, `list_scripts` and `run_script` do the same.
+
+Give outputs stable keys when a script can reorder or repeat modeling commands:
+`primitive(#{output_key: "left-boss", type: "box", width: 10, depth: 10, height: 10});`.
+A later feature keeps addressing `left-boss` even when another output is inserted
+before it. In loops, derive the key from the source item identity, such as a sketch
+point ID, not the iteration number. An explicit unique name also identifies an
+output; otherwise an unchanged source and call site are used. Repeated unkeyed
+modeling calls are refused with guidance. Older unkeyed ScriptRuns with later
+features must be detached or rebuilt deliberately; reruns never guess by order.
 
 ### View
 
@@ -632,8 +638,12 @@ panel, which is saved to the config file.
 
 The native format is `.ferr`: a JSON document holding the units, parameters and
 the feature timeline, with every sketch's points, entities, constraints and
-dimension expressions. Bodies are not stored; they are rebuilt from the
-features on open. A design that carries reference images or imported meshes is
+dimension expressions. The source timeline remains authoritative. A geometry
+cache can skip rebuilding on the same installation: saved containers are
+authenticated with a private local key. Unsigned, foreign or changed caches are
+discarded and supported designs rebuild. Newer unsupported files are explicitly
+unverified read-only previews, including when their saved geometry is exported.
+A design that carries reference images or imported meshes is
 saved as a ZIP container instead (since 0.4): the same JSON as `design.json`,
 each image and mesh as its own entry, a `manifest.json` and a `thumbnail.png`.
 Plain designs stay plain JSON, so they diff in git and open in older builds.
@@ -698,9 +708,9 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 - Holes start on flat faces and stay where they were put; they do not follow
   the face if an earlier feature moves it. A thread that runs through a hole
   ends square at the depth where the hole's axis leaves the body.
-- Mesh bodies (imported STL, tapered extrudes) use the old BSP booleans: fine
-  for parts, slow on dense meshes, refused above 400,000 triangles, and no
-  fillets or Thread (Hole works on them).
+- Mesh Booleans accept up to 8 million input triangles combined, with candidate,
+  output and time budgets. Invalid or unrepresentable results are refused. Mesh
+  bodies have no exact fillets or Thread (Hole works on them).
 - Sketch regions are found from shapes that share points. Two shapes that
   merely cross are not split where they cross.
 - A sketch on a body's face, a projected outline and an extruded face record

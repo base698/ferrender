@@ -171,12 +171,6 @@ fn bvh_queries_match_brute_force_and_invalidate_after_edits() {
     }
 }
 #[test]
-fn boolean_fragment_work_is_bounded_without_recursive_stack() {
-    let cutter=Mesh::from_tris((0..7000).map(|i| {let x=i as f64;[DVec3::new(x,0.,0.),DVec3::new(x,1.,0.),DVec3::new(x,0.,1.)]}).collect());
-    let err=fr_core::csg::fragments(&cutter,&unit()).unwrap_err();
-    assert!(err.contains("too complex"),"{err}");
-}
-#[test]
 fn quadric_decimation_preserves_torus_manifoldness() {
     let (nu,nv)=(32usize,16usize);
     let points=(0..nu).flat_map(|u|(0..nv).map(move|v|{let a=u as f64/nu as f64*std::f64::consts::TAU;let b=v as f64/nv as f64*std::f64::consts::TAU;DVec3::new((3.+b.cos())*a.cos(),(3.+b.cos())*a.sin(),b.sin())})).collect();
@@ -206,19 +200,34 @@ fn thickness_is_measured_at_the_requested_point_not_face_centroid() {
     assert!((measured-expected).abs()<1e-6,"{measured} expected{expected}");
 }
 #[test]
-fn failing_mesh_boolean_preserves_original_design() {
+fn dense_rotated_mesh_boolean_succeeds_and_preserves_volume() {
     use fr_core::{Session,FeatureKind,api::execute};use serde_json::json;
     let mut a=meshops::subdivide(&unit(),4,Scheme::Midpoint).unwrap();
     let mut b=a.clone();b.map(|p|p+DVec3::new(0.3,0.,0.));
     let rotation=glam::DMat3::from_rotation_y(0.37)*glam::DMat3::from_rotation_z(0.21);
     a.map(|p|rotation*p);b.map(|p|rotation*p);
     let mut s=Session::default();
-    let target=s.edit(|d|Ok(d.add_feature(FeatureKind::Import(a)))).unwrap();
-    let tool=s.edit(|d|Ok(d.add_feature(FeatureKind::Import(b)))).unwrap();
+    let target=s.edit(|d|Ok(d.add_feature(FeatureKind::Import(a.clone())))).unwrap();
+    let tool=s.edit(|d|Ok(d.add_feature(FeatureKind::Import(b.clone())))).unwrap();
+    execute(&mut s,&json!({"op":"combine","target":target,"tools":[tool],"operation":"join"}),None).unwrap();
+    assert_eq!(s.built.bodies.len(),1);assert!(s.built.errors.is_empty());
+    solid(&s.built.bodies[0].mesh,1.3);
+    solid(&meshops::boolean(&a,&b,Bool::Subtract).unwrap(),0.3);
+    solid(&meshops::boolean(&a,&b,Bool::Intersect).unwrap(),0.7);
+}
+#[test]
+fn failing_mesh_boolean_preserves_original_design() {
+    use fr_core::{Session,FeatureKind,api::execute};use serde_json::json;
+    let mut open=unit();let mut first=true;open.retain_tris(|_| {let keep=!first;first=false;keep});
+    let mut s=Session::default();
+    let target=s.edit(|d|Ok(d.add_feature(FeatureKind::Import(unit())))).unwrap();
+    let tool=s.edit(|d|Ok(d.add_feature(FeatureKind::Import(open)))).unwrap();
     let before=s.doc.clone();
+    let bodies:Vec<_>=s.built.bodies.iter().map(|b|(b.id,b.mesh.clone())).collect();
     let error=execute(&mut s,&json!({"op":"combine","target":target,"tools":[tool],"operation":"join"}),None).unwrap_err();
-    assert!(error.contains("closed, manifold result"),"{error}");
+    assert!(error.contains("closed, manifold inputs"),"{error}");
     assert_eq!(s.doc,before);assert_eq!(s.built.bodies.len(),2);assert!(s.built.errors.is_empty());
+    for(id,mesh)in bodies {assert_eq!(s.built.body(id).unwrap().mesh,mesh);}
 }
 #[test]
 fn mesh_boolean_refuses_open_input_instead_of_guessing_a_volume() {

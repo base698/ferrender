@@ -125,14 +125,14 @@ fn a_time_limit_stops_a_run_between_operations() {
     assert!(err.contains("time limit"), "{err}");
     assert!(t.elapsed().as_secs() < 10);
     // Between commands too; the caller decides what to do with the partial document.
-    let mut req = Request::new("const META = #{name: \"boxes\"}; fn run(i) { for k in 0..1000 { primitive(#{ type: \"box\", width: 1, depth: 1, height: 1 }); } }");
+    let mut req = Request::new("const META = #{name: \"boxes\"}; fn run(i) { for k in 0..1000 { primitive(#{ type: \"box\", width: 1, depth: 1, height: 1, output_key: \"box\" + k }); } }");
     req.time_limit = Some(Duration::from_millis(200));
     let err = script::run(&mut session, &req).unwrap_err();
     assert!(err.contains("time limit"), "{err}");
     assert!(!session.doc.features.is_empty());
     // Through the API, in seconds; a failed run leaves the document alone.
     let mut api = Session::default();
-    let err = execute(&mut api, &json!({"op": "run_script", "source": "const META = #{name: \"f\"}; fn run(i) { for k in 0..100000 { primitive(#{ type: \"box\", width: 1, depth: 1, height: 1 }); } }", "timeout": 0.2}), None).unwrap_err();
+    let err = execute(&mut api, &json!({"op": "run_script", "source": "const META = #{name: \"f\"}; fn run(i) { for k in 0..100000 { primitive(#{ type: \"box\", width: 1, depth: 1, height: 1, output_key: \"box\" + k }); } }", "timeout": 0.2}), None).unwrap_err();
     assert!(err.contains("time limit"), "{err}");
     assert!(api.doc.features.is_empty());
     assert!(execute(&mut api, &json!({"op": "run_script", "source": "const META = #{name: \"f\"}; fn run(i) {}", "timeout": -1}), None).is_err());

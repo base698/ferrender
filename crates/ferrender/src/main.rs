@@ -126,13 +126,17 @@ fn cli(args: &[String]) -> i32 {
             let path = PathBuf::from(path);
             let t = std::time::Instant::now();
             let mut s = match fr_core::Session::open(&path) { Ok(s) => s, Err(e) => { eprintln!("{}: {e}", path.display()); failed += 1; continue; } };
-            let how = if s.read_only { "read-only from cache" } else if s.from_cache { "from cache" } else { "rebuilt" };
+            let how = if s.read_only { "UNVERIFIED read-only cached preview" } else if s.from_cache { "from locally authenticated cache" } else { "rebuilt" };
             println!("{}: {} features, {} bodies, {how} in {} ms", path.display(), s.doc.features.len(), s.built.bodies.len(), t.elapsed().as_millis());
             for (id, e) in &s.built.errors {
                 let name = s.doc.feature(*id).map(|f| f.name.clone()).unwrap_or_default();
                 println!("  error in {id} {name}: {e}");
             }
             if !s.built.errors.is_empty() { failed += 1; }
+            if s.read_only {
+                eprintln!("  unverified preview: this Ferrender cannot validate the newer timeline");
+                failed += 1;
+            }
             if flag("--rebuild") && s.read_only {
                 eprintln!("  cannot verify a rebuild of this newer read-only design; update Ferrender first");
                 failed += 1;

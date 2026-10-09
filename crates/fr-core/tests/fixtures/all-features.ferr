@@ -498,7 +498,8 @@
                       "entity": 4,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
@@ -507,7 +508,8 @@
                       "entity": 10,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -520,7 +522,8 @@
                       "entity": 4,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
@@ -529,7 +532,8 @@
                       "entity": 6,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -542,16 +546,24 @@
                       "entity": 4,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
+                    "profile_cap": {
                       "end": false,
+                      "entities": [
+                        4,
+                        6,
+                        8,
+                        10
+                      ],
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -564,16 +576,47 @@
                       "entity": 4,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
-                      "end": true,
-                      "feature": 3
+                    "merged": {
+                      "sources": [
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": true,
+                              "entities": [
+                                4,
+                                6,
+                                8,
+                                10
+                              ],
+                              "feature": 3
+                            }
+                          },
+                          "schema": 2
+                        },
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": false,
+                              "entities": [
+                                2
+                              ],
+                              "feature": 7
+                            }
+                          },
+                          "schema": 2
+                        }
+                      ]
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -586,7 +629,8 @@
                       "entity": 8,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
@@ -595,7 +639,8 @@
                       "entity": 10,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -608,16 +653,24 @@
                       "entity": 10,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
+                    "profile_cap": {
                       "end": false,
+                      "entities": [
+                        4,
+                        6,
+                        8,
+                        10
+                      ],
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -630,16 +683,47 @@
                       "entity": 10,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
-                      "end": true,
-                      "feature": 3
+                    "merged": {
+                      "sources": [
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": true,
+                              "entities": [
+                                4,
+                                6,
+                                8,
+                                10
+                              ],
+                              "feature": 3
+                            }
+                          },
+                          "schema": 2
+                        },
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": false,
+                              "entities": [
+                                2
+                              ],
+                              "feature": 7
+                            }
+                          },
+                          "schema": 2
+                        }
+                      ]
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -652,7 +736,8 @@
                       "entity": 6,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
@@ -661,7 +746,8 @@
                       "entity": 8,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -674,16 +760,24 @@
                       "entity": 6,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
+                    "profile_cap": {
                       "end": false,
+                      "entities": [
+                        4,
+                        6,
+                        8,
+                        10
+                      ],
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -696,16 +790,47 @@
                       "entity": 6,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
-                      "end": true,
-                      "feature": 3
+                    "merged": {
+                      "sources": [
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": true,
+                              "entities": [
+                                4,
+                                6,
+                                8,
+                                10
+                              ],
+                              "feature": 3
+                            }
+                          },
+                          "schema": 2
+                        },
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": false,
+                              "entities": [
+                                2
+                              ],
+                              "feature": 7
+                            }
+                          },
+                          "schema": 2
+                        }
+                      ]
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -718,16 +843,24 @@
                       "entity": 8,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
+                    "profile_cap": {
                       "end": false,
+                      "entities": [
+                        4,
+                        6,
+                        8,
+                        10
+                      ],
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -740,16 +873,47 @@
                       "entity": 8,
                       "feature": 3
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
-                      "end": true,
-                      "feature": 3
+                    "merged": {
+                      "sources": [
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": true,
+                              "entities": [
+                                4,
+                                6,
+                                8,
+                                10
+                              ],
+                              "feature": 3
+                            }
+                          },
+                          "schema": 2
+                        },
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": false,
+                              "entities": [
+                                2
+                              ],
+                              "feature": 7
+                            }
+                          },
+                          "schema": 2
+                        }
+                      ]
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -762,16 +926,47 @@
                       "entity": 2,
                       "feature": 7
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
-                      "end": true,
-                      "feature": 3
+                    "merged": {
+                      "sources": [
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": true,
+                              "entities": [
+                                4,
+                                6,
+                                8,
+                                10
+                              ],
+                              "feature": 3
+                            }
+                          },
+                          "schema": 2
+                        },
+                        {
+                          "kind": "plane",
+                          "origin": {
+                            "profile_cap": {
+                              "end": false,
+                              "entities": [
+                                2
+                              ],
+                              "feature": 7
+                            }
+                          },
+                          "schema": 2
+                        }
+                      ]
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             },
@@ -784,16 +979,21 @@
                       "entity": 2,
                       "feature": 7
                     }
-                  }
+                  },
+                  "schema": 2
                 },
                 {
                   "kind": "plane",
                   "origin": {
-                    "cap": {
+                    "profile_cap": {
                       "end": true,
+                      "entities": [
+                        2
+                      ],
                       "feature": 7
                     }
-                  }
+                  },
+                  "schema": 2
                 }
               ]
             }
@@ -1096,11 +1296,12 @@
           "tag": {
             "kind": "cylinder",
             "origin": {
-              "made": {
+              "semantic": {
                 "feature": 13,
-                "n": 0
+                "role": "cylinder:side"
               }
-            }
+            },
+            "schema": 2
           },
           "thread": "M6x1"
         }
@@ -1136,11 +1337,12 @@
             {
               "kind": "plane",
               "origin": {
-                "made": {
+                "semantic": {
                   "feature": 12,
-                  "n": 5
+                  "role": "box:z:max"
                 }
-              }
+              },
+              "schema": 2
             }
           ],
           "thickness": {
@@ -1504,5 +1706,5 @@
     }
   ],
   "units": "mm",
-  "version": 10
+  "version": 13
 }

@@ -57,6 +57,7 @@ def main():
     (stage/'BUILD-INFO.txt').write_text(info)
     licenses = stage/'licenses'
     licenses.mkdir()
+    subprocess.run(['python3', str(ROOT/'scripts/bundle-dependency-notices.py'), '--output', str(licenses/'rust-dependencies')], check=True)
     for filename in ['OFL.txt', 'PROVENANCE.txt']:
         shutil.copy2(ROOT/'crates/fr-core/assets/fonts'/filename, licenses/('NotoSans-'+filename))
     # Cadrum's pinned OCCT prebuilt archive ships the LGPL and additional exception.

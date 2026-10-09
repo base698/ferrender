@@ -10,7 +10,7 @@ A reader tells the forms apart by the first bytes of the file.
 
 ### Plain JSON (first byte `{`)
 
-One UTF-8 JSON object, pretty-printed with two-space indentation, at most 64 MiB. This is the only form before 0.4 and remains the form for any design that has no binary payloads. It is what `git diff`, the MCP `open`/`save` commands and older Ferrender builds work with.
+One UTF-8 JSON object, pretty-printed with two-space indentation, at most 64 MiB. This is the only form before 0.4 and remains the form for designs with neither binary payloads nor a saved geometry cache. It is what `git diff`, the MCP `open`/`save` commands and older Ferrender builds work with.
 
 ### Container (first bytes `PK`)
 
@@ -22,16 +22,22 @@ A ZIP archive, at most 2 GiB and 4096 entries, written when the design carries a
 | `design.json` | Deflate | The document object exactly as the plain form, except that payload fields hold a marker object `{"blob": "<entry name>"}` instead of their base64 string. At most 64 MiB. |
 | `images/<feature id>.png` | Stored | A sketch's reference image, as the normalised RGBA8 PNG the plain form embeds in base64. At most 20 MiB each. |
 | `meshes/<feature id>.mesh` | Deflate (fastest level above 8 MiB) | An imported mesh, indexed. A 32-byte header: the magic `FRMESH01`, then little-endian `u32` vertex count, triangle count, flags (bit 0: vertices are welded) and CRC-32 (IEEE, of everything after the header), then 8 reserved zero bytes. Then the vertices as three little-endian IEEE 754 `f32` each, then the triangles as three little-endian `u32` vertex indices each, counter-clockwise seen from outside. At most 16 000 000 triangles and three vertices per triangle. Readers also accept the pre-release `meshes/<id>.tris` entry: unindexed `f32` triangle triples, 36 bytes per triangle, no header. |
-| `cache/index.json` | Deflate | Optional, the geometry cache: `{"design_crc": CRC-32 of the plain JSON of the design, "kernel": "cadrum 0.8.20", "geometry_revision": 1, "bodies": [{"id", "name", "component", "placement", "local_bounds", "volume", "bounds", "triangles", "tags", "brep": "cache/N.brep" or "mesh": "cache/N.mesh"}], "planes": [{"id", "component", "plane", "corners"}], "errors": {}, "resolutions": {}}`. At most 8 MiB. |
+| `cache/index.json` | Deflate | Optional, the geometry cache: `{"design_crc": CRC-32 of the plain JSON of the design, "kernel": "cadrum 0.8.20", "geometry_revision": 2, "bodies": [{"id", "name", "component", "placement", "local_bounds", "volume", "bounds", "triangles", "tags", "brep": "cache/N.brep" or "mesh": "cache/N.mesh"}], "planes": [{"id", "component", "plane", "corners"}], "errors": {}, "resolutions": {}}`. At most 8 MiB. |
 | `cache/<body id>.brep` | Deflate | An exact body in OpenCascade's binary BRep form, as cadrum writes it. The whole cache is at most 32 MiB uncompressed, else none is written. |
 | `cache/<body id>.mesh` | Deflate | A mesh body, in the same blob format as `meshes/`. |
 | `thumbnail.png` | Stored | Optional. A 256 × 256 isometric render of the visible bodies at save time. At most 4 MiB. |
 
-**Geometry cache.** Written when the file is a container anyway, or when the design took 250 ms or more to rebuild (the API's `save` takes `"cache": true|false` to force or skip it). A reader uses it only when `design_crc` equals the CRC of the design it has just read, `kernel` is its own, `geometry_revision` matches its feature/mesh algorithms, and every body read back has the volume and bounds the index says; otherwise the whole cache is ignored and the design rebuilds. The geometry revision is independent of the kernel version and must change when Ferrender changes geometry evaluation. Missing revisions are treated as revision 0, so pre-review 0.4 development caches rebuild instead of retaining old Boolean or mesh results. A reader whose newest version is below `design.json`'s `version` cannot read the design, but when the file has a cache it shows the cached bodies read-only, so a file saved by a newer Ferrender can still be viewed and exported. This preview does not require the current geometry revision because it displays saved shapes without evaluating editable features; kernel, volume and bounds checks still apply.
+**Geometry cache.** Written when the file is a container anyway, or when the design took 250 ms or more to rebuild (the API's `save` takes `"cache": true|false` to force or skip it). For a supported design, cached geometry is used only after local authentication of the complete container, and when `design_crc`, kernel version and Ferrender geometry revision match and the decoded bodies match the index's volume and bounds. Otherwise the cache is discarded before parsing its BRep/mesh entries and the source design rebuilds. Revision 2 covers the robust mesh Boolean and semantic topology identity algorithms; missing revisions mean 0.
+
+**Local authentication.** A ZIP saved from evaluated geometry has a standard ZIP comment consisting of ASCII `Ferrender-local-cache-HMAC-SHA256-v1:` followed by a 32-byte HMAC-SHA256. The MAC covers the entire archive preceding the EOCD comment-length field, including source payloads, cache/index and ZIP directory. The excluded length field must exactly match the fixed comment size, and trailing bytes are refused. A 32-byte OS-random secret stays in the private configuration directory at `cache-auth/key`; HMAC-SHA256 with the domain `Ferrender native ZIP cache authentication v1` plus NUL derives the signing key. Keys are never included in designs. Unix storage requires private ownership/permissions and rejects linked keys. If safe key storage is unavailable, saves remain usable but unsigned and supported designs rebuild on open. Other installations, old unsigned files, modified archives and files signed with a lost or rotated key also rebuild. Re-encoding a parsed untrusted cache cannot sign it: its geometry must first be evaluated locally.
+
+Authentication establishes local save provenance, not the sender's identity or the correctness of every modeling operation. It does not defend against code already able to read the user's private key. An unchanged old signed file can be replayed; freshness and filenames are not authenticated claims.
+
+**Future-format previews.** A reader unable to evaluate the timeline may show its saved bodies as an **unverified read-only preview**, even if the container has a valid local MAC. Kernel/volume/bounds checks still apply, but cannot validate the source geometry. The persistent UI warning, API `geometry_trust: "unverified_preview"` and CLI check distinguish this from verified geometry. STL/STEP exports carry an unverified-preview warning in their header/comment. `check --rebuild` refuses unsupported designs. Preview geometry cannot become a signed authoritative cache through Save.
 
 Only these names are allowed; any other entry, any entry whose name contains `\`, starts with `/` or has a `.`/`..`/empty path segment, and any entry declaring more than its limit make the reader refuse the file before decompressing anything. Entry names use `/` as the separator. Entries are not encrypted and never use a compression method other than Deflate or Stored.
 
-**Upgrade and backup.** Every plain file opens in 0.4. When a design that needs the container is saved over an existing plain file, the plain file is first copied, once, to `<name> (0.3 backup).ferr` in the same folder; later saves do not touch the backup. A design without payloads is always written plain, so files from before 0.4 that do not use images or meshes are rewritten byte-compatibly.
+**Upgrade and backup.** Every plain file opens in 0.4. When a design that needs the container is saved over an existing plain file, the plain file is first copied, once, to `<name> (0.3 backup).ferr` in the same folder; later saves do not touch the backup. A design without payloads or a saved geometry cache is written plain. New reference semantics raise the required reader version even in a plain file.
 
 ## The document object
 
@@ -71,6 +77,8 @@ A dimension or feature value is `{"expr": "...", "v": 20.0}`: the expression as 
 { "id": 3, "name": "Extrude1", "suppressed": false, "owner": 24, "kind": { "extrude": { ... } } }
 ```
 
+`made_by` optionally names the owning ScriptRun. `script_key` optionally identifies an output within that run; it is nonempty, bounded to 1024 bytes and unique within a ScriptRun. Keys derive from an explicit script `output_key`, an explicit name scoped to the command, or an unchanged source/call site. They are independent of output order. Repeated modeling calls require unique keys. Removed or incompatible outputs receive new IDs; they do not inherit a later feature's references merely by occupying the same list position. These fields require format 13 when `script_key` is present.
+
 `owner` (optional, default `0`) is the component the feature belongs to and must name a `component` feature earlier in the list. `kind` is an object with exactly one key naming the feature kind. The kinds:
 
 | Key | Fields | Notes |
@@ -104,21 +112,27 @@ A sketch's `reference` image is `{"png": <base64 or blob marker>, "name", "pixel
 
 ### References to faces, edges and vertices
 
-Features that act on existing geometry (`blend`, `shell`, `hole`, `thread`, `text`, `plane`, `split`) name a face or edge by **a point on it in world coordinates** and the **bounding box of the body at the time of the pick** (`frame`: `[[xmin,ymin,zmin],[xmax,ymax,zmax]]`). On rebuild the feature looks for the face or edge nearest that point, both where it was and at the same relative position inside the body's current bounds, so the reference survives the body changing size.
+Features that act on existing geometry retain the picked world point and original body bounds (`frame`) as well as a persistent face or edge tag. Untagged pre-0.4 picks use the old location search on their first build. Once a modern tag exists, an unrelated nearest surface cannot replace it.
 
-Since format 10 a reference also carries a **tag** saying how the face was made, and resolves by tag first. A face tag is `{"origin": ORIGIN, "kind": KIND}` with `kind` one of `plane`, `cylinder`, `cone`, `sphere`, `torus`, `freeform` and `origin` one of:
+Format 13 writes `{"schema": 2, "origin": ORIGIN, "kind": KIND}`. `kind` is `plane`, `cylinder`, `cone`, `sphere`, `torus` or `freeform`. Missing `schema` means the early 0.4 legacy convention. Origins:
 
 | Origin | Meaning |
 |---|---|
-| `{"swept": {"feature": F, "entity": E}}` | The side face an extrude or revolve `F` swept from sketch entity `E`. |
-| `{"cap": {"feature": F, "end": false\|true}}` | The start or end cap of `F`. |
-| `{"made": {"feature": F, "n": N}}` | The `N`th face made by a fillet, chamfer, shell, hole, thread, primitive, split or text `F`, in kernel order. |
-| `{"split": {"of": TAG, "n": N}}` | Piece `N` of an earlier face that a later operation cut up. |
-| `{"copy": {"of": TAG, "n": N}}` | The same face on copy `N` of a pattern. |
+| `{"swept": {"feature": F, "entity": E}}` | The side swept from sketch entity E. |
+| `{"profile_cap": {"feature": F, "end": false\|true, "entities": [...]}}` | A start/end cap scoped to its sketch boundary, independent of profile order. |
+| `{"semantic": {"feature": F, "role": "..."}}` | A constructor-defined role, such as `box:x:max`, a hole barrel, or a content-scoped text outline. |
+| `{"derived": {"feature": F, "sources": [TAG, ...]}}` | A generated face identified by its source faces, such as a fillet between two named faces or a shell's inner face. |
+| `{"merged": {"sources": [TAG, ...]}}` | A merged face retaining its source identities. |
+| `{"patch": {"of": TAG, "boundary": [TAG, ...]}}` | A split piece distinguished by named boundaries rather than kernel order. Optional `cycles: [[TAG, ...], ...]` records canonical oriented boundary order when unordered boundaries alone cannot distinguish complementary pieces. |
+| `{"section": {"feature": F, "positive": false\|true, "boundary": [TAG, ...]}}` | A split-plane side scoped to its named boundary. |
+| `{"copy": {"of": TAG, "n": N}}` | A particular pattern copy. Copy identity is preserved when comparing tag families. |
+| `{"surface": {"feature": F, "signature": [...]}}` | A conservative geometric signature where no unique modeling provenance is available. Changes invalidate it; it is not a promise of stability under shape edits. |
 
-A plane reference (`split.plane`, `plane.kind.offset.base`, midplane faces, `mesh_op` cuts and mirrors) is `{"origin": "XY"|"XZ"|"YZ"}`, `{"plane": id}`, `{"face": {body, at, frame, tag?}}` or, since format 11, `{"free": PLANE}` with a plane given outright in the owner component's frame.
+Readers retain legacy `cap`, `made` and `split` origins. A legacy ordinal or ambiguous copy tag is migrated only when its maker, kind and exact saved pick uniquely identify the current face/edge. Migration never guesses from the nearest or proportionally moved face. Successful migration records the modern tag on the feature. A legacy reference without a unique match needs reselection.
 
-An edge tag is `{"faces": [TAG, TAG]}`, the two faces it separates, in sorted order. Tags are stored in `blend.tags` (one per entry of `edges`, `null` where the edge had none), `shell.tags` (one per `faces`), `thread.tag`, `text.tag` and the `tag` of a `{"face": ...}` plane reference. On rebuild a pick is resolved at one of three levels, which `get_object_info` reports as `resolved`: `tag` (a face or edge with the very tag; among equals, the nearest to the point), `origin` (one with the same tag ignoring split and copy ordinals, nearest to the point), `position` (the pre-0.4 search). A reference with no tag learns the tag of what it found on its first successful build, so files from before format 10 gain tags as they are opened, and are stamped 10 when next saved. A pick whose tagged face has been removed altogether fails with the usual "no longer there" error rather than relocating.
+An edge tag contains its two sorted face tags: `{"faces": [TAG, TAG]}`. References live in `blend.tags`, `shell.tags`, `thread.tag`, `text.tag`, and face-based plane references. Object info reports `resolved: "tag"` for the identity itself, `"origin"` for a uniquely identified descendant, or `"position"` for an untagged pick/verified legacy migration. Multiple plausible descendants require a uniquely located saved pick; otherwise the operation reports ambiguity. Removed references fail explicitly. Kernel modification/generated history is propagated through Boolean operations and subsequent face unification.
+
+A plane reference is `{"origin": "XY"|"XZ"|"YZ"}`, `{"plane": id}`, `{"face": {body, at, frame, tag?}}` or `{"free": PLANE}`. A free plane is expressed in the owner component's frame. Vertex references and hole entry points remain position-based.
 
 ## Version table
 
@@ -136,8 +150,9 @@ An edge tag is `{"faces": [TAG, TAG]}`, the two faces it separates, in sorted or
 | 10 | 0.4.0 | Face and edge tags on references (`blend.tags`, `shell.tags`, `thread.tag`, `text.tag`, plane `face.tag`). |
 | 11 | 0.4.0 | `mesh_op` and `relief` features; the `free` plane reference. |
 | 12 | 0.4.0 | `script_run` features and `made_by` on features. |
+| 13 | 0.4.0 | Semantic/provenance topology tags (`schema: 2`) and persistent script output identities (`script_key`). |
 
-The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". There is no migration code: every version's documents deserialize directly, with absent fields taking their defaults. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
+The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". Older documents deserialize with absent fields taking their defaults. Legacy reference tags are upgraded only when the original pick has a unique verified match; ambiguous references remain errors for repair. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 
 ## Limits
 
@@ -158,7 +173,7 @@ On load the document is validated against these limits and against structural ru
 
 ## Recovery copies
 
-Unsaved work is copied to `<config dir>/recovery/*.ferr-recovery`: a JSON object `{"format": "ferrender-recovery", "path": ..., "saved": <unix seconds>, "doc": <the plain document object>}`. Recovery copies always use the plain form, payloads inline, and are private to the machine.
+Unsaved work is copied to `<config dir>/recovery/*.ferr-recovery` in a bounded metadata envelope with payload length and CRC, followed by the same native JSON/ZIP payload used for ordinary files. Large meshes stay indexed. Legacy JSON recovery objects (`format`, `path`, `saved`, `doc`) still load. Recovery metadata is limited to 64 KiB and payloads to 2 GiB. A temporary write, sync and atomic replacement preserve the preceding copy when a write fails. Recovery never overwrites the user's original design. CRC detects accidental envelope corruption; compatible cached geometry still requires local authentication.
 
 ## Related
 

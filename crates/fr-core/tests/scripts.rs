@@ -248,9 +248,9 @@ fn the_face_relief_sample_makes_a_printable_solid() {
     assert_eq!(s.built.bodies.len(), 1, "relief and plaque are one body");
     let body = s.built.bodies[0].id;
     let m = run_cmd(&mut s, json!({"op": "mesh_measure", "body": body}));
-    assert!(m["open_edges"].as_u64().unwrap() < 60, "{m}");
+    assert_eq!(m["open_edges"].as_u64().unwrap(), 0, "{m}");
     assert!(m["min"][2].as_f64().unwrap() < -4.9, "plaque under the relief: {}", m["min"]);
-    assert_eq!(fr_core::io::design_version(&s.doc), 11);
+    assert_eq!(fr_core::io::design_version(&s.doc), 13);
 }
 
 #[test]

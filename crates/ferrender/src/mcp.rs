@@ -107,7 +107,12 @@ fn call(b: &mut Backend, name: &str, args: &Value) -> Result<Value, String> {
             }
             cmd["op"] = json!("get_viewport_screenshot");
             let v = b.run(&cmd)?;
-            Ok(json!([{"type": "image", "data": v["png_base64"], "mimeType": "image/png"}]))
+            let mut content = Vec::new();
+            if let Some(warning) = v["geometry_warning"].as_str() {
+                content.push(json!({"type": "text", "text": warning}));
+            }
+            content.push(json!({"type": "image", "data": v["png_base64"], "mimeType": "image/png"}));
+            Ok(json!(content))
         }
         "get_reference" => Ok(json!([{"type": "text", "text": api::REFERENCE}])),
         "list_scripts" => {
