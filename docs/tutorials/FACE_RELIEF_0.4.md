@@ -4,7 +4,7 @@ This is the 0.4 mesh acceptance run: a printable bas-relief of a person's face m
 
 ## What you need
 
-- Ferrender 0.4 built in release (`cargo build --release -p ferrender`), and an MCP client that can call its tools. The run below used a small stdio driver; Claude Desktop or any MCP client works the same way.
+- Ferrender 0.4 built in release (`cargo build --release -p ferrender`, after the verified OpenCascade setup in the README), and an MCP client that can call its tools. The run below used a small stdio driver; Claude Desktop or any MCP client works the same way.
 - A portrait on a plain background. A cut-out on white is ideal.
 - A **depth map**: an 8-bit grey image where bright is near. Ferrender does not ship a depth model. Any monocular depth estimator produces one (Depth Anything, MiDaS, or the depth channel of a phone portrait). Without one, the fallback is a *dome prior plus shading*, which is what this run used, in a dozen lines of Python with numpy and Pillow:
 

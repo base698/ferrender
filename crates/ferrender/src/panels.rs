@@ -1572,6 +1572,7 @@ fn about(app: &mut App, ctx: &Context) {
         ui.add_space(6.0);
         ui.label(format!("Build: {}", build::PROFILE));
         ui.label(format!("Platform: {}", build::TARGET));
+        ui.label(format!("OpenCascade: {}", build::OCCT));
         if build::COMMIT != "unavailable" {
             ui.hyperlink_to("View commit on GitHub", format!("https://github.com/base698/ferrender/commit/{}", build::COMMIT));
         }

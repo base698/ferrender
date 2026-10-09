@@ -2,7 +2,8 @@
 """Verify the pinned official OCCT archive before making it available to cadrum.
 
 Requires Python with tarfile.data_filter (Python 3.12+, or a security-backported
-older Python). Raw cargo builds do not run this helper automatically.
+older Python). Raw cargo builds do not run this helper automatically; release
+builds refuse to compile until OCCT_ROOT names the directory it prepared.
 Digests: https://api.github.com/repos/lzpel/cadrum/releases/tags/occt-8_0_1_rev2
 Recorded from GitHub's official release asset digest metadata on 2026-10-08.
 """
@@ -16,12 +17,11 @@ import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-TAG = "occt-8_0_1_rev2"
-ASSETS = {
-    "aarch64-apple-darwin": (33429718, "d9e0f3b34e6fb3599a6be5f143e775b0e04953c3fcef634cc0f5d55e0ee16904"),
-    "x86_64-apple-darwin": (34758892, "9f4036cd4843fba3a36a67448420565573286686d8653f550f32c35d3eac36b3"),
-    "x86_64-unknown-linux-gnu": (45844540, "95e068936c0cb4ba2668707c0dca209d3396103dfc1db85eb72d192badfb4143"),
-}
+# Shared with crates/fr-core/build.rs, which records in the executable whether
+# cadrum linked the directory this helper prepared.
+PINS = json.loads((ROOT / "scripts" / "occt-pins.json").read_text())
+TAG = PINS["tag"]
+ASSETS = {target: (asset["size"], asset["sha256"]) for target, asset in PINS["assets"].items()}
 MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
 MAX_ENTRIES = 50000
 

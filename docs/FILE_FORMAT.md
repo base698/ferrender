@@ -2,6 +2,8 @@
 
 This is the normative description of `.ferr` files as written by Ferrender 0.4. It covers the two outer forms (plain JSON and the ZIP container), the document object, every feature kind's fields, how references to geometry are stored, the version table and the compatibility rules. The test `crates/fr-core/tests/format_fixture.rs` freezes one example of every feature kind in `crates/fr-core/tests/fixtures/all-features.ferr`; a change that alters serialization must update both the fixture and this document.
 
+Fixture comparisons keep JSON structure, types, integer identities, strings and array order exact. Floating-point values allow only rounding-level differences (32 machine epsilons at the value's scale), because kernel-generated pick coordinates can differ slightly between Intel and ARM. Each platform must still round-trip its own document exactly through JSON and the container.
+
 Lengths are millimetres, angles are degrees, coordinates are right-handed with Z up. Numbers are JSON numbers; `f32`-precision is noted where it applies.
 
 ## Outer forms

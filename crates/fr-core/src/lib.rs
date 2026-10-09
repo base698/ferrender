@@ -36,3 +36,7 @@ pub use doc::{Axis, Body, Built, Document, Feature, FeatureKind, Op, Session};
 pub use expr::{Kind, Value};
 pub use sketch::{CKind, Constraint, Entity, Geom, Id, ORIGIN, Plane, Sketch};
 pub use units::Unit;
+
+/// How the linked OpenCascade libraries were obtained, recorded by build.rs:
+/// `verified <release> sha256:<archive digest>` or `unverified`.
+pub const OCCT_PROVENANCE: &str = env!("FR_CORE_OCCT");
