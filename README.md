@@ -564,13 +564,26 @@ inputs dialog is made from the declared inputs (lengths and angles take
 expressions, so parameters stay live) and remembers what you typed. Runs go on
 a worker thread with a progress bar and Cancel, land as one undo step, and
 leave a chip in the timeline that owns what the run made: Edit Inputs and
-Re-run, Re-run, Detach, Suppress and Delete act on the whole run. Scripts can
-read and write files only in their own folder, the design's folder and folders
-you allow in `config.toml`. Samples (export variants of a parameter, export a
+Re-run, Re-run, Detach, Suppress and Delete act on the whole run. A script's
+`confirm` and `ask` appear as questions in the progress window. Cancel stops
+the script at its next step; a modeling call already under way cannot be
+interrupted, so after a moment the window offers to stop waiting and discard
+the result when that call ends. Scripts can read and write files only in
+their own folder, the design's folder and folders you allow in `config.toml`;
+resolved paths must remain inside those folders, with link-resistant access on
+macOS and Linux. Files a script writes (saves,
+exports, screenshots, text and CSV) are staged beside their targets and moved
+into place only when the run succeeds. Ordinary cancellation and save failures
+restore the previous files. A crash or storage failure during rollback can
+require recovery; the error lists retained recovery files. Undo does not remove
+files a finished run wrote. Samples (export variants of a parameter, export a
 folder of designs, a spur gear, bosses at sketch points, a CI check, the face
 relief) can be copied to your scripts folder (`~/.config/ferrender/scripts`)
 and edited; Export Timeline as Script turns the open design into a script with
-its parameters as inputs. Headless, `ferrender run script.rhai design.ferr
+its parameters as inputs (large imported meshes and images go in files beside
+the script, named by content to avoid overwriting older assets; a failed feature
+is exported suppressed, and a timeline marker is
+put back where it was). Headless, `ferrender run script.rhai design.ferr
 --input teeth=24 --save` runs a script and `ferrender check design.ferr` lists
 timeline errors for CI; over MCP, `list_scripts` and `run_script` do the same.
 

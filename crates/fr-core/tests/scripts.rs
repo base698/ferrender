@@ -262,7 +262,7 @@ fn exporting_the_timeline_makes_a_script_that_rebuilds_it() {
     run_cmd(&mut s, json!({"op": "extrude", "distance": "$w / 3", "operation": "new"}));
     let body = s.doc.features.last().unwrap().id;
     run_cmd(&mut s, json!({"op": "fillet_edges", "body": body, "edges": "all", "radius": 1}));
-    let source = script::export_timeline(&s).unwrap();
+    let source = script::export_timeline(&s).unwrap().source;
     assert!(source.contains("add_feature"));
     let m = script::meta(&source).unwrap();
     assert_eq!(m.inputs.len(), 1);

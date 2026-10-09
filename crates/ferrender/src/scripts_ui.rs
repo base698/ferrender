@@ -58,12 +58,30 @@ pub struct ScriptDlg {
     pub description: String,
 }
 
+/// A `confirm` or `ask` from the running script, waiting for the person at the screen.
+pub struct Question {
+    pub text: String,
+    /// `None` for confirm (yes or no); the offered answer for ask.
+    pub default: Option<String>,
+    pub reply: Sender<Option<String>>,
+    /// What is typed so far.
+    pub answer: String,
+}
+
+/// How long Cancel waits for a modeling call before offering to stop waiting.
+pub const PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// A run in progress on its worker thread.
 pub struct Running {
     pub name: String,
     pub events: Receiver<Event>,
     pub done: Receiver<Result<(Session, Outcome), String>>,
+    pub questions: Receiver<Question>,
+    pub pending: Option<Question>,
     pub cancel: Arc<AtomicBool>,
+    /// When Cancel was pressed; the script stops at its next operation, which a
+    /// modeling call under way delays.
+    pub cancel_at: Option<std::time::Instant>,
     pub progress: f32,
     pub message: String,
     pub log: Vec<String>,
@@ -242,12 +260,30 @@ impl App {
         let (dtx, drx): (Sender<Result<(Session, Outcome), String>>, _) = channel();
         let cancel = req.cancel.clone();
         let ctx = self.ctx.clone();
+        // confirm and ask block the worker until the progress window has an answer,
+        // or until Cancel, which declines.
+        let (qtx, qrx) = channel::<Question>();
+        {
+            let (ctx, cancel) = (ctx.clone(), cancel.clone());
+            req.ask = Some(Arc::new(move |text: &str, default: Option<&str>| {
+                let (rtx, rrx) = channel();
+                if qtx.send(Question { text: text.to_owned(), default: default.map(str::to_owned), reply: rtx, answer: default.unwrap_or_default().to_owned() }).is_err() { return None; }
+                ctx.request_repaint();
+                loop {
+                    match rrx.recv_timeout(std::time::Duration::from_millis(100)) {
+                        Ok(answer) => return answer,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if cancel.load(Ordering::Relaxed) { return None; },
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+                    }
+                }
+            }));
+        }
         std::thread::Builder::new().name("ferrender-script".into()).spawn(move || {
             let result = fr_core::script::run(&mut session, &req).map(|o| (session, o));
             let _ = dtx.send(result);
             ctx.request_repaint();
         }).ok();
-        self.scripts.running = Some(Running { name: dlg.name.clone(), events: erx, done: drx, cancel, progress: 0.0, message: "starting".into(), log: Vec::new(), started: std::time::Instant::now(), rerun: dlg.rerun, insert_at, owner, base_doc, base_path, base_rev, tail, script_name: dlg.name, source: dlg.source, inputs });
+        self.scripts.running = Some(Running { name: dlg.name.clone(), events: erx, done: drx, questions: qrx, pending: None, cancel, cancel_at: None, progress: 0.0, message: "starting".into(), log: Vec::new(), started: std::time::Instant::now(), rerun: dlg.rerun, insert_at, owner, base_doc, base_path, base_rev, tail, script_name: dlg.name, source: dlg.source, inputs });
         self.dialog = Dialog::None;
     }
 
@@ -260,6 +296,8 @@ impl App {
                 Event::Progress(f, m) => { run.progress = f as f32; if !m.is_empty() { run.message = m; } }
             }
         }
+        // The worker blocks on one question at a time.
+        for q in run.questions.try_iter() { run.pending = Some(q); }
         let result = match run.done.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => { self.ctx.request_repaint_after(std::time::Duration::from_millis(100)); return; }
@@ -318,6 +356,16 @@ impl App {
         }
     }
 
+    /// Cancel: the script stops at its next operation; a pending question is declined.
+    /// A modeling call already under way runs to its end first.
+    pub fn cancel_script(&mut self) {
+        if let Some(run) = &mut self.scripts.running {
+            run.cancel.store(true, Ordering::Relaxed);
+            run.cancel_at.get_or_insert_with(std::time::Instant::now);
+            if let Some(q) = run.pending.take() { let _ = q.reply.send(None); }
+        }
+    }
+
     /// Edit inputs and run again, or run again as it was.
     pub fn rerun_script(&mut self, chip: Id, edit_inputs: bool) {
         let Some(FeatureKind::ScriptRun(r)) = self.doc().feature(chip).map(|f| f.kind.clone()) else { return };
@@ -356,12 +404,26 @@ impl App {
     }
 
     pub fn export_timeline_script(&mut self) {
-        let source = match fr_core::script::export_timeline(&self.session) { Ok(s) => s, Err(e) => { self.toast(e); return; } };
+        if self.session.read_only { self.toast("A read-only cached design has no editable timeline to export."); return; }
         let Some(path) = rfd::FileDialog::new().add_filter("Rhai script", &["rhai"]).set_file_name(format!("{}.rhai", self.doc_name())).save_file() else { return };
-        match std::fs::write(&path, source) {
-            Ok(()) => { self.toast(format!("Wrote {}.", path.display())); self.scripts.loaded = false; }
-            Err(e) => self.toast(format!("Could not write {}: {e}", path.display())),
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "design".into());
+        match self.write_exported_script(&path, &stem) {
+            Ok(export) => {
+                for n in &export.notes { self.scripts.log.push(format!("export {}: {n}", path.display())); }
+                let files = if export.files.is_empty() { String::new() } else { format!(" and {} file{} beside it", export.files.len(), if export.files.len() == 1 { "" } else { "s" }) };
+                let notes = if export.notes.is_empty() { String::new() } else { format!("; {} note{} in the script log", export.notes.len(), if export.notes.len() == 1 { "" } else { "s" }) };
+                self.toast(format!("Wrote {}{files}{notes}.", path.display()));
+                self.scripts.loaded = false;
+            }
+            Err(e) => self.toast(e),
         }
+    }
+
+    /// Exports the timeline as a script at `path`, with its sidecar files beside it.
+    pub fn write_exported_script(&self, path: &std::path::Path, stem: &str) -> Result<fr_core::script::Export, String> {
+        let export = fr_core::script::export_timeline_named(&self.session, stem)?;
+        fr_core::script::write_export(&export, path)?;
+        Ok(export)
     }
 
     pub fn new_script(&mut self) {
@@ -480,14 +542,53 @@ pub fn dialog(app: &mut App, ctx: &Context, mut d: ScriptDlg) {
 /// The progress window while a script runs, and the log window.
 pub fn windows(app: &mut App, ctx: &Context) {
     app.poll_script();
-    if let Some(run) = &app.scripts.running {
-        let (name, progress, message, elapsed, cancel) = (run.name.clone(), run.progress, run.message.clone(), run.started.elapsed().as_secs_f64(), run.cancel.clone());
+    let colors = Palette::from_ctx(ctx);
+    let (mut cancel, mut abandon) = (false, false);
+    if let Some(run) = &mut app.scripts.running {
+        let (name, progress, message, elapsed) = (run.name.clone(), run.progress, run.message.clone(), run.started.elapsed().as_secs_f64());
         let last = run.log.last().cloned();
         egui::Window::new(format!("Running {name}")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             ui.add(egui::ProgressBar::new(progress).text(format!("{message} ({elapsed:.0} s)")).animate(progress <= 0.0));
             if let Some(l) = last { ui.label(RichText::new(l).weak()); }
-            if ui.button("Cancel").clicked() { cancel.store(true, Ordering::Relaxed); }
+            // A question from the script: the worker waits for the answer.
+            let mut answered: Option<Option<String>> = None;
+            if let Some(q) = &mut run.pending {
+                ui.separator();
+                ui.label(&q.text);
+                match &q.default {
+                    None => ui.horizontal(|ui| {
+                        if ui.button("Yes").clicked() { answered = Some(Some(String::new())); }
+                        if ui.button("No").clicked() { answered = Some(None); }
+                    }),
+                    Some(_) => ui.horizontal(|ui| {
+                        let edit = ui.add(egui::TextEdit::singleline(&mut q.answer).desired_width(220.0));
+                        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) { answered = Some(Some(q.answer.clone())); }
+                        if ui.button("OK").clicked() { answered = Some(Some(q.answer.clone())); }
+                        if ui.button("Decline").on_hover_text("The script's ask() fails; what it does then is up to it").clicked() { answered = Some(None); }
+                    }),
+                };
+                ui.separator();
+            }
+            if let Some(answer) = answered && let Some(q) = run.pending.take() {
+                let _ = q.reply.send(answer);
+            }
+            match run.cancel_at {
+                None => {
+                    if ui.button("Cancel").clicked() { cancel = true; }
+                }
+                Some(at) if at.elapsed() < PATIENCE => { ui.label(RichText::new("Cancelling\u{2026}").color(colors.muted)); }
+                Some(_) => {
+                    ui.label(RichText::new("The script stops at its next step, but the modeling call it is in cannot be interrupted.").color(colors.muted));
+                    if ui.button("Stop waiting").on_hover_text("Go back to the design now; the run's result is discarded when that call ends").clicked() { abandon = true; }
+                }
+            }
         });
+    }
+    if cancel { app.cancel_script(); }
+    if abandon && let Some(run) = app.scripts.running.take() {
+        app.scripts.log.extend(run.log.iter().cloned());
+        app.scripts.log.push(format!("{} was cancelled while in a modeling call; its result is discarded when the call ends.", run.name));
+        app.toast(format!("{} cancelled. It finishes its current modeling call in the background and its result is discarded.", run.name));
     }
     if app.scripts.show_log {
         let mut open = true;

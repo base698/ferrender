@@ -37,7 +37,7 @@ use std::path::PathBuf;
 
 const HELP: &str = "usage: ferrender [FILE]
        ferrender mcp [--headless] [--port N]
-       ferrender run SCRIPT.rhai [DESIGN.ferr] [--input NAME=VALUE]... [--allow DIR]... [--yes] [--save [OUT.ferr]] [--strict]
+       ferrender run SCRIPT.rhai [DESIGN.ferr] [--input NAME=VALUE]... [--allow DIR]... [--yes] [--timeout SECONDS] [--save [OUT.ferr]] [--strict]
        ferrender check DESIGN.ferr... [--rebuild] [--save]
        ferrender --version
 
@@ -46,7 +46,9 @@ Opens a design (.ferr) or imports a mesh (.stl, .obj, .3mf).
 `ferrender run` runs a script headless against a design (or a new one), printing
 its log; exit code 0 when it finishes, 1 when it fails, 2 for a usage error and
 3 (with --strict) when the design has timeline errors afterwards. Scripts may
-read and write files in their own folder, the design's folder and --allow folders.
+read and write files in their own folder, the design's folder and --allow folders;
+files they write appear only when the run succeeds. --timeout fails the run at its
+next operation after that many seconds. --yes answers confirm/ask without a prompt.
 `ferrender check` opens designs and lists their timeline errors (exit 1 if any);
 --rebuild compares the saved geometry cache with a fresh rebuild; --save writes
 each design back (which also records face tags for files from before 0.4).
@@ -109,7 +111,7 @@ fn cli(args: &[String]) -> i32 {
         for (i, a) in args.iter().enumerate().skip(1) {
             if skip { skip = false; continue; }
             if a.starts_with("--") {
-                if matches!(a.as_str(), "--input" | "--allow") { skip = true; }
+                if matches!(a.as_str(), "--input" | "--allow" | "--timeout") { skip = true; }
                 if a == "--save" && args.get(i + 1).is_some_and(|n| n.ends_with(".ferr")) { skip = true; }
                 continue;
             }
@@ -153,7 +155,7 @@ fn cli(args: &[String]) -> i32 {
         return if failed > 0 { 1 } else { 0 };
     }
     // run
-    let Some(script) = positional.first().map(PathBuf::from) else { eprintln!("usage: ferrender run SCRIPT.rhai [DESIGN.ferr] [--input NAME=VALUE]... [--allow DIR]... [--yes] [--save [OUT.ferr]] [--strict]"); return 2; };
+    let Some(script) = positional.first().map(PathBuf::from) else { eprintln!("usage: ferrender run SCRIPT.rhai [DESIGN.ferr] [--input NAME=VALUE]... [--allow DIR]... [--yes] [--timeout SECONDS] [--save [OUT.ferr]] [--strict]"); return 2; };
     let source = match fr_core::script::read_source(&script) { Ok(s) => s, Err(e) => { eprintln!("could not read {}: {e}", script.display()); return 2; } };
     let design = positional.get(1).map(PathBuf::from);
     let mut session = match &design {
@@ -170,6 +172,16 @@ fn cli(args: &[String]) -> i32 {
     }
     req.inputs = serde_json::Value::Object(inputs);
     req.sandbox.yes = flag("--yes");
+    if flag("--timeout") && values("--timeout").is_empty() {
+        eprintln!("--timeout needs a positive number of seconds");
+        return 2;
+    }
+    if let Some(t) = values("--timeout").last() {
+        match t.parse::<f64>().ok().and_then(|secs| fr_core::script::timeout_duration(secs).ok()) {
+            Some(duration) => req.time_limit = Some(duration),
+            _ => { eprintln!("--timeout takes a positive number of seconds, not {t}"); return 2; }
+        }
+    }
     req.sandbox.allowed = values("--allow").into_iter().map(PathBuf::from).collect();
     if let Some(d) = &req.script_dir { req.sandbox.allowed.push(d.clone()); }
     if let Some(d) = design.as_ref().and_then(|d| d.parent()) { req.sandbox.allowed.push(if d.as_os_str().is_empty() { PathBuf::from(".") } else { d.to_path_buf() }); }
