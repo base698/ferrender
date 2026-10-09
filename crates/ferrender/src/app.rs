@@ -522,7 +522,7 @@ impl Dialog {
                 if let Some(id) = p.editing {
                     let owner = d.feature(source).ok_or("The source feature no longer exists.")?.owner;
                     let index = d.features.iter().position(|f| f.id == id).ok_or("The pattern no longer exists.")?;
-                    if !d.features.iter().take(index).any(|f| f.id == source && !f.suppressed) { return Err("Choose a source before this pattern in the timeline.".into()); }
+                    if !d.features.iter().take(index).any(|f| f.id == source && !d.is_suppressed(f.id)) { return Err("Choose a source before this pattern in the timeline.".into()); }
                     let feature = d.feature_mut(id).unwrap();
                     if feature.owner != owner { return Err("Choose a source in the pattern's component.".into()); }
                     feature.kind = FeatureKind::Pattern(pattern);
@@ -1044,7 +1044,7 @@ impl App {
     }
 
     pub fn edit_sketch(&mut self, id: Id) {
-        if !self.doc().features.iter().take(self.doc().active()).any(|f| f.id == id && !f.suppressed && self.session.built.components.contains_key(&f.owner)) {
+        if !self.doc().features.iter().take(self.doc().active()).any(|f| f.id == id && !self.doc().is_suppressed(f.id) && self.session.built.components.contains_key(&f.owner)) {
             self.toast("This sketch or its component is suppressed or rolled back. Restore it in the timeline before editing.");
             return;
         }
@@ -1918,7 +1918,7 @@ impl App {
         let local = self.session.built.body(body).map_or(at, |b| b.to_local(at));
         let r = self.session.edit_feature(|doc| {
             let radius = doc.enter(&d.radius, Kind::Length)?;
-            let strength = doc.enter(&d.strength, Kind::Length)?;
+            let strength = doc.enter(&d.strength, if matches!(brush, Brush::Smooth | Brush::Flatten) { Kind::Scalar } else { Kind::Length })?;
             let id = doc.add_feature(FeatureKind::MeshOp(MeshOp { body, op: MeshOpKind::Sculpt { brush, at: local, radius, strength }, region: None }));
             Ok((id, id))
         });
@@ -2010,6 +2010,14 @@ impl App {
     }
 
     pub fn run(&mut self, ctx: &Context, a: Action) {
+        if self.session.read_only && !matches!(a,
+            Action::New | Action::Open | Action::Recover | Action::Export | Action::ExportStep
+            | Action::Copy | Action::SelectAll | Action::About | Action::Assistant
+            | Action::View(_) | Action::Fit | Action::Section | Action::Measure
+            | Action::CommandSearch | Action::ScriptLog | Action::Cancel | Action::Tool(Tool::Select)) {
+            self.toast("This design is read-only because it was written by a newer Ferrender. Update Ferrender to edit it.");
+            return;
+        }
         if matches!(a, Action::Open | Action::Import | Action::Save | Action::SaveAs | Action::About | Action::Parameters | Action::Recover | Action::View(_) | Action::Fit) {
             self.reference_drag.clear();
         }
@@ -2232,7 +2240,7 @@ impl App {
             Action::Pattern => {
                 self.finish_sketch();
                 let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
-                let available = |f: &&fr_core::Feature| !f.suppressed && !self.session.built.errors.contains_key(&f.id) && self.session.built.components.contains_key(&f.owner) && ok(&f.kind);
+                let available = |f: &&fr_core::Feature| !self.doc().is_suppressed(f.id) && !self.session.built.errors.contains_key(&f.id) && self.session.built.components.contains_key(&f.owner) && ok(&f.kind);
                 let sources: Vec<_> = self.doc().features.iter().take(self.doc().active()).filter(available).collect();
                 let chosen = self.sel_feature.or(self.sel_body).filter(|id| sources.iter().any(|f| f.id == *id));
                 let source = chosen.or_else(|| sources.iter().rev().find(|f| f.owner == self.doc().active_component).map(|f| f.id));

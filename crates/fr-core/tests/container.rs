@@ -234,3 +234,19 @@ fn save_reports_the_container_over_the_api() {
     assert_eq!(info["container"], true);
     assert_eq!(fresh.doc, s.doc);
 }
+
+#[cfg(unix)]
+#[test]
+fn conversion_backup_does_not_follow_a_dangling_symlink() {
+    let dir = dir("backup-link");
+    let path = dir.join("old.ferr");
+    let outside = dir.join("unrelated-file");
+    let s = design(true);
+    let original = io::to_json(&s.doc);
+    std::fs::write(&path, &original).unwrap();
+    std::os::unix::fs::symlink(&outside, io::backup_path(&path)).unwrap();
+    let err = io::save(&s.doc, &path).unwrap_err();
+    assert!(err.contains("not a regular file"), "{err}");
+    assert!(!outside.exists());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}

@@ -199,3 +199,85 @@ fn tags_survive_save_and_load_and_old_files_learn_them() {
     assert_eq!(b.tags.len(), 1);
     assert!(!old.dirty, "learning tags on open is not an edit");
 }
+
+#[test]
+fn deleting_a_primitives_picked_face_does_not_select_another_face_of_that_primitive() {
+    let mut s = Session::default();
+    run(&mut s, json!({"op":"primitive","type":"box","width":40,"depth":20,"height":10}));
+    let body = last(&s);
+    run(&mut s, json!({"op":"shell","body":body,"open_faces":[[20,10,10]],"thickness":1}));
+    let shell = last(&s);
+    run(&mut s, json!({"op":"rollback","to":body}));
+    run(&mut s, json!({"op":"primitive","type":"box","width":60,"depth":40,"height":10,"position":[-10,-10,5],"operation":"cut"}));
+    run(&mut s, json!({"op":"rollback","to":"end"}));
+    assert!(s.built.errors.get(&shell).is_some_and(|e|e.contains("no longer there")), "{:?}", s.built.errors);
+}
+
+#[test]
+fn a_tagged_text_face_cannot_migrate_to_a_replacement_cut_face() {
+    let mut s = Session::default();
+    run(&mut s, json!({"op":"primitive","type":"box","width":40,"depth":20,"height":10}));
+    let body = last(&s);
+    run(&mut s, json!({"op":"text","text":"A","operation":"join","body":body,"face":[20,10,10],"height":4,"depth":1}));
+    let text = last(&s);
+    run(&mut s, json!({"op":"rollback","to":body}));
+    run(&mut s, json!({"op":"primitive","type":"box","width":60,"depth":40,"height":10,"position":[-10,-10,5],"operation":"cut"}));
+    run(&mut s, json!({"op":"rollback","to":"end"}));
+    assert!(s.built.errors.get(&text).is_some_and(|e|e.contains("no longer there")), "{:?}", s.built.errors);
+}
+
+#[test]
+fn tag_families_keep_face_ordinals_and_copy_identity() {
+    use fr_core::tag::{Tag, Kind};
+    let a = Tag::new(Origin::Made {feature:1,n:0}, Kind::Plane);
+    let b = Tag::new(Origin::Made {feature:1,n:1}, Kind::Plane);
+    assert_ne!(a.family(), b.family());
+    assert_ne!(a.family(), a.copy(1).family());
+    assert_ne!(a.copy(1).family(), a.copy(2).family());
+    assert_eq!(a.copy(1).split(2).family(), a.split(3).copy(1).family());
+}
+
+#[test]
+fn a_tagged_construction_plane_errors_if_its_face_was_replaced() {
+    let mut s = Session::default();
+    run(&mut s, json!({"op":"primitive","type":"box","width":40,"depth":20,"height":10}));
+    let body = last(&s);
+    run(&mut s, json!({"op":"create_plane","kind":"offset","base":{"face":{"body":body,"point":[20,10,10]}},"distance":2}));
+    let plane = last(&s);
+    run(&mut s, json!({"op":"rollback","to":body}));
+    run(&mut s, json!({"op":"primitive","type":"box","width":60,"depth":40,"height":10,"position":[-10,-10,5],"operation":"cut"}));
+    run(&mut s, json!({"op":"rollback","to":"end"}));
+    assert!(s.built.errors.get(&plane).is_some_and(|e|e.contains("gone")), "{:?}", s.built.errors);
+}
+
+#[test]
+fn first_copies_and_separate_patterns_have_distinct_face_tags() {
+    let mut s = Session::default();
+    run(&mut s, json!({"op":"primitive","type":"box","width":10,"depth":10,"height":10}));
+    let body = last(&s);
+    run(&mut s, json!({"op":"pattern","feature":body,"type":"linear","axis":"x","count":2,"spacing":20}));
+    run(&mut s, json!({"op":"pattern","feature":body,"type":"linear","axis":"y","count":2,"spacing":20}));
+    assert_eq!(s.built.bodies.len(), 3);
+    let tags: Vec<std::collections::BTreeSet<_>> = s.built.bodies.iter().map(|b| b.tags.iter().flatten().flatten().cloned().collect()).collect();
+    assert!(tags[0].is_disjoint(&tags[1]), "the first copy must not reuse the original face tags");
+    assert!(tags[1].is_disjoint(&tags[2]), "different patterns must not share copy identities");
+}
+
+#[test]
+fn a_thread_keeps_its_cylindrical_face_when_the_rod_length_changes() {
+    let mut s = Session::default();
+    run(&mut s, json!({"op":"set_parameter","name":"h","expr":"20 mm"}));
+    run(&mut s, json!({"op":"primitive","type":"cylinder","diameter":6,"height":"$h"}));
+    let body = last(&s);
+    run(&mut s, json!({"op":"thread","body":body,"face":[3,0,10],"thread":"M6","length":5,"allowance":0.2}));
+    let thread = last(&s);
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    run(&mut s, json!({"op":"set_parameter","name":"h","expr":"40 mm"}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    assert_eq!(s.built.resolutions.get(&thread), Some(&Level::Tag));
+    let b = s.built.body(body).unwrap();
+    assert_eq!(b.threads.len(), 1);
+    assert_eq!(b.threads[0].open_edges(), 0);
+    let (lo, hi) = b.mesh.bbox().unwrap();
+    assert!((hi.z - lo.z - 40.0).abs() < 1e-6);
+}

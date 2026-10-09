@@ -475,6 +475,8 @@ impl Text {
                     candidates.insert(0, drop(mapped));
                     candidates.insert(1, drop(original));
                     by_tag = 2;
+                } else if faces.iter().any(|f| f.tag.is_some()) {
+                    return Err("the text's flat face is no longer there; select the face again".into());
                 }
             }
             // An earlier emboss can extend the bounds beyond this face. When
@@ -492,12 +494,16 @@ impl Text {
                 if normal.dot(plane.normal()) < 1.0 - 1e-6 || (point - surface.origin).dot(normal).abs() > 1e-5 { continue; }
                 let local = surface.to_local(point);
                 if face.loops.iter().filter(|ring| profile::inside(ring, local)).count() % 2 == 0 { continue; }
+                let found_tag = exact::face_tag_at(&body.solids, &body.tags, point);
+                if let (Some(wanted), Some(found)) = (&self.tag, &found_tag) {
+                    if wanted.family() != found.family() { continue; }
+                }
                 // Keep the user-chosen baseline and orientation on the resolved face.
                 plane.origin += point - anchor;
                 plane.origin -= normal * (plane.origin - surface.origin).dot(normal);
                 found = Some(plane);
                 if k >= by_tag { level = Level::Position; }
-                learned = exact::face_tag_at(&body.solids, &body.tags, point);
+                learned = found_tag;
                 break;
             }
             plane = found.ok_or("the text's flat face is no longer there; select the face again")?;
@@ -705,6 +711,9 @@ pub struct Document {
     #[serde(default)]
     pub hidden_bodies: Vec<Id>,
     pub next_id: Id,
+    /// Temporary allocation hints while rerunning a script. Never persisted.
+    #[serde(skip)]
+    reuse_feature_ids: std::collections::VecDeque<(Id, std::mem::Discriminant<FeatureKind>)>,
     /// The timeline's roll-back marker: only this many features are built, and
     /// new ones go in at this point. `None` is the end of the timeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -957,6 +966,15 @@ impl Document {
         })
     }
 
+    /// Reuse a rerun's former IDs, in command order, when the feature kind still
+    /// matches. Fresh additions keep using the document's high-water mark, so
+    /// references in later timeline features cannot collide with extra outputs.
+    pub fn reuse_feature_ids(&mut self, previous: &[Feature]) {
+        self.reuse_feature_ids = previous.iter().map(|f| (f.id, std::mem::discriminant(&f.kind))).collect();
+    }
+
+    pub fn finish_feature_id_reuse(&mut self) { self.reuse_feature_ids.clear(); }
+
     /// Appends a feature, naming it after its type (`Sketch2`, `Extrude1`).
     pub fn add_feature(&mut self, kind: FeatureKind) -> Id {
         // Reserve every copy slot, including copies added by later pattern edits.
@@ -964,13 +982,15 @@ impl Document {
             .map(|f|f.id.saturating_mul(1000)).find(|start|self.next_id>*start && self.next_id<start.saturating_add(1000)) {
             self.next_id=end.saturating_add(1000);
         }
-        let id = self.next_id;
-        self.next_id += 1;
+        let reused = self.reuse_feature_ids.pop_front().filter(|(id, previous)|
+            *previous == std::mem::discriminant(&kind) && self.feature(*id).is_none());
+        let id = if let Some((id, _)) = reused { id } else { let id = self.next_id; self.next_id += 1; id };
         let target=match &kind {
             FeatureKind::Transform(t)=>Some(t.body), FeatureKind::Combine(c)=>Some(c.target),
             FeatureKind::Blend(b)=>Some(b.body), FeatureKind::Shell(s)=>Some(s.body),
             FeatureKind::Hole(h)=>Some(h.body), FeatureKind::Thread(t)=>Some(t.body), FeatureKind::Text(t)=>t.body,
             FeatureKind::Split(s)=>Some(s.body), FeatureKind::Remove(r)=>r.bodies.first().copied(),
+            FeatureKind::MeshOp(m)=>Some(m.body),
             _=>None,
         };
         let owner=match &kind {
@@ -995,6 +1015,19 @@ impl Document {
     /// How many features the timeline currently builds.
     pub fn active(&self) -> usize {
         self.rollback.map_or(self.features.len(), |at| at.min(self.features.len()))
+    }
+
+    /// Whether a feature is suppressed directly or through the script run that made it.
+    /// Inherited suppression is evaluated, never written into the child's own flag.
+    pub fn is_suppressed(&self, id: Id) -> bool {
+        let mut next = Some(id);
+        for _ in 0..=self.features.len() {
+            let Some(id) = next else { return false };
+            let Some(f) = self.feature(id) else { return true };
+            if f.suppressed { return true; }
+            next = f.made_by;
+        }
+        true // A malformed ownership cycle must not make a feature available.
     }
 
     /// Moves the roll-back marker so that `count` features are built; the end clears it.
@@ -1107,7 +1140,7 @@ impl Document {
         let sk = |id: Id| {
             if let Some(e)=context.errors.get(&id) { return Err(format!("its sketch could not be placed: {e}")); }
             if self.feature(id).is_some_and(|f|!context.components.contains_key(&f.owner)) {return Err("its sketch's component is suppressed or unavailable".into());}
-            if !self.features.iter().take(self.active()).take_while(|p|p.id!=f.id).any(|p|p.id==id && !p.suppressed) { return Err("its sketch was deleted, suppressed, or comes later in the timeline".into()); }
+            if !self.features.iter().take(self.active()).take_while(|p|p.id!=f.id).any(|p|p.id==id && !self.is_suppressed(p.id)) { return Err("its sketch was deleted, suppressed, or comes later in the timeline".into()); }
             self.sketch(id).ok_or("its sketch was deleted".to_owned())
         };
         match &f.kind {
@@ -1187,12 +1220,7 @@ impl Document {
             }
         }
         let probe = self.clone();
-        // A feature made by a suppressed script run is suppressed with it.
-        let suppressed_runs: Vec<Id> = self.features.iter().filter(|f| f.suppressed && matches!(f.kind, FeatureKind::ScriptRun(_))).map(|f| f.id).collect();
-        for f in &mut self.features {
-            if let Some(by) = f.made_by && suppressed_runs.contains(&by) && !matches!(f.kind, FeatureKind::ScriptRun(_)) { f.suppressed = true; }
-        }
-        for f in self.features.iter_mut().take(probe.active()).filter(|f|!f.suppressed && probe.component_available(f.owner)) {
+        for f in self.features.iter_mut().take(probe.active()).filter(|f| !probe.is_suppressed(f.id) && probe.component_available(f.owner)) {
             let mut err = None;
             let mut set = |v: &mut Value, kind: Kind| match probe.value(&v.expr, kind) {
                 Ok(x) => *v = x,
@@ -1256,7 +1284,10 @@ impl Document {
                 }
                 FeatureKind::MeshOp(m) => match &mut m.op {
                     MeshOpKind::Offset { distance, .. } | MeshOpKind::ExtrudeRegion { distance, .. } => set(distance, Kind::Length),
-                    MeshOpKind::Sculpt { radius, strength, .. } => { set(radius, Kind::Length); set(strength, Kind::Length); }
+                    MeshOpKind::Sculpt { brush, radius, strength, .. } => {
+                        set(radius, Kind::Length);
+                        set(strength, if matches!(brush, crate::meshops::Brush::Smooth | crate::meshops::Brush::Flatten) { Kind::Scalar } else { Kind::Length });
+                    }
                     _ => {}
                 },
                 FeatureKind::Relief(r) => { for v in [&mut r.width, &mut r.depth, &mut r.base] { set(v, Kind::Length); } }
@@ -1271,7 +1302,7 @@ impl Document {
         let mut counts:BTreeMap<Id,usize>=BTreeMap::new();
         for index in 0..self.active() {
             let f = self.features[index].clone();
-            if f.suppressed || !built.components.contains_key(&f.owner) { continue; }
+            if self.is_suppressed(f.id) || !built.components.contains_key(&f.owner) { continue; }
             if let FeatureKind::Sketch(sketch)=&f.kind && let Some(id)=sketch.on {
                 match built.planes.get(&id) {
                     Some(p) => self.sketch_mut(f.id).unwrap().plane=p.plane.transformed(built.component_placement(f.owner).inverse()*built.component_placement(p.component)),
@@ -1645,14 +1676,16 @@ impl Document {
                 Ok(Some(level))
             }
             FeatureKind::Pattern(p) => {
-                let source = self.features.iter().take_while(|source| source.id != f.id).find(|source|source.id == p.source && !source.suppressed).ok_or("the feature it repeats is missing or suppressed")?;
+                let source = self.features.iter().take_while(|source| source.id != f.id).find(|source|source.id == p.source && !self.is_suppressed(source.id)).ok_or("the feature it repeats is missing or suppressed")?;
                 if context.errors.contains_key(&source.id) || !context.components.contains_key(&source.owner) {
                     return Err("the feature it repeats could not be built".into());
                 }
                 let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, primitives, imports and standalone text can be patterned")?;
                 let mut landed = 0;
                 for (k, place) in p.placements()?.iter().enumerate() {
-                    let copy = tool.copied(place, k as u32);
+                    // Include the pattern feature in copy identity; separate patterns of the
+                    // same source must not give their faces the same tags.
+                    let copy = tool.copied(place, id * 1000 + k as u32 + 1);
                     // A cut that lands clear of every body has nothing to do; the others still apply.
                     if matches!(op, Op::Cut | Op::Intersect) && !bodies.iter().any(|b| b.component==f.owner && overlap(b.mesh.bbox(), copy.bbox())) {
                         continue;
@@ -1825,6 +1858,12 @@ impl Session {
         let restored = cache.restore().map_err(|e| format!("this file was written by a newer version of Ferrender, and its saved geometry could not be shown: {e}"))?;
         let mut built = Built { placements_applied: true, ..Default::default() };
         built.components.insert(0, crate::components::BuiltComponent { placement: DAffine3::IDENTITY, visible: true });
+        // The newer timeline cannot be interpreted, but cached bodies already
+        // carry world-space geometry. Keep every referenced owner available so
+        // non-root bodies are visible in the read-only preview and exports.
+        for component in restored.bodies.iter().map(|b| b.component).chain(restored.planes.values().map(|p| p.component)) {
+            built.components.entry(component).or_insert(crate::components::BuiltComponent { placement: DAffine3::IDENTITY, visible: true });
+        }
         built.bodies = restored.bodies;
         built.planes = restored.planes;
         let doc = Document::new(Unit::Mm);
@@ -1879,6 +1918,9 @@ impl Session {
     }
 
     pub fn rebuild(&mut self) {
+        // A future-version session has only a placeholder Document. Rebuilding
+        // it would silently replace the only available cached geometry with nothing.
+        if self.read_only { return; }
         let t = std::time::Instant::now();
         self.built = self.doc.rebuild();
         self.rebuild_ms = t.elapsed().as_millis() as u32;

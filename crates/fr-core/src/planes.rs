@@ -117,6 +117,8 @@ pub fn face_tagged(body: &Body, at: DVec3, frame: Option<[DVec3;2]>, tag: Option
             let level=if exact_hit.is_some() {Level::Tag} else {Level::Origin};
             for p in candidates(body,at,frame) { tries.push((p-f.normal*(p-f.at).dot(f.normal),level)); }
             tries.push((f.at,level));
+        } else if faces.iter().any(|f| f.tag.is_some()) {
+            return Err("the tagged face is gone; edit the plane and pick it again".into());
         }
     }
     tries.extend(candidates(body,at,frame).into_iter().map(|p|(p,Level::Position)));
@@ -127,6 +129,9 @@ pub fn face_tagged(body: &Body, at: DVec3, frame: Option<[DVec3;2]>, tag: Option
         let q=plane.to_local(p);
         if f.loops.iter().filter(|ring| crate::profile::inside(ring,q)).count()%2==1 {
             let found=crate::exact::face_tag_at(&body.solids,&body.tags,p);
+            if let (Some(wanted), Some(actual)) = (tag, found.as_ref()) {
+                if wanted.family() != actual.family() { continue; }
+            }
             return Ok((f,found,level));
         }
     }
@@ -172,7 +177,7 @@ impl Document {
             PointRef::World(p) => Ok(*p),
             PointRef::SketchPoint {sketch,point} => {
                 let at=self.features.iter().position(|f|f.id==before).unwrap_or(self.active());
-                let feature=self.features.iter().take(at).find(|f|f.id==*sketch && !f.suppressed).ok_or("the sketch point's sketch is missing or comes later")?;
+                let feature=self.features.iter().take(at).find(|f|f.id==*sketch && !self.is_suppressed(f.id)).ok_or("the sketch point's sketch is missing or comes later")?;
                 if let Some(e)=built.errors.get(sketch) { return Err(format!("the sketch point could not be placed: {e}")); }
                 let FeatureKind::Sketch(s)=&feature.kind else { return Err("the point reference is not a sketch".into()) };
                 if !built.components.contains_key(&feature.owner) {return Err("the sketch point's component is suppressed or unavailable".into());}

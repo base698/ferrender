@@ -26,6 +26,13 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify pinned OpenCascade build dependency
+        run: |
+          python3 scripts/test_prepare_occt.py
+          python3 scripts/prepare-occt.py --github-env
       - name: Install Linux build and offscreen rendering prerequisites
         if: runner.os == 'Linux'
         run: |
@@ -35,7 +42,7 @@ jobs:
             libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev \
             libegl1-mesa-dev libgl1-mesa-dev libvulkan1 mesa-vulkan-drivers \
             xvfb xauth
-      # cadrum's build script downloads its pinned OpenCascade prebuilt archive.
+      # The verifier supplies OCCT_ROOT, so cadrum uses the checked archive.
       # macOS supplies its C++ compiler through the runner's Xcode installation.
       - name: Build all workspace targets
         run: cargo build --locked --workspace --all-targets

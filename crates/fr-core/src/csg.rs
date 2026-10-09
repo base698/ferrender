@@ -141,20 +141,6 @@ impl Node {
         }
     }
 
-    /// Splits `polys` by every plane of this tree and keeps all the pieces: no piece crosses a tree polygon's plane afterwards.
-    fn fragment(&self, polys: Vec<Poly>, out: &mut Vec<Poly>) {
-        let Some(plane) = self.plane else { out.extend(polys); return };
-        let (mut f, mut b) = (Vec::new(), Vec::new());
-        let (mut cf, mut cb) = (Vec::new(), Vec::new());
-        for p in polys {
-            split(plane, p, &mut cf, &mut cb, &mut f, &mut b);
-        }
-        f.append(&mut cf);
-        b.append(&mut cb);
-        match &self.front { Some(n) => n.fragment(f, out), None => out.extend(f) }
-        match &self.back { Some(n) => n.fragment(b, out), None => out.extend(b) }
-    }
-
     fn all(&self, out: &mut Vec<Poly>) {
         out.extend(self.polys.iter().cloned());
         if let Some(f) = &self.front {
@@ -200,20 +186,60 @@ pub const MAX_TRIS: usize = 400_000;
 /// The triangles of `polys` cut along every plane of `cutter`'s triangles, as
 /// triangles: afterwards no piece crosses `cutter`'s surface, so each piece is
 /// wholly inside or outside it. The pieces are returned with `polys`' winding.
-pub fn fragments(cutter: &Mesh, polys: &Mesh) -> Vec<[DVec3; 3]> {
-    let tree = tree(cutter);
-    let mut out = Vec::new();
-    tree.fragment(polys.tris().filter_map(|t| Poly::new(t.to_vec())).collect(), &mut out);
-    let mut tris = Vec::with_capacity(out.len());
-    for p in out {
-        for i in 1..p.v.len() - 1 {
-            let t = [p.v[0], p.v[i], p.v[i + 1]];
-            if (t[1] - t[0]).cross(t[2] - t[0]).length_squared() > 1e-20 {
-                tris.push(t);
-            }
+pub fn fragments(cutter: &Mesh, polys: &Mesh) -> Result<Vec<[DVec3; 3]>, String> {
+    if cutter.len() + polys.len() > MAX_TRIS {
+        return Err(format!("mesh boolean fragments are limited to {MAX_TRIS} nearby triangles"));
+    }
+    // Convex scans make a BSP almost as deep as its triangle count. An arena
+    // and explicit work stack avoid both recursive traversal and recursive
+    // destruction overflowing the application thread's stack.
+    struct Branch { plane: (DVec3, f64), front: Option<usize>, back: Option<usize> }
+    const MAX_WORK: usize = 20_000_000;
+    const MAX_PIECES: usize = 2_000_000;
+    let mut work = 0usize;
+    let mut spend = |count: usize| -> Result<(), String> {
+        work = work.saturating_add(count);
+        if work > MAX_WORK { Err("the mesh intersection is too complex; decimate the meshes before combining them".into()) } else { Ok(()) }
+    };
+    let input: Vec<Poly> = cutter.tris().filter_map(|t| Poly::new(t.to_vec())).collect();
+    if input.is_empty() { return Ok(polys.tris().collect()); }
+    let mut nodes = vec![Branch { plane: (input[0].n, input[0].w), front: None, back: None }];
+    let mut stack = vec![(0usize, input)];
+    while let Some((at, input)) = stack.pop() {
+        spend(input.len())?;
+        let (mut f, mut b, mut cf, mut cb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for p in input { split(nodes[at].plane, p, &mut cf, &mut cb, &mut f, &mut b); }
+        for (front, part) in [(true, f), (false, b)] {
+            if part.is_empty() { continue; }
+            let next = nodes.len();
+            nodes.push(Branch { plane: (part[0].n, part[0].w), front: None, back: None });
+            if front { nodes[at].front = Some(next); } else { nodes[at].back = Some(next); }
+            stack.push((next, part));
         }
     }
-    tris
+    let mut stack = vec![(Some(0usize), polys.tris().filter_map(|t| Poly::new(t.to_vec())).collect::<Vec<_>>())];
+    let mut tris = Vec::new();
+    while let Some((at, input)) = stack.pop() {
+        spend(input.len())?;
+        let Some(at) = at else {
+            for p in input {
+                for i in 1..p.v.len() - 1 {
+                    let t = [p.v[0], p.v[i], p.v[i + 1]];
+                    if (t[1] - t[0]).cross(t[2] - t[0]).length_squared() > 1e-20 {
+                        if tris.len() >= MAX_PIECES { return Err("the mesh intersection produces too many fragments; decimate the meshes first".into()); }
+                        tris.push(t);
+                    }
+                }
+            }
+            continue;
+        };
+        let (mut f, mut b, mut cf, mut cb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for p in input { split(nodes[at].plane, p, &mut cf, &mut cb, &mut f, &mut b); }
+        f.append(&mut cf); b.append(&mut cb);
+        if !f.is_empty() { stack.push((nodes[at].front, f)); }
+        if !b.is_empty() { stack.push((nodes[at].back, b)); }
+    }
+    Ok(tris)
 }
 
 pub fn boolean(a: &Mesh, b: &Mesh, op: Bool) -> Result<Mesh, String> {

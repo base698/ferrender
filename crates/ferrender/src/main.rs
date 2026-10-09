@@ -131,7 +131,10 @@ fn cli(args: &[String]) -> i32 {
                 println!("  error in {id} {name}: {e}");
             }
             if !s.built.errors.is_empty() { failed += 1; }
-            if flag("--rebuild") && s.from_cache {
+            if flag("--rebuild") && s.read_only {
+                eprintln!("  cannot verify a rebuild of this newer read-only design; update Ferrender first");
+                failed += 1;
+            } else if flag("--rebuild") && s.from_cache {
                 let cached: Vec<(u32, f64)> = s.built.bodies.iter().map(|b| (b.id, if b.is_exact() { b.solids.iter().map(|l| l.volume()).sum() } else { b.mesh.volume() })).collect();
                 s.rebuild();
                 let fresh: Vec<(u32, f64)> = s.built.bodies.iter().map(|b| (b.id, if b.is_exact() { b.solids.iter().map(|l| l.volume()).sum() } else { b.mesh.volume() })).collect();
@@ -147,7 +150,7 @@ fn cli(args: &[String]) -> i32 {
     }
     // run
     let Some(script) = positional.first().map(PathBuf::from) else { eprintln!("usage: ferrender run SCRIPT.rhai [DESIGN.ferr] [--input NAME=VALUE]... [--allow DIR]... [--yes] [--save [OUT.ferr]] [--strict]"); return 2; };
-    let source = match std::fs::read_to_string(&script) { Ok(s) => s, Err(e) => { eprintln!("could not read {}: {e}", script.display()); return 2; } };
+    let source = match fr_core::script::read_source(&script) { Ok(s) => s, Err(e) => { eprintln!("could not read {}: {e}", script.display()); return 2; } };
     let design = positional.get(1).map(PathBuf::from);
     let mut session = match &design {
         Some(d) => match fr_core::Session::open(d) { Ok(s) => s, Err(e) => { eprintln!("could not open {}: {e}", d.display()); return 2; } },

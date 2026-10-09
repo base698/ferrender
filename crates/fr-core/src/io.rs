@@ -197,6 +197,15 @@ fn detach_blobs(v: &mut Value, mut meshes: Vec<Vec<u8>>) -> Result<Vec<Blob>, St
 /// the thread-local store the document reader takes them from. `read` is given the entry name and its byte limit.
 fn attach_blobs(v: &mut Value, mut read: impl FnMut(&str, usize) -> Result<Vec<u8>, String>) -> Result<(), String> {
     let Some(features) = v["features"].as_array_mut() else { return Ok(()) };
+    // Count references as well as ZIP entries: a small design can otherwise
+    // inline the same large image thousands of times during attachment.
+    let mut expanded = 0usize;
+    let mut read = |name: &str, max: usize| -> Result<Vec<u8>, String> {
+        let bytes = read(name, max)?;
+        expanded = expanded.checked_add(bytes.len()).ok_or("the container payloads are too large")?;
+        if expanded > MAX_CONTAINER_BYTES { return Err("the expanded container payloads exceed 2 GiB".into()); }
+        Ok(bytes)
+    };
     for f in features {
         if let Some(name) = f["kind"]["sketch"]["reference"]["png"]["blob"].as_str().map(str::to_owned) {
             let bytes = read(&name, MAX_IMAGE_BLOB)?;
@@ -309,10 +318,18 @@ fn read_entry(archive: &mut ZipArchive<Cursor<&[u8]>>, name: &str, max: usize) -
 }
 
 fn open_container(bytes: &[u8]) -> Result<ZipArchive<Cursor<&[u8]>>, String> {
-    let archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a Ferrender container: {e}"))?;
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a Ferrender container: {e}"))?;
     if archive.len() > MAX_ENTRIES { return Err("the container has too many entries".into()); }
     if let Some(bad) = archive.file_names().find(|n| !entry_allowed(n)) {
         return Err(format!("the container has an unexpected entry: {bad}"));
+    }
+    let mut expanded = 0u64;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| format!("could not inspect the container: {e}"))?;
+        expanded = expanded.checked_add(entry.size()).ok_or("the container declares too much data")?;
+        if expanded > MAX_CONTAINER_BYTES as u64 {
+            return Err("the expanded container exceeds the 2 GiB limit".into());
+        }
     }
     Ok(archive)
 }
@@ -335,10 +352,16 @@ fn read_cache(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Option<crate::cache::C
     if archive.by_name("cache/index.json").is_err() { return None; }
     let index: crate::cache::Index = serde_json::from_slice(&read_entry(archive, "cache/index.json", MAX_CACHE_INDEX_BYTES).ok()?).ok()?;
     let mut blobs = std::collections::HashMap::new();
+    let mut total = 0usize;
+    let mut ids = std::collections::HashSet::new();
     for e in &index.bodies {
+        if !ids.insert(e.id) || e.brep.is_some() == e.mesh.is_some() { return None; }
         for name in e.brep.iter().chain(e.mesh.iter()) {
             if !entry_allowed(name) || !name.starts_with("cache/") { return None; }
-            blobs.insert(name.clone(), read_entry(archive, name, MAX_CACHE_BLOB).ok()?);
+            if blobs.contains_key(name) { return None; }
+            let bytes = read_entry(archive, name, MAX_CACHE_BLOB.checked_sub(total)?).ok()?;
+            total = total.checked_add(bytes.len())?;
+            blobs.insert(name.clone(), bytes);
         }
     }
     Some(crate::cache::Cache { index, blobs })
@@ -417,9 +440,31 @@ pub fn save_with(doc: &Document, path: &Path, extras: &Extras) -> Result<Saved, 
     let mut backup = None;
     if container && path.is_file() && !is_container(path) {
         let to = backup_path(path);
-        if !to.exists() {
-            std::fs::copy(path, &to).map_err(|e| format!("could not keep a backup of {} at {}: {e}", path.display(), to.display()))?;
-            backup = Some(to);
+        // A predictable backup filename must never follow a symlink (including
+        // a dangling one), or a save could overwrite an unrelated file.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&to) {
+            Ok(mut destination) => {
+                let result = std::fs::File::open(path)
+                    .and_then(|mut source| std::io::copy(&mut source, &mut destination))
+                    .and_then(|_| destination.sync_all());
+                if let Err(e) = result {
+                    let _ = std::fs::remove_file(&to);
+                    return Err(format!("could not keep a backup of {} at {}: {e}", path.display(), to.display()));
+                }
+                backup = Some(to);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::symlink_metadata(&to).is_ok_and(|m| m.file_type().is_file()) {
+                    return Err(format!("the backup path {} already exists and is not a regular file", to.display()));
+                }
+            }
+            Err(e) => return Err(format!("could not create the backup {}: {e}", to.display())),
         }
     }
     static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -445,9 +490,15 @@ pub fn save_with(doc: &Document, path: &Path, extras: &Extras) -> Result<Saved, 
 }
 
 fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
-    let mut data = Vec::new();
-    file.take(max as u64 + 1).read_to_end(&mut data).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let metadata = std::fs::metadata(path).map_err(|e| format!("could not inspect {}: {e}", path.display()))?;
+    if !metadata.is_file() { return Err(format!("{} is not a regular file", path.display())); }
+    let mut file = std::fs::File::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    let mut head = [0; 2];
+    let n = file.read(&mut head).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let max = if n == 2 && &head == b"PK" { max } else { max.min(MAX_NATIVE_BYTES) };
+    if metadata.len() > max as u64 { return Err(format!("{} exceeds the {} MiB file limit", path.display(), max / (1024 * 1024))); }
+    let mut data = head[..n].to_vec();
+    file.take(max as u64 + 1 - n as u64).read_to_end(&mut data).map_err(|e| format!("could not read {}: {e}", path.display()))?;
     if data.len() > max { return Err(format!("{} exceeds the {} MiB file limit", path.display(), max / (1024 * 1024))); }
     Ok(data)
 }

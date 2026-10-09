@@ -56,7 +56,7 @@ Mesh editing. Each is a timeline feature that takes a mesh body and replaces it 
 {"op":"mesh_offset","body":BODY,"distance":2,"direction":[0,0,-1]}   thickens an open surface into a closed solid (walls along its rim), or hollows a closed one; direction optional, else along the surface normals
 {"op":"mesh_extrude_region","body":BODY,"region":REGION,"distance":3,"direction":[0,0,1]}   moves the region's triangles with walls around it
    REGION is {"sphere":{"centre":[x,y,z],"radius":r}} | {"box":{"lo":[..],"hi":[..]}} | {"side":{"plane":PLANE}} (the plane's positive side) | {"normal":{"direction":[x,y,z],"degrees":30}} | {"connected":{"seed":[x,y,z]}}
-{"op":"mesh_sculpt","body":BODY,"brush":"pull","at":[x,y,z],"radius":8,"strength":2}   one stroke: push | pull (along the surface normal under the point, by strength mm) | inflate (along each vertex's own normal) | smooth | flatten (strength 0..1); vertices within the radius move with a smooth falloff; each stroke is a feature
+{"op":"mesh_sculpt","body":BODY,"brush":"pull","at":[x,y,z],"radius":8,"strength":2}   one stroke: push | pull (along the surface normal under the point; strength is a length in document units or an explicit unit expression) | inflate (along each vertex's own normal) | smooth | flatten (strength 0..1); vertices within the radius move with a smooth falloff; each stroke is a feature
 {"op":"mesh_from_image","path":"/abs/photo.png","width":100,"depth":4,"base":2,"resolution":300,"invert":false,"blur":1,"gamma":1,"plane":"XY","origin":[x,y,z],"operation":"new"}
    a relief: the image's luminance becomes height on a grid (resolution cells along the longer side, at most 1200), bright high (invert for a lithophane), on a slab "base" thick; "depth" is the height of the brightest pixel. The image (PNG or JPEG) is embedded, as a reference image is. A depth map rendered elsewhere works the same way. Then mesh_smooth, mesh_cut to trim, combine onto a plaque, export_stl.
 {"op":"export_stl","path":"...","union":true}      merges overlapping bodies into one shell first (exact bodies only)
@@ -166,7 +166,7 @@ QUERIES
    The view is fitted to the bodies. For a custom camera add "azimuth" and "elevation" in degrees (the eye's bearing around Z and height above the XY plane), "target":[x,y,z] to centre on a point, and "zoom" to magnify (2 = twice as close).
 {"op":"get_reference"}                             this text
 
-Scripts. A Rhai script with a META map (name, description, inputs) and fn run(inputs) drives these same commands as functions: extrude(#{sketch: s, distance: 10}) returns what the command returns; new is new_design and thread is add_thread (Rhai keywords); run(#{op: ...}) takes any command. Also scene(), info(id), params(), errors(), selection(), measure(a, b), screenshot(path, #{view: "iso"}); files read_text, write_text, read_csv, write_csv, list_files(dir, ".ferr"), exists, mkdir, join, basename, document_dir(), script_dir(), all inside the allowed folders; log, progress(0..1, msg), confirm, ask, fail, name_template("{a}-{b}", #{a: 1, b: 2}). Inputs arrive as numbers in mm and degrees with the typed text in inputs.expr.NAME, so passing inputs.expr.width to a command keeps the parameter live. Declared input kinds: length, angle, number, integer, bool, choice (with choices), text, folder, file, body, face, sketch; each has an initial value.
+Scripts. A Rhai script with a META map (name, description, inputs) and fn run(inputs) drives these same commands as functions: extrude(#{sketch: s, distance: 10}) returns what the command returns; new is new_design and thread is add_thread (Rhai keywords); command(#{op: ...}) dispatches a command (nested scripts and batches are excluded). Also scene(), info(id), params(), errors(), selection(), measure(a, b), screenshot(path, #{view: "iso"}); files read_text, write_text, read_csv, write_csv, list_files(dir, ".ferr"), exists, mkdir, join, basename, document_dir(), script_dir(), all inside the allowed folders; log, progress(0..1, msg), confirm, ask, fail, name_template("{a}-{b}", #{a: 1, b: 2}). Inputs arrive as numbers in mm and degrees with the typed text in inputs.expr.NAME, so passing inputs.expr.width to a command keeps the parameter live. Declared input kinds: length, angle, number, integer, bool, choice (with choices), text, folder, file, body, face, sketch; each has an initial value.
 {"op":"script_meta","source":"..."} or {"path":"/abs/x.rhai"}   the META of a script without running it
 {"op":"run_script","path":"/abs/x.rhai","inputs":{"width":"30 mm"},"allow":["/abs/out"],"yes":true}   runs the script as one undo step (source may be given instead of path); returns log, result, exports, features, errors
 {"op":"add_feature","feature":{...}}                 appends a feature exactly as the file format writes it (used by exported timeline scripts)
@@ -1778,7 +1778,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         "script_meta" => {
             let source = match (c["source"].as_str(), c["path"].as_str()) {
                 (Some(s), _) => s.to_owned(),
-                (None, Some(p)) => std::fs::read_to_string(p).map_err(|e| format!("could not read {p}: {e}"))?,
+                (None, Some(p)) => crate::script::read_source(std::path::Path::new(p))?,
                 _ => return Err("script_meta needs \"source\" or \"path\"".into()),
             };
             Ok(serde_json::to_value(crate::script::meta(&source)?).unwrap_or(J::Null))
@@ -1786,7 +1786,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         "run_script" => {
             let (source, dir) = match (c["source"].as_str(), c["path"].as_str()) {
                 (Some(s), _) => (s.to_owned(), None),
-                (None, Some(p)) => (std::fs::read_to_string(p).map_err(|e| format!("could not read {p}: {e}"))?, std::path::Path::new(p).parent().map(std::path::Path::to_path_buf)),
+                (None, Some(p)) => (crate::script::read_source(std::path::Path::new(p))?, std::path::Path::new(p).parent().map(std::path::Path::to_path_buf)),
                 _ => return Err("run_script needs \"source\" or \"path\"".into()),
             };
             let mut req = crate::script::Request::new(source);
@@ -1796,17 +1796,16 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             req.sandbox.allowed = c["allow"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(std::path::PathBuf::from).collect()).unwrap_or_default();
             if let Some(d) = dir { req.sandbox.allowed.push(d); }
             if let Some(d) = s.path.as_ref().and_then(|p| p.parent()) { req.sandbox.allowed.push(d.to_path_buf()); }
-            // The whole run is one undo step, and a failing script leaves the document as it was.
-            let depth = s.undo_depth();
-            let before_doc = s.doc.clone();
-            s.snapshot();
-            let result = crate::script::run(s, &req);
-            s.collapse_undo(depth + 1);
-            let outcome = match result {
-                Ok(o) => o,
-                Err(e) => { s.doc = before_doc; s.collapse_undo(depth); s.rebuild(); return Err(e); }
-            };
-            s.rebuild();
+            // Run on a worker-style copy. Commands such as open/new replace the
+            // entire session; a document-only rollback could otherwise leave the
+            // caller pointing at another file, or discard its undo/redo history.
+            let mut working = s.fork();
+            let outcome = crate::script::run(&mut working, &req)?;
+            if !outcome.cancelled && working.doc != s.doc {
+                // Match the GUI: script edits apply to this design as one undo
+                // step. Files opened/exported inside the script do not rename it.
+                s.edit(|doc| { *doc = working.doc; Ok(()) })?;
+            }
             let mut out = serde_json::to_value(&outcome).unwrap_or(J::Null);
             out["errors"] = json!(s.built.errors.iter().map(|(id, e)| json!({"feature": id, "error": e})).collect::<Vec<_>>());
             Ok(out)
@@ -1850,7 +1849,10 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let body = id_of(c, "body")?;
             let u = s.doc.units.mm();
             let num = |key: &str, default: f64| -> R<f64> { if c[key].is_null() { Ok(default) } else { c[key].as_f64().ok_or_else(|| format!("\"{key}\" must be a number")) } };
-            let int = |key: &str, default: u64| -> R<u32> { if c[key].is_null() { Ok(default as u32) } else { c[key].as_u64().map(|v| v as u32).ok_or_else(|| format!("\"{key}\" must be a whole number")) } };
+            let int = |key: &str, default: u64| -> R<u32> {
+                let value = if c[key].is_null() { default } else { c[key].as_u64().ok_or_else(|| format!("\"{key}\" must be a whole number"))? };
+                u32::try_from(value).map_err(|_| format!("\"{key}\" exceeds the supported whole-number range"))
+            };
             let direction = if c["direction"].is_null() { None } else { Some(xyz(&c["direction"])?) };
             let distance = || s.doc.value(&text_of(&c["distance"]).map_err(|_| format!("{op} needs a \"distance\""))?, Kind::Length);
             let kind = match op {
@@ -1867,11 +1869,13 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 "mesh_offset" => MeshOpKind::Offset { distance: distance()?, direction },
                 "mesh_sculpt" => {
                     let b = s.built.body(body).ok_or(format!("there is no body {body}"))?;
+                    let brush = match c["brush"].as_str().unwrap_or("pull") { "push" => Brush::Push, "pull" => Brush::Pull, "inflate" => Brush::Inflate, "smooth" => Brush::Smooth, "flatten" => Brush::Flatten, other => return Err(format!("unknown brush {other}; use push, pull, inflate, smooth or flatten")) };
+                    let strength_kind = if matches!(brush, Brush::Smooth | Brush::Flatten) { Kind::Scalar } else { Kind::Length };
                     MeshOpKind::Sculpt {
-                        brush: match c["brush"].as_str().unwrap_or("pull") { "push" => Brush::Push, "pull" => Brush::Pull, "smooth" => Brush::Smooth, "flatten" => Brush::Flatten, "inflate" => Brush::Inflate, other => return Err(format!("unknown brush {other}; use push, pull, smooth, flatten or inflate")) },
+                        brush,
                         at: b.to_local(xyz(&c["at"]).map_err(|_| "mesh_sculpt needs \"at\": [x,y,z] on the body")? * u),
                         radius: s.doc.value(&text_of(&c["radius"]).map_err(|_| "mesh_sculpt needs a \"radius\"")?, Kind::Length)?,
-                        strength: s.doc.value(&text_of(&c["strength"]).map_err(|_| "mesh_sculpt needs a \"strength\" (a length for push, pull and inflate; 0 to 1 for smooth and flatten)")?, Kind::Length)?,
+                        strength: s.doc.value(&text_of(&c["strength"]).map_err(|_| "mesh_sculpt needs a \"strength\" (a length for push, pull and inflate; 0 to 1 for smooth and flatten)")?, strength_kind)?,
                     }
                 }
                 _ => MeshOpKind::ExtrudeRegion { distance: distance()?, direction },
@@ -1898,12 +1902,17 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 v => Plane::from_normal(xyz(&v["origin"]).unwrap_or(DVec3::ZERO) * u, xyz(&v["normal"])?),
             };
             let plane = if c["origin"].is_null() { plane } else { Plane { origin: xyz(&c["origin"])? * u, ..plane } };
+            let integer = |key: &str, default: u32| -> R<u32> {
+                if c[key].is_null() { return Ok(default); }
+                let value = c[key].as_u64().ok_or_else(|| format!("{key} must be a whole number"))?;
+                u32::try_from(value).map_err(|_| format!("{key} exceeds the supported whole-number range"))
+            };
             let relief = crate::doc::Relief {
                 image, plane,
                 width: value("width", "100 mm")?, depth: value("depth", "4 mm")?, base: value("base", "2 mm")?,
-                resolution: c["resolution"].as_u64().unwrap_or(300) as u32,
+                resolution: integer("resolution", 300)?,
                 invert: c["invert"].as_bool().unwrap_or(false),
-                blur: c["blur"].as_u64().unwrap_or(1) as u32,
+                blur: integer("blur", 1)?,
                 gamma: c["gamma"].as_f64().unwrap_or(1.0),
                 op: op_of(c, Op::New)?,
             };

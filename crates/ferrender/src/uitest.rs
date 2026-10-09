@@ -1387,11 +1387,6 @@ fn scripts_run_from_the_menu_as_chips_that_rerun_detach_and_delete() {
     assert!(h.state().session.built.bodies.is_empty(), "a suppressed run builds nothing");
     let _ = h.state_mut().execute(&json!({"op": "edit_feature", "feature": chip2, "suppressed": false}));
     h.run_steps(1);
-    // Hmm: the features made keep their own suppressed flag once cascaded; unsuppress them too.
-    for id in h.state().doc().features.iter().filter(|f| f.made_by == Some(chip2)).map(|f| f.id).collect::<Vec<_>>() {
-        let _ = h.state_mut().execute(&json!({"op": "edit_feature", "feature": id, "suppressed": false}));
-    }
-    h.run_steps(1);
     assert_eq!(h.state().session.built.bodies.len(), 1);
     // Detach keeps the features as ordinary ones.
     h.state_mut().detach_script(chip2);
@@ -1968,4 +1963,127 @@ fn position_labels_accept_signed_zero_and_keep_zero_valued_parameters() {
     assert!(h.state().sketch().unwrap().1.points.contains_key(&p),"image editor must not forward Delete into the selected sketch");
     key(&mut h,Key::Escape);
     assert!(h.state().reference_editor.sketch_id().is_none());
+}
+
+fn simple_script_dialog(source: &str) -> crate::scripts_ui::ScriptDlg {
+    crate::scripts_ui::ScriptDlg { name: "Review boxes".into(), source: source.into(), script_dir: None, fields: Vec::new(), rerun: None, description: String::new() }
+}
+
+#[test]
+fn script_reruns_preserve_downstream_references_and_allocate_new_outputs_safely() {
+    let mut h = state_harness();
+    let one = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{type: \"box\", width: 10, depth: 10, height: 10}); }";
+    h.state_mut().start_script(simple_script_dialog(one));
+    wait_for_script(&mut h);
+    let chip = h.state().doc().features[0].id;
+    let body = h.state().session.built.bodies[0].id;
+    h.state_mut().execute(&json!({"op":"transform","body":body,"translate":[50,0,0]})).unwrap();
+    let transform = h.state().doc().features.last().unwrap().id;
+    let before = h.state().doc().clone();
+    let two = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{type: \"box\", width: 20, depth: 10, height: 10}); primitive(#{type: \"box\", width: 5, depth: 5, height: 5, position: [100,0,0]}); }";
+    let mut dlg = simple_script_dialog(two); dlg.rerun = Some(chip);
+    h.state_mut().start_script(dlg); wait_for_script(&mut h);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    assert!(app.doc().feature(chip).is_some(), "rerun preserves the chip ID");
+    assert!(app.doc().feature(transform).is_some());
+    assert_eq!(app.session.built.bodies.len(), 2);
+    let (lo, hi) = app.session.built.body(body).unwrap().mesh.bbox().unwrap();
+    assert!((lo.x - 50.0).abs() < 1e-6 && (hi.x - 70.0).abs() < 1e-6, "the downstream move still targets the resized original: {lo} {hi}");
+    fr_core::validation::document(app.doc()).unwrap();
+    assert!(h.state_mut().session.undo()); assert_eq!(h.state().doc(), &before);
+    assert!(h.state_mut().session.redo()); assert_eq!(h.state().session.built.bodies.len(), 2);
+}
+
+#[test]
+fn a_script_worker_cannot_overwrite_edits_made_while_it_runs() {
+    let mut h = state_harness();
+    let source = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{type: \"box\", width: 10, depth: 10, height: 10}); }";
+    h.state_mut().start_script(simple_script_dialog(source));
+    // Even if the worker has finished, its result has not been polled/committed.
+    h.state_mut().execute(&json!({"op":"primitive","type":"sphere","diameter":20})).unwrap();
+    let edited = h.state().doc().clone();
+    wait_for_script(&mut h);
+    assert_eq!(h.state().doc(), &edited, "a late script result must not replace the newer sphere");
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+}
+
+#[test]
+fn a_script_can_create_a_component_without_giving_its_chip_a_future_owner() {
+    let mut h = state_harness();
+    let source = "const META = #{name: \"Review boxes\"}; fn run(i) { create_component(#{name: \"Generated\", activate: true}); primitive(#{type: \"box\", width: 10, depth: 10, height: 10}); }";
+    h.state_mut().start_script(simple_script_dialog(source)); wait_for_script(&mut h);
+    let app = h.state();
+    assert_eq!(app.doc().features.len(), 3, "{:?}", app.scripts.last_error);
+    assert_eq!(app.doc().features[0].owner, 0);
+    fr_core::validation::document(app.doc()).unwrap();
+    let chip = app.doc().features[0].id;
+    h.state_mut().execute(&json!({"op":"edit_feature","feature":chip,"suppressed":true})).unwrap();
+    assert!(h.state().session.built.bodies.is_empty());
+    h.state_mut().execute(&json!({"op":"edit_feature","feature":chip,"suppressed":false})).unwrap();
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+}
+
+#[test]
+fn indexed_meshes_refresh_on_document_replacement_move_hide_and_new() {
+    let dir=out_dir().join("indexed-replacement"); std::fs::create_dir_all(&dir).unwrap();
+    let stl=sphere_stl(&dir,300_000);
+    let mesh=fr_core::io::import_mesh(&stl,fr_core::Unit::Mm).unwrap().0;
+    let mut paths=Vec::new();
+    for (name,stretch) in [("sphere",1.0),("wide",2.0)] {
+        let mut m=mesh.clone(); m.map(|p|DVec3::new(p.x*stretch,p.y,p.z));
+        let mut doc=fr_core::Document::new(fr_core::Unit::Mm); doc.add_feature(fr_core::FeatureKind::Import(m));
+        let mut s=fr_core::Session::new(doc); s.cache_policy=fr_core::doc::CachePolicy::Never;
+        let path=dir.join(format!("{name}.ferr")); s.save(&path).unwrap(); paths.push(path);
+    }
+    let mut h=harness(); h.state_mut().opts.grid=false;
+    let camera=|| { let (yaw,pitch)=fr_core::render::Camera::named("top").unwrap(); fr_core::render::Camera{yaw,pitch,scale:3.0,..fr_core::render::Camera::iso()} };
+    let mut rev=0;
+    for (i,path) in paths.iter().enumerate() {
+        h.state_mut().execute(&json!({"op":"open","path":path.to_string_lossy()})).unwrap();
+        if i==0 {rev=h.state().session.rev;} else {assert_eq!(h.state().session.rev,rev,"the replacement deliberately reuses the session revision");}
+        h.state_mut().fit_pending=false; h.state_mut().cam=camera();
+        let img=save(&mut h,&format!("indexed-replacement-{i}.png"));
+        assert_eq!(h.state().scene.big_count(),1);
+        let at=crate::view::to_screen(h.state(),DVec3::new(45.0,5.0,0.0));
+        let pixel=img.get_pixel(at.x as u32,at.y as u32).0;
+        assert_eq!(pixel[0]<220,i==1,"only the second mesh reaches x=45: {pixel:?}");
+    }
+    // Selection changes keep the large CPU packet (and therefore its GPU upload) reusable.
+    let before=h.state().scene.big_data();
+    let centre=crate::view::to_screen(h.state(),DVec3::new(0.0,5.0,0.0));
+    let face=crate::view::pick_face(h.state(),centre);
+    h.state_mut().sel_face=face;
+    let _=save(&mut h,"indexed-selected-face.png");
+    assert!(std::sync::Arc::ptr_eq(&before,&h.state().scene.big_data()));
+    let body=h.state().session.built.bodies[0].id;
+    h.state_mut().execute(&json!({"op":"transform","body":body,"translate":[0,80,0]})).unwrap();
+    h.state_mut().cam=camera(); h.state_mut().fit_pending=false;
+    let moved=save(&mut h,"indexed-moved.png");
+    let sample=crate::view::to_screen(h.state(),DVec3::new(5.0,80.0,0.0));
+    assert!(moved.get_pixel(sample.x as u32,sample.y as u32)[0]<220);
+    h.state_mut().execute(&json!({"op":"set_visible","id":body,"visible":false})).unwrap();
+    let hidden=save(&mut h,"indexed-hidden.png");
+    assert_eq!(h.state().scene.big_count(),0); assert!(hidden.get_pixel(sample.x as u32,sample.y as u32)[0]>220);
+    h.state_mut().execute(&json!({"op":"set_visible","id":body,"visible":true})).unwrap();
+    let shown=save(&mut h,"indexed-shown.png"); assert!(shown.get_pixel(sample.x as u32,sample.y as u32)[0]<220);
+    h.state_mut().execute(&json!({"op":"new","discard_unsaved":true})).unwrap();
+    h.state_mut().fit_pending=false; h.state_mut().cam=camera();
+    let _=save(&mut h,"indexed-new-empty.png"); assert_eq!(h.state().scene.big_count(),0);
+}
+
+#[test]
+fn read_only_cached_geometry_stays_visible_when_edit_commands_are_attempted() {
+    let mut h=state_harness();
+    h.state_mut().execute(&json!({"op":"primitive","type":"box","width":20,"depth":10,"height":5})).unwrap();
+    let bodies=h.state().session.built.bodies.clone();
+    h.state_mut().session.doc=fr_core::Document::new(fr_core::Unit::Mm);
+    h.state_mut().session.read_only=true; h.state_mut().session.from_cache=true;
+    let ctx=h.ctx.clone();
+    for action in [Action::Transform,Action::Mesh(0),Action::NewSketch,Action::Primitive(0),Action::Save,Action::Undo] {
+        h.state_mut().run(&ctx,action); h.run_steps(1);
+        assert_eq!(h.state().dialog,Dialog::None);
+        assert_eq!(h.state().shown().bodies.len(),bodies.len());
+        assert_eq!(h.state().shown().bodies[0].mesh.bbox(),bodies[0].mesh.bbox());
+    }
 }

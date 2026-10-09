@@ -177,7 +177,7 @@ pub fn decimate(m: &Mesh, target: usize, preserve_boundary: bool) -> R<Mesh> {
     let mut alive = vec![true; tris.len()];
     let mut quadrics = vec![Quadric::default(); n];
     let mut faces_of: Vec<Vec<u32>> = vec![Vec::new(); n];
-    let mut edge_uses: FxMap<(u32, u32), u8> = FxMap::default();
+    let mut edge_uses: FxMap<(u32, u32), u32> = FxMap::default();
     for (ti, t) in tris.iter().enumerate() {
         let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
         let nrm = (b - a).cross(c - a);
@@ -233,8 +233,27 @@ pub fn decimate(m: &Mesh, target: usize, preserve_boundary: bool) -> R<Mesh> {
         if dead[a] || dead[b] || version[a] != va || version[b] != vb { continue; }
         let mut q = quadrics[a]; q.add(&quadrics[b]);
         let (_, p) = best(&q, pos[a], pos[b]);
+        // Judge the position that will actually be stored. A valid f64 sliver
+        // can become a zero-area triangle when the finished mesh snaps to f32.
+        let p = p.as_vec3().as_dvec3();
         // Refuse a collapse that turns any surviving face over or squashes it.
-        let shared: Vec<u32> = faces_of[a].iter().filter(|f| faces_of[b].contains(f)).copied().collect();
+        let shared: Vec<u32> = faces_of[a].iter().filter(|f| alive[**f as usize] && faces_of[b].contains(f)).copied().collect();
+        // The edge link must equal the common vertex link. Merely checking face
+        // normals allows collapses that glue unrelated sheets or create bowties.
+        let ring = |v: usize| {
+            let mut uses: FxMap<u32, usize> = FxMap::default();
+            for &f in &faces_of[v] {
+                if !alive[f as usize] { continue; }
+                for o in tris[f as usize] { if o as usize != v { *uses.entry(o).or_default() += 1; } }
+            }
+            uses
+        };
+        let (ra, rb) = (ring(a), ring(b));
+        let mut common: Vec<u32> = ra.keys().filter(|v| rb.contains_key(v)).copied().collect();
+        let mut opposite: Vec<u32> = shared.iter().flat_map(|f| tris[*f as usize]).filter(|v| *v as usize != a && *v as usize != b).collect();
+        common.sort_unstable(); opposite.sort_unstable(); opposite.dedup();
+        if shared.is_empty() || shared.len() > 2 || common != opposite { continue; }
+        if shared.len() == 2 && ra.values().any(|n| *n == 1) && rb.values().any(|n| *n == 1) { continue; }
         let mut ok = true;
         for &fi in faces_of[a].iter().chain(faces_of[b].iter()) {
             if !alive[fi as usize] || shared.contains(&fi) { continue; }
@@ -281,7 +300,15 @@ pub fn decimate(m: &Mesh, target: usize, preserve_boundary: bool) -> R<Mesh> {
 pub fn decimate_by(m: &Mesh, target: usize, method: DecimateMethod, preserve_boundary: bool) -> R<Mesh> {
     match method {
         DecimateMethod::Quadric => decimate(m, target, preserve_boundary),
-        DecimateMethod::Cluster => finish(welded(m).clustered_to(target)),
+        DecimateMethod::Cluster => {
+            let m = welded(m);
+            if preserve_boundary {
+                let adj = m.adjacency();
+                let pins: Vec<bool> = (0..m.vertex_count() as u32).map(|v| adj.on_boundary(v)).collect();
+                let cell = (2.0 * m.area() / target.max(1) as f64).sqrt();
+                finish(m.clustered_with_pins(cell, &pins))
+            } else { finish(m.clustered_to(target)) }
+        },
     }
 }
 
@@ -294,6 +321,7 @@ pub fn smooth(m: &Mesh, iterations: u32, strength: f64, mask: Option<&[bool]>) -
     let mut out = welded(m);
     let adj = out.adjacency();
     let lambda = strength.clamp(0.0, 1.0);
+    if lambda == 0.0 || iterations == 0 { return finish(out); }
     let mu = -(lambda + 0.03).min(1.0);
     let moving: Vec<bool> = match mask {
         Some(mask) => (0..out.vertex_count() as u32).map(|v| adj.tris_of(v).iter().any(|t| mask.get(*t as usize).copied().unwrap_or(false))).collect(),
@@ -358,7 +386,7 @@ pub fn subdivide(m: &Mesh, levels: u32, scheme: Scheme) -> R<Mesh> {
                 let ring = &rings[v];
                 if ring.is_empty() { continue; }
                 if boundary_vertex[v] {
-                    let ends: Vec<DVec3> = ring.iter().filter(|o| boundary_vertex[**o as usize]).map(|o| out.positions()[*o as usize]).collect();
+                    let ends: Vec<DVec3> = ring.iter().filter(|o| edges[&(v.min(**o as usize) as u32, v.max(**o as usize) as u32)].1.len() == 1).map(|o| out.positions()[*o as usize]).collect();
                     if ends.len() == 2 { pos[v] = p * 0.75 + (ends[0] + ends[1]) * 0.125; }
                 } else {
                     let n = ring.len() as f64;
@@ -385,15 +413,21 @@ pub fn subdivide(m: &Mesh, levels: u32, scheme: Scheme) -> R<Mesh> {
 // ----- cutting, mirroring, offsetting -----
 
 /// Boundary loops that lie in a plane, as 2D rings in the plane's coordinates, triangulated.
-fn cap_loops(m: &Mesh, plane: &Plane, flip: bool) -> Vec<[DVec3; 3]> {
+fn cap_loops(m: &Mesh, plane: &Plane, flip: bool) -> Vec<[u32; 3]> {
     let n = plane.normal();
-    let on = |p: DVec3| (p - plane.origin).dot(n).abs() < 1e-6;
-    let loops: Vec<Vec<DVec3>> = boundary_loops(m).into_iter().map(|l| l.iter().map(|v| m.positions()[*v as usize]).collect::<Vec<_>>()).filter(|l| l.iter().all(|p| on(*p))).collect();
-    let mut loops = loops;
-    let mut rings: Vec<Vec<DVec2>> = loops.iter().map(|l| l.iter().map(|p| plane.to_local(*p)).collect()).collect();
+    let on = |v: u32| (m.positions()[v as usize] - plane.origin).dot(n).abs() < 1e-6;
+    let mut loops: Vec<Vec<u32>> = boundary_loops(m).into_iter().filter(|l| l.iter().all(|v| on(*v))).map(|l| {
+        // Remove straight rim points before earcut; stitch reconnects them.
+        let n = l.len();
+        (0..n).filter(|i| {
+            let p = |j: usize| m.positions()[l[j] as usize];
+            let a = (p(*i) - p((*i + n - 1) % n)).normalize_or_zero();
+            let b = (p((*i + 1) % n) - p(*i)).normalize_or_zero();
+            a.cross(b).length() > 1e-10
+        }).map(|i| l[i]).collect::<Vec<_>>()
+    }).filter(|l| l.len() >= 3).collect();
+    let mut rings: Vec<Vec<DVec2>> = loops.iter().map(|l| l.iter().map(|v| plane.to_local(m.positions()[*v as usize])).collect()).collect();
     let area = |r: &[DVec2]| crate::profile::signed_area(r);
-    // Loops run one way round for one side of the plane and the other way for the other; the
-    // triangles' final facing is settled by the repair that follows, so only the nesting matters here.
     if rings.iter().map(|r| area(r)).sum::<f64>() < 0.0 {
         for r in &mut rings { r.reverse(); }
         for l in &mut loops { l.reverse(); }
@@ -403,8 +437,9 @@ fn cap_loops(m: &Mesh, plane: &Plane, flip: bool) -> Vec<[DVec3; 3]> {
     for &o in &outers {
         let holes: Vec<usize> = (0..rings.len()).filter(|i| area(&rings[*i]) < 0.0 && crate::profile::inside(&rings[o], rings[*i][0])).collect();
         let mut flat: Vec<f64> = rings[o].iter().flat_map(|p| [p.x, p.y]).collect();
-        // The cap's corners are the rim's own points, bit for bit, so they weld to the walls.
-        let mut points: Vec<DVec3> = loops[o].clone();
+        // Cap triangles reuse the rim's actual vertex indices. Coordinates
+        // are not rounded or welded again while establishing connectivity.
+        let mut points = loops[o].clone();
         let mut starts = Vec::new();
         for h in &holes {
             starts.push(flat.len() / 2);
@@ -424,42 +459,64 @@ fn cap_loops(m: &Mesh, plane: &Plane, flip: bool) -> Vec<[DVec3; 3]> {
 /// Keeps one side of a plane (or both, as two meshes), splitting the
 /// triangles it crosses and, with `cap`, closing the cut with flat faces.
 pub fn cut(m: &Mesh, plane: Plane, keep: Keep, cap: bool) -> R<Vec<Mesh>> {
-    let m = welded(m);
+    let mut m = welded(m);
+    let was_closed = cap && m.inspect().watertight;
     let n = plane.normal();
+    // A plane through an imported grid vertex may miss its stored f32 point
+    // by less than one rounding unit. Align such points before clipping so
+    // both halves reuse a real vertex instead of producing unrepresentable
+    // slivers. The tolerance follows coordinate precision, not wall thickness.
+    m.map(|p| {
+        let distance = (p - plane.origin).dot(n);
+        let tolerance = (p.abs().dot(n.abs()) * f32::EPSILON as f64 * 0.5).max(1e-9);
+        if distance.abs() <= tolerance { p - n * distance } else { p }
+    });
     let side = |positive: bool| -> R<Mesh> {
         let sign = if positive { 1.0 } else { -1.0 };
         let dist = |p: DVec3| (p - plane.origin).dot(n) * sign;
-        let mut tris: Vec<[DVec3; 3]> = Vec::with_capacity(m.len());
-        for t in m.tris() {
-            let d = t.map(dist);
-            if d.iter().all(|x| *x >= -1e-9) { tris.push(t); continue; }
-            if d.iter().all(|x| *x <= 1e-9) { continue; }
-            // Clip the triangle against the half-space.
-            let mut poly: Vec<DVec3> = Vec::with_capacity(4);
+        let mut positions = m.positions().to_vec();
+        let mut indices = Vec::with_capacity(m.len());
+        let mut intersections: FxMap<(u32, u32), u32> = FxMap::default();
+        for (t, ids) in m.tris().zip(m.indices()) {
+            let d = t.map(|p| { let d = dist(p); if d.abs() < 1e-9 { 0.0 } else { d } });
+            if d.iter().all(|x| *x >= 0.0) { indices.push(*ids); continue; }
+            if d.iter().all(|x| *x <= 0.0) { continue; }
+            let mut poly: Vec<u32> = Vec::with_capacity(4);
             for k in 0..3 {
                 let (a, b) = (t[k], t[(k + 1) % 3]);
                 let (da, db) = (d[k], d[(k + 1) % 3]);
-                if da >= 0.0 { poly.push(a); }
-                if (da > 0.0) != (db > 0.0) && (da - db).abs() > 1e-15 {
-                    let s = da / (da - db);
-                    let p = a + (b - a) * s;
-                    poly.push(p - n * (p - plane.origin).dot(n));
+                if da >= 0.0 { poly.push(ids[k]); }
+                if da * db < 0.0 {
+                    let (ia, ib) = (ids[k], ids[(k + 1) % 3]);
+                    let v = *intersections.entry((ia.min(ib), ia.max(ib))).or_insert_with(|| {
+                        let p = a + (b - a) * (da / (da - db));
+                        positions.push(p - n * (p - plane.origin).dot(n));
+                        positions.len() as u32 - 1
+                    });
+                    poly.push(v);
                 }
             }
-            for k in 1..poly.len().saturating_sub(1) {
-                tris.push([poly[0], poly[k], poly[k + 1]]);
-            }
+            for k in 1..poly.len().saturating_sub(1) { indices.push([poly[0], poly[k], poly[k + 1]]); }
         }
-        let mut out = Mesh::welded_from_tris(&tris);
-        if cap {
-            // The cap faces away from the kept side: its outward normal is -n for the positive side.
-            let caps = cap_loops(&out, &plane, !positive);
-            let mut all: Vec<[DVec3; 3]> = out.tris().collect();
-            all.extend(caps);
-            out = Mesh::welded_from_tris(&all);
-        }
+        // Keep intersection coordinates in f64 until the caps share their
+        // indices. Premature f32 welding moves translated oblique rims off
+        // the cutting plane and can make an entire cap disappear.
+        let mut out = Mesh::from_indexed(positions, indices, true)?;
         out.repair();
-        finish(out)
+        if cap {
+            let caps = cap_loops(&out, &plane, positive);
+            let mut indices = out.indices().to_vec();
+            indices.extend(caps);
+            out = Mesh::from_indexed(out.positions().to_vec(), indices, true)?;
+            out.stitch();
+        }
+        let mut out = finish(out)?;
+        out.weld_rounded_positions();
+        let report = out.repair();
+        if was_closed && !report.watertight {
+            return Err(format!("the capped mesh cut could not make a closed, manifold result ({} open edges, {} non-manifold edges); try moving the cutting plane or reducing the mesh detail", report.open_edges, report.non_manifold_edges));
+        }
+        Ok(out)
     };
     Ok(match keep {
         Keep::Negative => vec![side(false)?],
@@ -475,6 +532,14 @@ pub fn mirror(m: &Mesh, plane: Plane, weld: bool) -> R<Mesh> {
     let mut copy = m.clone();
     copy.map(|p| p - n * 2.0 * (p - plane.origin).dot(n));
     copy.flip();
+    if !weld {
+        let mut positions = m.positions().to_vec();
+        let base = positions.len() as u32;
+        positions.extend_from_slice(copy.positions());
+        let mut indices = m.indices().to_vec();
+        indices.extend(copy.indices().iter().map(|t| t.map(|i| i + base)));
+        return finish(Mesh::from_indexed(positions, indices, true)?);
+    }
     let mut all: Vec<[DVec3; 3]> = m.tris().collect();
     all.extend(copy.tris());
     if weld {
@@ -575,6 +640,7 @@ pub fn region(m: &Mesh, spec: &RegionSpec) -> Vec<bool> {
 /// Moves a region of triangles by `distance` along their mean normal (or
 /// `direction`), with walls along the region's boundary.
 pub fn extrude_region(m: &Mesh, mask: &[bool], distance: f64, direction: Option<DVec3>) -> R<Mesh> {
+    if mask.len() != m.len() { return Err("the region mask must match the mesh triangle count".into()); }
     let m = welded(m);
     let count = mask.iter().filter(|x| **x).count();
     if count == 0 { return Err("the region holds no triangles".into()); }
@@ -607,7 +673,7 @@ pub fn extrude_region(m: &Mesh, mask: &[bool], distance: f64, direction: Option<
         if in_region[v] && !outside[v] { positions[v] += shift; }
     }
     // Walls along region boundary edges: edges with exactly one region triangle.
-    let mut edge_count: FxMap<(u32, u32), (u8, u8)> = FxMap::default();
+    let mut edge_count: FxMap<(u32, u32), (u32, u32)> = FxMap::default();
     for (i, t) in m.indices().iter().enumerate() {
         for k in 0..3 {
             let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -679,25 +745,30 @@ pub fn from_image(pixels: &crate::reference::Pixels, p: &ReliefParams) -> R<Mesh
             height[r * (cols + 1) + c] = v.powf(p.gamma);
         }
     }
+    // A box blur is separable. Prefix sums keep even the maximum 1200-cell,
+    // radius-64 relief linear in pixel count rather than tens of billions of
+    // neighbour visits, while retaining the same clipped-edge averages.
     for _ in 0..3 {
         if p.blur == 0 { break; }
-        let b = p.blur as isize;
-        let mut next = height.clone();
-        for r in 0..=rows as isize {
-            for c in 0..=cols as isize {
-                let (mut sum, mut n) = (0.0, 0.0);
-                for dr in -b..=b {
-                    for dc in -b..=b {
-                        let (rr, cc) = (r + dr, c + dc);
-                        if rr < 0 || cc < 0 || rr > rows as isize || cc > cols as isize { continue; }
-                        sum += height[rr as usize * (cols + 1) + cc as usize];
-                        n += 1.0;
-                    }
-                }
-                next[r as usize * (cols + 1) + c as usize] = sum / n;
+        let radius = p.blur as usize;
+        let mut horizontal = vec![0.0; height.len()];
+        let mut prefix = vec![0.0; (cols + 2).max(rows + 2)];
+        for r in 0..=rows {
+            prefix[0] = 0.0;
+            for c in 0..=cols { prefix[c + 1] = prefix[c] + height[r * (cols + 1) + c]; }
+            for c in 0..=cols {
+                let (lo, hi) = (c.saturating_sub(radius), c.saturating_add(radius).min(cols) + 1);
+                horizontal[r * (cols + 1) + c] = (prefix[hi] - prefix[lo]) / (hi - lo) as f64;
             }
         }
-        height = next;
+        for c in 0..=cols {
+            prefix[0] = 0.0;
+            for r in 0..=rows { prefix[r + 1] = prefix[r] + horizontal[r * (cols + 1) + c]; }
+            for r in 0..=rows {
+                let (lo, hi) = (r.saturating_sub(radius), r.saturating_add(radius).min(rows) + 1);
+                height[r * (cols + 1) + c] = (prefix[hi] - prefix[lo]) / (hi - lo) as f64;
+            }
+        }
     }
     let cell = p.width / cols as f64;
     let at = |r: usize, c: usize| DVec3::new(c as f64 * cell, r as f64 * cell, height[r * (cols + 1) + c] * p.depth);
@@ -753,8 +824,38 @@ pub fn from_image(pixels: &crate::reference::Pixels, p: &ReliefParams) -> R<Mesh
 /// scan of millions of triangles costs about the size of the tool.
 pub fn boolean(a: &Mesh, b: &Mesh, op: crate::csg::Bool) -> R<Mesh> {
     use crate::csg::Bool;
-    let (a, b) = (welded(a), welded(b));
+    let (mut a, mut b) = (welded(a), welded(b));
     if a.is_empty() || b.is_empty() { return Err("a boolean needs two meshes with triangles".into()); }
+    if !a.repair().watertight || !b.repair().watertight {
+        return Err("mesh booleans require closed, manifold inputs; use Mesh Repair to close holes and remove non-manifold edges before combining".into());
+    }
+    let closed_result = |m: &Mesh, report: &crate::mesh::Report| -> R<()> {
+        if report.watertight || m.is_empty() { Ok(()) }
+        else { Err(format!("the mesh boolean could not make a closed, manifold result ({} open edges, {} non-manifold edges); try repairing or decimating the meshes before combining", report.open_edges, report.non_manifold_edges)) }
+    };
+    // Small meshes and dense tessellations of a few flat faces do not need
+    // culling. The complete BSP retains the coplanar clipping context; cutting
+    // only nearby patches can otherwise leave holes in partially shared faces.
+    let few_planes = |m: &Mesh| {
+        let mut planes: Vec<(DVec3, f64)> = Vec::new();
+        for t in m.tris() {
+            let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+            if n == DVec3::ZERO { continue; }
+            let w = n.dot(t[0]);
+            if planes.iter().any(|(other, d)| *other == n && *d == w) { continue; }
+            planes.push((n, w));
+            if planes.len() > 32 { return false; }
+        }
+        true
+    };
+    if a.len() + b.len() <= 2_048 || (a.len() + b.len() <= crate::csg::MAX_TRIS && few_planes(&a) && few_planes(&b)) {
+        let mut out = crate::csg::boolean(&a, &b, op)?;
+        if out.is_empty() { return Ok(out); }
+        out.weld_exact();
+        let report = out.repair();
+        closed_result(&out, &report)?;
+        return finish(out);
+    }
     let (bvh_a, bvh_b) = (a.bvh(), b.bvh());
     let pad = DVec3::splat(1e-6);
     // Near triangles: those whose bounds overlap some triangle bound of the other mesh.
@@ -771,26 +872,40 @@ pub fn boolean(a: &Mesh, b: &Mesh, op: crate::csg::Bool) -> R<Mesh> {
     if a_near.len() + b_near.len() > crate::csg::MAX_TRIS {
         return Err(format!("the meshes meet across {} triangles; booleans handle up to {} near the other surface, so decimate first", a_near.len() + b_near.len(), crate::csg::MAX_TRIS));
     }
-    // Pieces of each near set that lie wholly inside or outside the other mesh.
-    let classify = |pieces: Vec<[DVec3; 3]>, other: &Mesh, other_bvh: &crate::mesh::Bvh| -> (Vec<[DVec3; 3]>, Vec<[DVec3; 3]>) {
-        let (mut inside, mut outside) = (Vec::new(), Vec::new());
-        for t in pieces {
+    // Coplanar surfaces need explicit ownership. Counting them all as outside
+    // makes A-A retain A and A intersect A disappear; retaining both copies
+    // creates internal sheets when adjacent meshes are joined.
+    #[derive(Clone, Copy)]
+    enum Side { Inside, Outside, Same, Opposite }
+    let classify = |pieces: Vec<[DVec3; 3]>, other: &Mesh, other_bvh: &crate::mesh::Bvh, from_a: bool| -> Vec<[DVec3; 3]> {
+        pieces.into_iter().filter(|t| {
             let c = (t[0] + t[1] + t[2]) / 3.0;
-            // A piece hugging the other surface (a sliver along the seam) is judged by which side of the
-            // nearest triangle it lies on; anything farther off by ray parity. Coplanar pieces count as outside.
-            let is_inside = match other_bvh.nearest(other, c) {
-                Some((d, ti)) if d < 1e-4 => {
-                    let tri = other.tri(ti);
-                    (c - tri[0]).dot(other.normal(ti)) < -1e-9
+            let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+            let side = match other_bvh.nearest(other, c) {
+                Some((d, ti)) if d < 1e-6 => {
+                    let alignment = normal.dot(other.normal(ti));
+                    if alignment > 1.0 - 1e-7 { Side::Same }
+                    else if alignment < -1.0 + 1e-7 { Side::Opposite }
+                    else if (c - other.tri(ti)[0]).dot(other.normal(ti)) < -1e-9 { Side::Inside }
+                    else { Side::Outside }
                 }
-                _ => other_bvh.contains(other, c),
+                _ if other_bvh.contains(other, c) => Side::Inside,
+                _ => Side::Outside,
             };
-            if is_inside { inside.push(t) } else { outside.push(t) }
-        }
-        (inside, outside)
+            match (op, from_a, side) {
+                (Bool::Union, _, Side::Outside) | (Bool::Union, true, Side::Same) => true,
+                (Bool::Intersect, _, Side::Inside) | (Bool::Intersect, true, Side::Same) => true,
+                (Bool::Subtract, true, Side::Outside | Side::Opposite) | (Bool::Subtract, false, Side::Inside) => true,
+                _ => false,
+            }
+        }).collect()
     };
-    let (a_in, a_out) = if b_near.is_empty() { (Vec::new(), a_near.tris().collect()) } else { classify(crate::csg::fragments(&b_near, &a_near), &b, &bvh_b) };
-    let (b_in, b_out) = if a_near.is_empty() { (Vec::new(), b_near.tris().collect()) } else { classify(crate::csg::fragments(&a_near, &b_near), &a, &bvh_a) };
+    // Even with no nearby cutter planes, the source can be wholly contained
+    // by the other body, so it must still be classified against the full mesh.
+    let a_pieces = if b_near.is_empty() { a_near.tris().collect() } else { crate::csg::fragments(&b_near, &a_near)? };
+    let b_pieces = if a_near.is_empty() { b_near.tris().collect() } else { crate::csg::fragments(&a_near, &b_near)? };
+    let a_kept = classify(a_pieces, &b, &bvh_b, true);
+    let b_kept = classify(b_pieces, &a, &bvh_a, false);
     let flip = |mut tris: Vec<[DVec3; 3]>| { for t in &mut tris { t.swap(1, 2); } tris };
     // Far triangles never cross the other surface, so each connected patch of them is wholly inside
     // or outside it: one parity test per patch decides, however many triangles it has.
@@ -820,18 +935,19 @@ pub fn boolean(a: &Mesh, b: &Mesh, op: crate::csg::Bool) -> R<Mesh> {
     let (b_far_in, b_far_out) = far_split(&b, &near_b, &a, &bvh_a);
     let mut all: Vec<[DVec3; 3]> = Vec::new();
     match op {
-        Bool::Union => { all.extend(a_far_out); all.extend(b_far_out); all.extend(a_out); all.extend(b_out); }
-        Bool::Subtract => { all.extend(a_far_out); all.extend(a_out); all.extend(flip(b_far_in)); all.extend(flip(b_in)); }
-        Bool::Intersect => { all.extend(a_far_in); all.extend(b_far_in); all.extend(a_in); all.extend(b_in); }
+        Bool::Union => { all.extend(a_far_out); all.extend(b_far_out); all.extend(a_kept); all.extend(b_kept); }
+        Bool::Subtract => { all.extend(a_far_out); all.extend(a_kept); all.extend(flip(b_far_in)); all.extend(flip(b_kept)); }
+        Bool::Intersect => { all.extend(a_far_in); all.extend(b_far_in); all.extend(a_kept); all.extend(b_kept); }
     }
     if all.is_empty() { return Ok(Mesh::default()); }
     let mut out = Mesh::from_tris(all);
     out.stitch();
     out.weld_exact();
-    out.repair();
+    let mut report = out.repair();
     // Splitting along the seam can drop a sliver whose corners all land on the cut; those leave
     // three-edge holes, closed here before the result is judged.
-    if fill_holes(&mut out, 8) > 0 { out.repair(); }
+    if fill_holes(&mut out, 8) > 0 { report = out.repair(); }
+    closed_result(&out, &report)?;
     finish(out)
 }
 
@@ -918,7 +1034,7 @@ pub fn measure(m: &Mesh, at: Option<DVec3>) -> Measure {
         let t = m.nearest_tri(p)?;
         let n = m.normal(t);
         let tri = m.tri(t);
-        let on = (tri[0] + tri[1] + tri[2]) / 3.0;
+        let on = crate::mesh::closest_tri(p, &tri);
         // Step inside and look for the far wall.
         m.ray(on - n * 1e-6, -n).map(|(d, _)| d + 1e-6)
     });

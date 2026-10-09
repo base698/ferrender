@@ -119,7 +119,7 @@ fn call(b: &mut Backend, name: &str, args: &Value) -> Result<Value, String> {
                 let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "rhai")).collect();
                 paths.sort();
                 for p in paths {
-                    let meta = std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| fr_core::script::meta(&s));
+                    let meta = fr_core::script::read_source(&p).and_then(|s| fr_core::script::meta(&s));
                     out.push(json!({"path": p.display().to_string(), "sample": false, "meta": meta.as_ref().ok(), "error": meta.err()}));
                 }
             }

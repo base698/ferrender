@@ -29,6 +29,13 @@ def main():
     for expected in [f'Ferrender {version}', f'Commit: {commit}', 'Source: Clean checkout', 'Build: release', f'Platform: {target}']:
         if expected not in info:
             raise SystemExit(f'Build metadata mismatch: expected {expected!r}; got {info!r}')
+    # CI and the macOS bundler prepare this exact native dependency before
+    # compiling. Recheck its archive when packaging instead of silently using
+    # an arbitrary pre-existing target/occt-* directory for release notices.
+    occt_root = Path(subprocess.check_output(['python3', str(ROOT/'scripts/prepare-occt.py'), '--target', target], text=True).strip())
+    selected_occt = os.environ.get('OCCT_ROOT')
+    if selected_occt and Path(selected_occt).resolve() != occt_root.resolve():
+        raise SystemExit('OCCT_ROOT differs from the verified release dependency; rebuild with scripts/prepare-occt.py')
     name = f'Ferrender-{version}-{args.platform}'
     stage = ROOT/'dist'/name
     if stage.exists():
@@ -54,10 +61,10 @@ def main():
         shutil.copy2(ROOT/'crates/fr-core/assets/fonts'/filename, licenses/('NotoSans-'+filename))
     # Cadrum's pinned OCCT prebuilt archive ships the LGPL and additional exception.
     for filename in ['LICENSE_LGPL_21.txt', 'OCCT_LGPL_EXCEPTION.txt']:
-        candidates = sorted((ROOT/'target').glob('occt-*/share/doc/opencascade/'+filename))
-        if not candidates:
+        notice = occt_root/'share/doc/opencascade'/filename
+        if not notice.is_file():
             raise SystemExit(f'Missing bundled OpenCascade notice: {filename}')
-        shutil.copy2(candidates[0], licenses/filename)
+        shutil.copy2(notice, licenses/filename)
     registry = Path(os.environ.get('CARGO_HOME', str(Path.home()/'.cargo')))/'registry/src'
     cadrum = sorted(registry.glob('*/cadrum-0.8.20/LICENSE'))
     if not cadrum:

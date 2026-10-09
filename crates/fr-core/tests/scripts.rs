@@ -275,3 +275,144 @@ fn exporting_the_timeline_makes_a_script_that_rebuilds_it() {
     let (lo, hi) = again.built.bodies[0].mesh.bbox().unwrap();
     assert!((hi.z - lo.z - 20.0).abs() < 1e-6, "rebuilt with w = 60: height {}", hi.z - lo.z);
 }
+
+#[test]
+fn invalid_inputs_preserve_the_session_and_undo() {
+    let mut s = Session::default();
+    run_cmd(&mut s, json!({"op": "primitive", "type": "box", "width": 5, "depth": 6, "height": 7}));
+    s.save(&dir("input-preservation").join("original.ferr")).unwrap();
+    let before = s.doc.clone();
+    let path = s.path.clone();
+    let depth = s.undo_depth();
+    let mut req = Request::new(SPACER);
+    req.inputs = json!({"height": "not a valid length"});
+    assert!(script::run(&mut s, &req).is_err());
+    assert_eq!(s.doc, before);
+    assert_eq!(s.path, path);
+    assert_eq!(s.undo_depth(), depth);
+    assert_eq!(s.built.bodies.len(), 1);
+}
+
+#[test]
+fn existing_modules_cannot_bypass_the_sandbox_or_metadata_reader() {
+    let outside = dir("module-outside");
+    std::fs::write(outside.join("secret.rhai"), "export const secret = 42;").unwrap();
+    let source = format!("import {:?} as secret; const META = #{{name: \"module\"}}; fn run(i) {{ secret::secret }}", outside.join("secret").display().to_string());
+    let err = script::meta(&source).unwrap_err();
+    assert!(err.contains("import"), "{err}");
+    assert!(script::run(&mut Session::default(), &Request::new(source)).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_leaf_symlinks_cannot_escape_file_sandbox() {
+    use std::os::unix::fs::symlink;
+    let inside = dir("leaf-inside");
+    let outside = dir("leaf-outside");
+    let target = outside.join("private.txt");
+    std::fs::write(&target, "unchanged").unwrap();
+    let link = inside.join("note.txt");
+    symlink(&target, &link).unwrap();
+    for expr in [format!("read_text({:?})", link.display().to_string()), format!("write_text({:?}, \"changed\")", link.display().to_string())] {
+        let mut req = Request::new(format!("const META = #{{name: \"symlink\"}}; fn run(i) {{ {expr} }}"));
+        req.sandbox.allowed = vec![inside.clone()];
+        let err = script::run(&mut Session::default(), &req).unwrap_err();
+        assert!(err.contains("outside the allowed folders"), "{err}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "unchanged");
+    }
+    let dangling = inside.join("dangling.txt");
+    symlink(outside.join("new.txt"), &dangling).unwrap();
+    let mut req = Request::new(format!("const META = #{{name: \"symlink\"}}; fn run(i) {{ write_text({:?}, \"bad\") }}", dangling.display().to_string()));
+    req.sandbox.allowed = vec![inside];
+    assert!(script::run(&mut Session::default(), &req).is_err());
+    assert!(!outside.join("new.txt").exists());
+}
+
+#[test]
+fn implicit_save_is_checked_against_the_sandbox() {
+    let outside = dir("save-outside");
+    let path = outside.join("original.ferr");
+    let mut s = Session::default();
+    s.save(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let req = Request::new("const META = #{name: \"save\"}; fn run(i) { save(); }");
+    let err = script::run(&mut s, &req).unwrap_err();
+    assert!(err.contains("outside the allowed folders"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn script_source_is_bounded_before_loading() {
+    let dir = dir("bounded-source");
+    let path = dir.join("large.rhai");
+    std::fs::File::create(&path).unwrap().set_len(script::MAX_SOURCE_BYTES as u64 + 1).unwrap();
+    assert!(script::read_source(&path).unwrap_err().contains("limit"));
+    assert!(script::read_source(&dir).unwrap_err().contains("regular file"));
+}
+
+#[test]
+fn script_print_is_captured_and_event_flooding_is_bounded() {
+    let req = Request::new("const META = #{name: \"print\"}; fn run(i) { print(\"captured\"); }");
+    let out = script::run(&mut Session::default(), &req).unwrap();
+    assert_eq!(out.log, ["captured"]);
+    let mut req = Request::new("const META = #{name: \"events\"}; fn run(i) { for n in 0..20000 { progress(0.0, \"still working\"); } }");
+    let (tx, rx) = std::sync::mpsc::channel();
+    req.events = Some(tx);
+    script::run(&mut Session::default(), &req).unwrap();
+    assert_eq!(rx.try_iter().count(), 10_000);
+}
+
+#[test]
+fn dynamic_command_dispatch_does_not_recurse_into_the_entry_point() {
+    let req = Request::new("const META = #{name: \"dynamic\"}; fn run(i) { command(#{op: \"primitive\", type: \"box\", width: 2, depth: 3, height: 4}); scene().bodies.len() }");
+    let out = script::run(&mut Session::default(), &req).unwrap();
+    assert_eq!(out.result, json!(1));
+    for op in ["run_script", "script_meta", "batch"] {
+        let req = Request::new(format!("const META = #{{name: \"denied\"}}; fn run(i) {{ command(#{{op: \"{op}\"}}) }}"));
+        let err = script::run(&mut Session::default(), &req).unwrap_err();
+        assert!(err.contains("cannot be called from a script") || err.contains("not as a batch"), "{err}");
+    }
+}
+
+#[test]
+fn api_script_transactions_preserve_file_identity_and_history() {
+    let dir = dir("api-transaction");
+    let original = dir.join("original.ferr");
+    let other = dir.join("other.ferr");
+    let mut other_session = Session::default();
+    other_session.save(&other).unwrap();
+    let mut s = Session::default();
+    run_cmd(&mut s, json!({"op": "primitive", "type": "box", "width": 2, "depth": 3, "height": 4}));
+    s.save(&original).unwrap();
+    run_cmd(&mut s, json!({"op": "primitive", "type": "sphere", "diameter": 2}));
+    s.undo();
+    assert!(s.can_redo());
+    let before = s.doc.clone();
+    let depth = s.undo_depth();
+    let fail = format!("const META = #{{name: \"rollback\"}}; fn run(i) {{ open(#{{path: {:?}}}); fail(\"stop\"); }}", other.display().to_string());
+    assert!(execute(&mut s, &json!({"op": "run_script", "source": fail}), None).is_err());
+    assert_eq!(s.doc, before);
+    assert_eq!(s.path.as_ref(), Some(&original));
+    assert_eq!(s.undo_depth(), depth);
+    assert!(s.can_redo(), "a failed run preserves redo too");
+    let success = "const META = #{name: \"replace\"}; fn run(i) { new_design(); primitive(#{type: \"sphere\", diameter: 5}); }";
+    run_cmd(&mut s, json!({"op": "run_script", "source": success}));
+    assert_eq!(s.path.as_ref(), Some(&original));
+    assert_eq!(s.undo_depth(), depth + 1);
+    assert!(s.undo());
+    assert_eq!(s.doc, before);
+}
+
+#[test]
+fn scripts_cannot_change_a_read_only_session() {
+    let mut s = Session::default();
+    run_cmd(&mut s, json!({"op": "primitive", "type": "box", "width": 2, "depth": 3, "height": 4}));
+    s.read_only = true;
+    let before = s.doc.clone();
+    let req = Request::new("const META = #{name: \"read\"}; fn run(i) { scene() }");
+    assert!(script::run(&mut s, &req).unwrap_err().contains("read-only"));
+    assert!(execute(&mut s, &json!({"op": "run_script", "source": req.source}), None).unwrap_err().contains("read-only"));
+    assert_eq!(s.doc, before);
+    assert!(s.read_only);
+    assert_eq!(s.built.bodies.len(), 1);
+}

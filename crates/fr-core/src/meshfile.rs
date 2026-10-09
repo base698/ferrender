@@ -15,6 +15,9 @@ pub const MAX_MESH_FILE_BYTES: u64 = 16_000_000 * 50 + 84;
 /// What one mesh blob may declare in a container: 16 million triangles with every vertex unshared.
 pub const MAX_BLOB_BYTES: usize = 32 + MAX_TRIANGLES * (12 + 36);
 
+const MAX_3MF_INSTANCES: usize = 1_000_000;
+const MAX_3MF_ENTRIES: usize = 4096;
+
 const MAGIC: &[u8; 8] = b"FRMESH01";
 
 /// Collects triangles corner by corner, sharing vertices that are the same point at 32-bit precision.
@@ -65,9 +68,11 @@ impl Welder {
 }
 
 fn open(path: &Path) -> Result<(std::fs::File, u64), String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
-    let len = file.metadata().map_err(|e| format!("could not read {}: {e}", path.display()))?.len();
+    let metadata = std::fs::metadata(path).map_err(|e| format!("could not inspect {}: {e}", path.display()))?;
+    if !metadata.is_file() { return Err(format!("{} is not a regular mesh file", path.display())); }
+    let len = metadata.len();
     if len > MAX_MESH_FILE_BYTES { return Err(format!("{} is larger than the {} MB import limit", path.display(), MAX_MESH_FILE_BYTES / 1_000_000)); }
+    let file = std::fs::File::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
     Ok((file, len))
 }
 
@@ -268,7 +273,7 @@ fn attr<'a>(t: &Tag<'a>, key: &str) -> Option<&'a str> {
 fn transform_of(text: Option<&str>) -> Result<DAffine3, String> {
     let Some(text) = text else { return Ok(DAffine3::IDENTITY) };
     let v: Vec<f64> = text.split_whitespace().map(str::parse).collect::<Result<_, _>>().map_err(|_| "the 3MF has a malformed transform")?;
-    if v.len() != 12 { return Err("the 3MF has a malformed transform".into()); }
+    if v.len() != 12 || v.iter().any(|n| !n.is_finite()) { return Err("the 3MF has a malformed transform".into()); }
     // 3MF uses row vectors (p' = p M + t), so the rows of its 3x3 are the columns of ours.
     let m = DMat3::from_cols(DVec3::new(v[0], v[1], v[2]), DVec3::new(v[3], v[4], v[5]), DVec3::new(v[6], v[7], v[8]));
     Ok(DAffine3::from_mat3_translation(m, DVec3::new(v[9], v[10], v[11])))
@@ -285,10 +290,16 @@ struct Object3mf {
 pub fn read_3mf(path: &Path) -> Result<Mesh, String> {
     let (file, _) = open(path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("{} is not a 3MF archive: {e}", path.display()))?;
+    if archive.len() > MAX_3MF_ENTRIES { return Err("the 3MF has too many archive entries".into()); }
     let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
     let model = names.iter().find(|n| n.eq_ignore_ascii_case("3D/3dmodel.model")).or_else(|| names.iter().find(|n| n.to_ascii_lowercase().ends_with(".model"))).ok_or("the 3MF has no model file")?;
     let mut xml = String::new();
-    archive.by_name(model).map_err(|e| format!("could not read the 3MF model: {e}"))?.take(MAX_MESH_FILE_BYTES).read_to_string(&mut xml).map_err(|e| format!("could not read the 3MF model: {e}"))?;
+    let entry = archive.by_name(model).map_err(|e| format!("could not read the 3MF model: {e}"))?;
+    if entry.size() > MAX_MESH_FILE_BYTES { return Err("the expanded 3MF model exceeds the import limit".into()); }
+    entry.take(MAX_MESH_FILE_BYTES + 1).read_to_string(&mut xml).map_err(|e| format!("could not read the 3MF model: {e}"))?;
+    if xml.len() as u64 > MAX_MESH_FILE_BYTES { return Err("the expanded 3MF model exceeds the import limit".into()); }
+    let mut source_triangles = 0usize;
+    let mut source_vertices = 0usize;
     let mut scale = 1.0;
     let mut objects: FxMap<String, Object3mf> = FxMap::default();
     let mut current: Option<(String, Object3mf)> = None;
@@ -307,6 +318,9 @@ pub fn read_3mf(path: &Path) -> Result<Mesh, String> {
                 let Some((_, o)) = current.as_mut() else { continue };
                 let c = ["x", "y", "z"].map(|k| attr(&t, k).and_then(|v| v.parse::<f64>().ok()));
                 let [Some(x), Some(y), Some(z)] = c else { return Err("the 3MF has a malformed vertex".into()) };
+                source_vertices += 1;
+                if source_vertices > MAX_TRIANGLES * 3 { return Err("the 3MF has too many vertices".into()); }
+                if ![x, y, z].iter().all(|v| v.is_finite()) { return Err("the 3MF has a non-finite vertex".into()); }
                 o.positions.push(DVec3::new(x, y, z) * scale);
             }
             ("triangle", false) => {
@@ -314,19 +328,28 @@ pub fn read_3mf(path: &Path) -> Result<Mesh, String> {
                 let c = ["v1", "v2", "v3"].map(|k| attr(&t, k).and_then(|v| v.parse::<u32>().ok()));
                 let [Some(a), Some(b), Some(cc)] = c else { return Err("the 3MF has a malformed triangle".into()) };
                 if [a, b, cc].iter().any(|i| *i as usize >= o.positions.len()) { return Err("the 3MF refers to a vertex it does not have".into()); }
+                source_triangles += 1;
+                if source_triangles > MAX_TRIANGLES { return Err("the 3MF has too many source triangles".into()); }
                 o.tris.push([a, b, cc]);
             }
             ("component", false) => {
                 let Some((_, o)) = current.as_mut() else { continue };
-                o.components.push((attr(&t, "objectid").unwrap_or("").to_owned(), transform_of(attr(&t, "transform"))?));
+                let mut transform = transform_of(attr(&t, "transform"))?;
+                transform.translation *= scale;
+                o.components.push((attr(&t, "objectid").unwrap_or("").to_owned(), transform));
             }
-            ("item", false) => { build.push((attr(&t, "objectid").unwrap_or("").to_owned(), transform_of(attr(&t, "transform"))?)); }
+            ("item", false) => {
+                let mut transform = transform_of(attr(&t, "transform"))?;
+                transform.translation *= scale;
+                build.push((attr(&t, "objectid").unwrap_or("").to_owned(), transform));
+            }
             _ => {}
         }
     }
     if build.is_empty() { build = objects.keys().map(|k| (k.clone(), DAffine3::IDENTITY)).collect(); }
     let mut welder = Welder::new(1.0, objects.values().map(|o| o.tris.len()).sum());
-    fn place(objects: &FxMap<String, Object3mf>, id: &str, at: DAffine3, depth: usize, welder: &mut Welder) -> Result<(), String> {
+    fn place(objects: &FxMap<String, Object3mf>, id: &str, at: DAffine3, depth: usize, remaining: &mut usize, welder: &mut Welder) -> Result<(), String> {
+        *remaining = remaining.checked_sub(1).ok_or("the 3MF expands to too many component instances")?;
         if depth > 16 { return Err("the 3MF nests components too deeply".into()); }
         let o = objects.get(id).ok_or_else(|| format!("the 3MF build refers to a missing object {id}"))?;
         let scaled = |p: DVec3| at.transform_point3(p).as_vec3().to_array();
@@ -334,15 +357,16 @@ pub fn read_3mf(path: &Path) -> Result<Mesh, String> {
             welder.triangle(scaled(o.positions[t[0] as usize]), scaled(o.positions[t[1] as usize]), scaled(o.positions[t[2] as usize]))?;
         }
         for (cid, ct) in &o.components {
-            place(objects, cid, at * *ct, depth + 1, welder)?;
+            place(objects, cid, at * *ct, depth + 1, remaining, welder)?;
         }
         Ok(())
     }
+    // Empty components count too: a compact DAG may expand exponentially without
+    // producing any triangles, so the triangle and recursion limits are insufficient.
+    let mut remaining = MAX_3MF_INSTANCES;
     for (id, at) in &build {
-        place(&objects, id, *at, 0, &mut welder)?;
+        place(&objects, id, *at, 0, &mut remaining, &mut welder)?;
     }
-    // The transforms are applied with the unit scale already in the positions, so the translation needs it too.
-    let _ = scale;
     if welder.is_empty() { return Err(format!("{} has no triangles", path.display())); }
     welder.finish()
 }
@@ -389,6 +413,7 @@ pub fn decode_blob(bytes: &[u8]) -> Result<Mesh, String> {
 /// The pre-release blob form: raw little-endian f32 triangle triples.
 pub fn decode_tris_blob(bytes: &[u8]) -> Result<Mesh, String> {
     if bytes.len() % 36 != 0 { return Err("the mesh blob has an incomplete triangle".into()); }
+    if bytes.len() / 36 > MAX_TRIANGLES { return Err("the legacy mesh blob exceeds the triangle limit".into()); }
     let f: Vec<f64> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect();
     let tris: Vec<[DVec3; 3]> = f.chunks_exact(9).map(|t| [DVec3::new(t[0], t[1], t[2]), DVec3::new(t[3], t[4], t[5]), DVec3::new(t[6], t[7], t[8])]).collect();
     let m = Mesh::welded_from_tris(&tris);

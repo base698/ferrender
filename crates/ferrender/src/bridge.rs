@@ -220,8 +220,20 @@ mod unix {
 
     fn socket_path(port: u16, create: bool) -> io::Result<PathBuf> {
         let config = crate::config::Config::path();
-        let dir = config.parent().ok_or_else(|| denied("settings directory missing"))?.join("bridge");
-        Ok(private_dir(&dir, create)?.join(format!("{port}.sock")))
+        socket_path_for_dir(config.parent().ok_or_else(|| denied("settings directory missing"))?, port, create)
+    }
+
+    pub(super) fn socket_path_for_dir(config: &Path, port: u16, create: bool) -> io::Result<PathBuf> {
+        let dir = private_dir(&config.join("bridge"), create)?;
+        let path = dir.join(format!("{port}.sock"));
+        // sockaddr_un is limited to 104 bytes on macOS. Keep the normal path
+        // for compatibility; long custom settings folders use a short private
+        // runtime directory keyed by their filesystem identity, without hash
+        // collisions or bypassing the original directory's permission checks.
+        if path.as_os_str().as_bytes().len() < 100 { return Ok(path); }
+        let metadata = fs::metadata(&dir)?;
+        let runtime = Path::new("/tmp").join(format!("ferrender-mcp-{}-{:x}-{:x}", metadata.uid(), metadata.dev(), metadata.ino()));
+        Ok(private_dir(&runtime, create)?.join(format!("{port}.sock")))
     }
 
     fn socket_metadata(path: &Path) -> io::Result<fs::Metadata> {
@@ -465,6 +477,28 @@ mod tests {
         assert_eq!(unix::private_dir(&alias, false).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(unix::private_dir(&path, false).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn long_config_paths_use_distinct_private_short_sockets() {
+        use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::path::Path::new("/tmp").join(format!("fr-long-{}-{nonce:x}", std::process::id()));
+        let first = root.join("a".repeat(120));
+        let second = root.join("b".repeat(120));
+        let a = unix::socket_path_for_dir(&first, 47821, true).unwrap();
+        let b = unix::socket_path_for_dir(&second, 47821, true).unwrap();
+        assert_ne!(a, b);
+        assert!(a.as_os_str().as_bytes().len() < 100);
+        assert_eq!(a, unix::socket_path_for_dir(&first, 47821, false).unwrap());
+        assert_eq!(std::fs::metadata(a.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        let listener = std::os::unix::net::UnixListener::bind(&a).unwrap();
+        assert!(std::os::unix::net::UnixStream::connect(&a).is_ok());
+        drop(listener);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(b.parent().unwrap()).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

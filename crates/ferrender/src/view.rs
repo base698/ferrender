@@ -76,8 +76,17 @@ impl Scene {
     /// A new document can reuse session revisions; keep GPU revisions monotonic.
     pub fn invalidate(&mut self) {
         self.key = None;
+        self.big_key = None;
+        self.big = Arc::default();
+        self.verts = Arc::default();
+        self.bounds = None;
+        self.last_cam = None;
+        self.moved = None;
         self.cpu = None;
     }
+
+    #[cfg(test)]
+    pub(crate) fn big_data(&self) -> Arc<Vec<gpu::BigMesh>> { self.big.clone() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -391,7 +400,7 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
     let hidden = app.doc().hidden_bodies.clone();
     // The selected face is lit through the vertex data, so it is part of what was sent.
     let face = app.sel_face.clone().filter(|_| app.preview.is_none());
-    let key = (app.session.rev, app.preview.as_ref().map(|p| p.0.clone()), hidden.clone(), face.as_ref().map(|f| (f.body, f.tris.len(), f.tris[0])));
+    let key = (app.session.rev, app.preview.as_ref().map(|p| p.0.clone()), hidden.clone(), face.as_ref().and_then(|f| f.tris.first().map(|first| (f.body, f.tris.len(), *first))));
     if app.scene.key.as_ref() != Some(&key) {
         let bodies: Vec<&Body> = app.shown().bodies.iter().filter(|b| !hidden.contains(&b.id) && app.body_visible(b)).collect();
         let verts = Arc::new(gpu::vertices(bodies.iter().copied(), face.as_ref().map(|f| (f.body, f.tris.as_slice()))));
@@ -407,9 +416,14 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
         app.scene.key = Some(key);
     }
     if app.scene.verts.is_empty() && app.scene.big.is_empty() {
+        // There is no model left to catch up with. Preserve the immediate empty
+        // scene acknowledgement even though the GPU callback below releases its
+        // old buffers. Nonempty scenes still require the actual GPU fence.
         app.timeline.software_done();
-        return;
+        if !app.gpu { return; }
     }
+    // Submit an empty GPU frame too: it clears the last image and releases its
+    // buffers after Hide All/New, rather than retaining a large deleted model.
     // While the camera is moving, meshes above the level-of-detail size draw their coarse copy;
     // a repaint shortly after it stops brings the full mesh back.
     let mut coarse = false;
@@ -1423,7 +1437,7 @@ fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
         app.gap_cache = Some((app.session.rev, sid, sk.open_endpoints()));
     }
     let dim = Hit::None;
-    for (f, _) in app.session.doc.sketches().filter(|(f, s)| f.id != sid && s.visible && !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.session.built.component_visible(f.owner) && app.doc().features.iter().take(app.doc().active()).any(|earlier| earlier.id == f.id)) {
+    for (f, _) in app.session.doc.sketches().filter(|(f, s)| f.id != sid && s.visible && !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.component_visible(f.owner) && app.doc().features.iter().take(app.doc().active()).any(|earlier| earlier.id == f.id)) {
         let Some(other) = app.world_sketch(f.id) else { continue };
         draw_sketch(app, painter, &other, false, dim, &mut Vec::new());
     }
@@ -1580,7 +1594,7 @@ pub(crate) fn pick_face(app: &App, pos: Pos2) -> Option<Face> {
 /// The smallest profile under a screen position among the sketches a feature can use.
 fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: Option<Id>) -> Option<(Id, Profile)> {
     doc.sketches()
-        .filter(|(f, s)| !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also == Some(f.id)))
+        .filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also == Some(f.id)))
         .filter_map(|(f, s)| {
             let at = sketch_pos(app, s, pos)?;
             profiles(s).into_iter().filter(|p| p.contains(at)).min_by(|a, b| a.area().total_cmp(&b.area())).map(|p| (f.id, p))
@@ -1596,14 +1610,14 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
     for feature in &mut doc.features {
         if let FeatureKind::Sketch(sk) = &mut feature.kind {
             sk.plane = app.modeling_source().sketch_plane(app.doc(),feature.id).unwrap_or_else(||sk.plane.transformed(app.modeling_source().component_placement(feature.owner)));
-            if feature.suppressed || app.session.built.errors.contains_key(&feature.id) || !app.shown().component_visible(feature.owner) { sk.visible = false; }
+            if app.doc().is_suppressed(feature.id) || app.session.built.errors.contains_key(&feature.id) || !app.shown().component_visible(feature.owner) { sk.visible = false; }
         }
     }
     let dlg_sketch = match &app.dialog {
         Dialog::Feature(f) => f.sketch,
         _ => None,
     };
-    for (f, sk) in doc.sketches().filter(|(f, s)| !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || dlg_sketch == Some(f.id))) {
+    for (f, sk) in doc.sketches().filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || dlg_sketch == Some(f.id))) {
         let _ = f;
         draw_sketch(app, painter, sk, false, Hit::None, &mut Vec::new());
     }

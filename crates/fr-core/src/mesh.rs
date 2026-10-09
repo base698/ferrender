@@ -178,6 +178,24 @@ impl Mesh {
         *self = m;
     }
 
+    /// Reconnects vertices made coincident by final f32 rounding, without
+    /// expanding the indexed mesh to a triangle soup. Used after clipping;
+    /// general transforms keep intentionally disconnected vertices separate.
+    pub(crate) fn weld_rounded_positions(&mut self) {
+        let mut map: FxMap<u128, u32> = FxMap::default();
+        let mut positions = Vec::with_capacity(self.positions.len());
+        let mut remap = Vec::with_capacity(self.positions.len());
+        for p in &self.positions {
+            let p = p.as_vec3().as_dvec3();
+            let next = positions.len() as u32;
+            remap.push(*map.entry(key(p)).or_insert_with(|| { positions.push(p); next }));
+        }
+        for t in &mut self.indices { *t = t.map(|v| remap[v as usize]); }
+        self.positions = positions;
+        self.welded = true;
+        self.touched();
+    }
+
     pub fn is_welded(&self) -> bool { self.welded }
     pub fn positions(&self) -> &[DVec3] { &self.positions }
     pub fn indices(&self) -> &[[u32; 3]] { &self.indices }
@@ -368,7 +386,7 @@ impl Mesh {
         if self.indices.len() < 64 {
             let mut best: Option<(f64, usize)> = None;
             for i in 0..self.indices.len() {
-                if let Some(d) = ray_tri(origin, dir, &self.tri(i)) && best.is_none_or(|b| d < b.0) {
+                if let Some(d) = ray_tri(origin, dir, &self.tri(i)) && d >= 0.0 && best.is_none_or(|b| d < b.0) {
                     best = Some((d, i));
                 }
             }
@@ -717,20 +735,36 @@ impl Mesh {
             }
             // How many other components enclose a point of each: odd means a cavity.
             let mut depth = vec![0usize; report.components];
-            if report.components > 1 && report.components <= 64 {
-                let first_tri: Vec<usize> = (0..report.components).map(|c| component.iter().position(|k| *k as usize == c).unwrap()).collect();
+            if report.components > 1 {
+                // One BVH for all shells avoids both quadratic rescanning and
+                // the old 64-shell cutoff, which silently turned cavities solid.
+                let bvh = (report.components > 8).then(|| Bvh::build(self));
+                let mut first_tri = vec![usize::MAX; report.components];
+                for (i, c) in component.iter().enumerate() {
+                    if first_tri[*c as usize] == usize::MAX { first_tri[*c as usize] = i; }
+                }
                 let dir = DVec3::new(0.577_215, 0.618_034, 0.532_601).normalize();
                 for c in 0..report.components {
-                    let t = self.indices[first_tri[c]];
-                    let p = (self.positions[t[0] as usize] + self.positions[t[1] as usize] + self.positions[t[2] as usize]) / 3.0;
-                    for other in 0..report.components {
-                        if other == c { continue; }
-                        let hits = self.indices.iter().enumerate().filter(|(i, _)| component[*i] as usize == other).filter(|(_, t)| {
-                            let tri = [self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize]];
-                            ray_tri(p, dir, &tri).is_some_and(|d| d > 1e-9)
-                        }).count();
-                        if hits % 2 == 1 { depth[c] += 1; }
+                    let t = self.tri(first_tri[c]);
+                    let p = (t[0] + t[1] + t[2]) / 3.0;
+                    // For a handful of shells, a linear scan is cheaper than
+                    // constructing another million-triangle BVH during import.
+                    let hits = if let Some(bvh) = &bvh { bvh.ray_hits(self, p, dir) } else {
+                        let mut hits: Vec<_> = self.tris().enumerate().filter(|(i, _)| component[*i] as usize != c)
+                            .filter_map(|(i, t)| ray_tri(p, dir, &t).filter(|d| *d > 1e-9).map(|d| (d, i))).collect();
+                        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        hits
+                    };
+                    let mut crossings: FxMap<u32, (usize, f64)> = FxMap::default();
+                    for (distance, triangle) in hits {
+                        let other = component[triangle];
+                        if other as usize == c { continue; }
+                        let (count, last) = crossings.entry(other).or_insert((0, f64::NEG_INFINITY));
+                        if (distance - *last).abs() > 1e-9 * (1.0 + distance.abs()) {
+                            *count += 1; *last = distance;
+                        }
                     }
+                    depth[c] = crossings.values().filter(|(count, _)| count % 2 == 1).count();
                 }
             }
             let inside_out: Vec<bool> = vol.iter().zip(&depth).map(|(v, d)| (*v < 0.0) != (d % 2 == 1)).collect();
@@ -756,13 +790,19 @@ impl Mesh {
     /// Welds vertices that fall in the same cell of a grid `cell` wide and
     /// drops the triangles that collapse: a fast, coarse simplification used
     /// for level of detail. Quality is low where the grid cuts across detail.
-    pub fn clustered(&self, cell: f64) -> Mesh {
-        let mut map: FxMap<(i32, i32, i32), u32> = FxMap::default();
+    pub fn clustered(&self, cell: f64) -> Mesh { self.clustered_with_pins(cell, &[]) }
+
+    /// Clusters interior vertices while retaining any pinned outline vertices.
+    pub fn clustered_with_pins(&self, cell: f64, pins: &[bool]) -> Mesh {
+        let mut map: FxMap<(i64, i64, i64, u32), u32> = FxMap::default();
         let mut sums: Vec<(DVec3, u32)> = Vec::new();
         let mut remap: Vec<u32> = Vec::with_capacity(self.positions.len());
         let cell = cell.max(1e-9);
-        for p in &self.positions {
-            let k = ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32, (p.z / cell).floor() as i32);
+        let origin = self.bbox().map(|b| b.0).unwrap_or(DVec3::ZERO);
+        for (v, p) in self.positions.iter().enumerate() {
+            let relative = (*p - origin) / cell;
+            let pin = if pins.get(v).copied().unwrap_or(false) { v as u32 + 1 } else { 0 };
+            let k = (relative.x.floor() as i64, relative.y.floor() as i64, relative.z.floor() as i64, pin);
             let next = sums.len() as u32;
             let i = *map.entry(k).or_insert_with(|| { sums.push((DVec3::ZERO, 0)); next });
             sums[i as usize].0 += *p;
@@ -843,22 +883,19 @@ pub fn ray_tri(origin: DVec3, dir: DVec3, t: &[DVec3; 3]) -> Option<f64> {
     Some(e2.dot(q) / det)
 }
 
-/// Distance from a point to a triangle.
-pub fn dist_tri(p: DVec3, t: &[DVec3; 3]) -> f64 {
-    // Closest point on the triangle: inside its plane footprint, or on an edge.
+/// Closest point on a triangle, including its boundary.
+pub fn closest_tri(p: DVec3, t: &[DVec3; 3]) -> DVec3 {
     let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
     let q = p - n * (p - t[0]).dot(n);
-    let inside = n != DVec3::ZERO && (0..3).all(|i| (t[(i + 1) % 3] - t[i]).cross(q - t[i]).dot(n) >= 0.0);
-    if inside {
-        return q.distance(p);
-    }
-    (0..3)
-        .map(|i| {
-            let (a, d) = (t[i], t[(i + 1) % 3] - t[i]);
-            (a + d * ((p - a).dot(d) / d.length_squared().max(1e-18)).clamp(0.0, 1.0)).distance(p)
-        })
-        .fold(f64::MAX, f64::min)
+    if n != DVec3::ZERO && (0..3).all(|i| (t[(i + 1) % 3] - t[i]).cross(q - t[i]).dot(n) >= 0.0) { return q; }
+    (0..3).map(|i| {
+        let (a, d) = (t[i], t[(i + 1) % 3] - t[i]);
+        a + d * ((p - a).dot(d) / d.length_squared().max(1e-18)).clamp(0.0, 1.0)
+    }).min_by(|a, b| a.distance_squared(p).total_cmp(&b.distance_squared(p))).unwrap()
 }
+
+/// Distance from a point to a triangle.
+pub fn dist_tri(p: DVec3, t: &[DVec3; 3]) -> f64 { p.distance(closest_tri(p, t)) }
 
 // ----- bounding volume hierarchy -----
 
@@ -884,6 +921,7 @@ const LEAF: usize = 4;
 impl Bvh {
     pub fn build(m: &Mesh) -> Bvh {
         let n = m.len();
+        if n == 0 { return Bvh { nodes: Vec::new(), order: Vec::new() }; }
         let mut order: Vec<u32> = (0..n as u32).collect();
         let centroids: Vec<Vec3> = m.tris().map(|t| ((t[0] + t[1] + t[2]) / 3.0).as_vec3()).collect();
         let bounds: Vec<(Vec3, Vec3)> = m.tris().map(|t| {
@@ -985,26 +1023,35 @@ impl Bvh {
         best
     }
 
-    /// How many triangles a ray crosses: odd from inside a closed mesh, even from outside.
-    pub fn crossings(&self, m: &Mesh, origin: DVec3, dir: DVec3) -> usize {
-        if self.nodes.is_empty() { return 0; }
+    /// Forward triangle hits. Keeping their distances lets parity queries
+    /// count a hit on a triangulation diagonal once, rather than twice.
+    fn ray_hits(&self, m: &Mesh, origin: DVec3, dir: DVec3) -> Vec<(f64, usize)> {
+        if self.nodes.is_empty() { return Vec::new(); }
         let o = origin.as_vec3();
         let inv = Vec3::new(1.0 / dir.x as f32, 1.0 / dir.y as f32, 1.0 / dir.z as f32);
-        let mut count = 0;
+        let mut hits = Vec::new();
         let mut stack = vec![0usize];
         while let Some(ni) = stack.pop() {
             let n = &self.nodes[ni];
             if Self::slab(n, o, inv).is_none() { continue; }
             if n.count > 0 {
                 for &i in &self.order[n.start as usize..(n.start + n.count) as usize] {
-                    if ray_tri(origin, dir, &m.tri(i as usize)).is_some_and(|d| d > 1e-9) { count += 1; }
+                    if let Some(d) = ray_tri(origin, dir, &m.tri(i as usize)) && d > 1e-9 { hits.push((d, i as usize)); }
                 }
             } else {
                 stack.push(ni + 1);
                 stack.push(n.start as usize);
             }
         }
-        count
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        hits
+    }
+
+    /// How many surface crossings a ray makes: odd from inside a closed mesh.
+    pub fn crossings(&self, m: &Mesh, origin: DVec3, dir: DVec3) -> usize {
+        let mut hits = self.ray_hits(m, origin, dir);
+        hits.dedup_by(|a, b| (a.0 - b.0).abs() <= 1e-9 * (1.0 + a.0.abs().max(b.0.abs())));
+        hits.len()
     }
 
     /// Whether a point is inside a closed mesh, by ray parity along a direction unlikely to graze an edge.
@@ -1015,6 +1062,7 @@ impl Bvh {
 
     /// Triangles whose bounds overlap a box.
     pub fn in_box(&self, lo: DVec3, hi: DVec3) -> Vec<usize> {
+        if self.nodes.is_empty() { return Vec::new(); }
         let (lo, hi) = (lo.as_vec3(), hi.as_vec3());
         let mut out = Vec::new();
         let mut stack = vec![0usize];

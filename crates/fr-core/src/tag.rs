@@ -72,17 +72,18 @@ impl Tag {
         Tag { kind: self.kind, origin: Origin::Copy { of: Box::new(self.clone()), n } }
     }
 
-    /// What a tag is "the same face" as across rebuilds: split and copy ordinals dropped, and a
-    /// `Made` face's ordinal too, since the kernel may number a feature's faces differently after an edit.
+    /// Split pieces may change when a face is cut. Primitive face ordinals and
+    /// pattern-copy identities must remain distinct: dropping either can silently
+    /// move a reference to another face after the selected one is removed.
     pub fn family(&self) -> Family {
-        let root = self.root();
-        let origin = match &root.origin {
-            Origin::Swept { feature, entity } => (*feature, 0, *entity),
-            Origin::Cap { feature, end } => (*feature, 1, *end as Id),
-            Origin::Made { feature, .. } => (*feature, 2, 0),
-            Origin::Split { .. } | Origin::Copy { .. } => unreachable!("root has no split or copy"),
-        };
-        Family { origin, kind: self.kind }
+        fn without_splits(tag: &Tag) -> Tag {
+            match &tag.origin {
+                Origin::Split { of, .. } => without_splits(of),
+                Origin::Copy { of, n } => without_splits(of).copy(*n),
+                _ => tag.clone(),
+            }
+        }
+        Family(without_splits(self))
     }
 
     /// The feature that made the face.
@@ -115,12 +116,9 @@ impl Tag {
     }
 }
 
-/// A tag reduced to what survives re-numbering: the making feature, which of its faces, and the surface kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Family {
-    origin: (Id, u8, Id),
-    kind: Kind,
-}
+/// The making face and pattern-copy identity, with only split ordinals removed.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Family(Tag);
 
 /// An edge is where two faces meet, so it is named by both their tags in a fixed order.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

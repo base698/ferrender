@@ -72,7 +72,7 @@ impl PlaneDlg {
         fr_core::validation::document(doc)?;
         // Suppression and rollback must not let an invalid edit bypass rebuild validation.
         let feature = doc.feature(id).unwrap();
-        if self.editing.is_some() && (feature.suppressed || !doc.features.iter().take(doc.active()).any(|f| f.id == id) || !doc.component_available(feature.owner)) {
+        if self.editing.is_some() && (doc.is_suppressed(feature.id) || !doc.features.iter().take(doc.active()).any(|f| f.id == id) || !doc.component_available(feature.owner)) {
             let mut trial = doc.clone();
             let index = trial.features.iter().position(|f| f.id == id).unwrap();
             trial.roll_to(index + 1);

@@ -202,7 +202,7 @@ been tried against the live API.
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
 | **Components (0.3 test build)** | Nested ownership, activation, scoped modeling, subtree visibility, and rigid component placement |
 | **Construction planes (0.3 test build)** | Persistent Offset, Midplane, and Three Points references with attached sketches |
-| **Meshes (0.4)** | STL, OBJ and 3MF import of scans with millions of triangles; repair, decimate, smooth, subdivide, cut, mirror, offset / thicken, sculpt; relief from an image; mesh booleans that scale |
+| **Meshes (0.4)** | STL, OBJ and 3MF import of scans with millions of triangles; repair, decimate, smooth, subdivide, cut, mirror, offset / thicken, sculpt; relief from an image; mesh booleans with closed-result checks |
 | **Faces and edges (0.4)** | Picks named by how the face was made, so fillets, shells, threads, text and face planes follow upstream edits |
 | **Scripts (0.4)** | Rhai scripts with declared inputs, a Scripts menu, timeline chips that re-run, `ferrender run` and `check`, six samples |
 | **Inspect** | Measure, Section Analysis, degrees of freedom while sketching |
@@ -215,7 +215,7 @@ It is early, and smaller than what it imitates: no joints or linked component in
 
 ## Additions in 0.4.0
 
-**Ferrender 0.4.0** makes meshes a first-class body kind: scans of millions of triangles import quickly and stay quick to orbit and pick, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans scale to large scans. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and a geometry cache that opens without a rebuild, and a file from a newer Ferrender can still be viewed. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline.
+**Ferrender 0.4.0** makes meshes a first-class body kind: indexed scans of millions of triangles support fast imports, BVH picking and a coarse display while orbiting, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans reject invalid inputs or results; complex scan intersections can still be refused. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and a geometry cache that opens without a rebuild, and a file from a newer Ferrender can still be viewed. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline. See the [0.4 review](docs/REVIEW_0.4.0.md) for measured test coverage, security boundaries and known limitations.
 
 See the [0.4.0 release notes](docs/releases/0.4.0.md), the [manual test plan](docs/TEST_PLAN_0.4.0.md), the [file format](docs/FILE_FORMAT.md), the [face relief tutorial](docs/tutorials/FACE_RELIEF_0.4.md) and the [0.4 plan with what shipped and what did not](docs/0.4-release.md).
 

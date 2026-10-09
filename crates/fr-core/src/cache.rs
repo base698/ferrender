@@ -24,6 +24,10 @@ use crate::tag::Level;
 /// What produced the cached shapes. A different kernel may triangulate or
 /// even model differently, so its caches are not used.
 pub const KERNEL: &str = "cadrum 0.8.20";
+/// Bump whenever Ferrender changes feature evaluation or mesh geometry. Kernel
+/// version alone cannot invalidate results from an older application algorithm.
+/// Revision 0 (a missing field) denotes the original 0.4 development caches.
+pub const GEOMETRY_REVISION: u32 = 1;
 /// A cache larger than this is not written; the design rebuilds instead.
 pub const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
 /// Designs that rebuild faster than this are not worth caching unless the file is a container anyway.
@@ -64,6 +68,8 @@ pub struct Index {
     /// CRC-32 of the plain JSON of the design the cache was made from.
     pub design_crc: u32,
     pub kernel: String,
+    #[serde(default)]
+    pub geometry_revision: u32,
     pub bodies: Vec<BodyEntry>,
     #[serde(default)]
     pub planes: Vec<PlaneEntry>,
@@ -131,13 +137,14 @@ impl Cache {
             bodies.push(BodyEntry { id: b.id, name: b.name.clone(), component: b.component, placement: b.placement, local_bounds: b.local_bounds, volume: body_volume(b), bounds: [lo, hi], triangles: b.mesh.len(), tags: b.tags.clone(), brep, mesh });
         }
         let planes = built.planes.iter().map(|(id, p)| PlaneEntry { id: *id, component: p.component, plane: p.plane, corners: p.corners }).collect();
-        let index = Index { design_crc: design_crc(doc), kernel: KERNEL.into(), bodies, planes, errors: built.errors.clone(), resolutions: built.resolutions.clone() };
+        let index = Index { design_crc: design_crc(doc), kernel: KERNEL.into(), geometry_revision: GEOMETRY_REVISION, bodies, planes, errors: built.errors.clone(), resolutions: built.resolutions.clone() };
         Ok(Some(Cache { index, blobs }))
     }
 
-    /// Whether this cache was made from exactly this design by this kernel.
+    /// Whether this cache was made from exactly this design by this kernel and
+    /// this revision of Ferrender's geometry algorithms.
     pub fn matches(&self, doc: &Document) -> bool {
-        self.index.kernel == KERNEL && self.index.design_crc == design_crc(doc)
+        self.index.kernel == KERNEL && self.index.geometry_revision == GEOMETRY_REVISION && self.index.design_crc == design_crc(doc)
     }
 
     /// Reads the shapes back and checks them against the index. An error means

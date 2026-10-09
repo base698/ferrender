@@ -49,6 +49,13 @@ jobs:
           PY
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify pinned OpenCascade build dependency
+        run: |
+          python3 scripts/test_prepare_occt.py
+          python3 scripts/prepare-occt.py --github-env
       - name: Install Linux prerequisites
         if: runner.os == 'Linux'
         run: |

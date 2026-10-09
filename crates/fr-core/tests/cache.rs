@@ -119,6 +119,22 @@ fn a_cache_that_disagrees_is_discarded_and_the_design_rebuilds() {
     let tampered = rewrite(&|name, mut data| { if name.ends_with(".brep") { let k = data.len() / 2; data[k] ^= 0x55; } data }, "tampered.ferr");
     let opened = Session::open(&tampered).unwrap();
     assert!(!opened.from_cache || volumes(&opened) == volumes(&s), "a tampered cache is discarded or still agrees");
+    // An older Ferrender algorithm can produce the wrong geometry even when
+    // the design and OpenCascade version are unchanged. Missing and mismatched
+    // revision markers must rebuild before allowing edits.
+    for revision in [None, Some(fr_core::cache::GEOMETRY_REVISION + 1)] {
+        let old = rewrite(&|name, data| if name == "cache/index.json" {
+            let mut v: J = serde_json::from_slice(&data).unwrap();
+            match revision {
+                Some(n) => v["geometry_revision"] = json!(n),
+                None => { v.as_object_mut().unwrap().remove("geometry_revision"); }
+            }
+            serde_json::to_vec(&v).unwrap()
+        } else { data }, if revision.is_none() { "legacy-algorithm.ferr" } else { "other-algorithm.ferr" });
+        let opened = Session::open(&old).unwrap();
+        assert!(!opened.from_cache, "a different geometry revision must rebuild");
+        assert_eq!(volumes(&opened), volumes(&s));
+    }
     // Another kernel's cache is not used.
     let other = rewrite(&|name, data| if name == "cache/index.json" { String::from_utf8(data).unwrap().replace("cadrum 0.8.20", "cadrum 9.9.9").into_bytes() } else { data }, "kernel.ferr");
     let opened = Session::open(&other).unwrap();
@@ -143,6 +159,8 @@ fn plain_designs_stay_plain_unless_slow_or_forced() {
 #[test]
 fn a_newer_file_shows_its_cache_read_only() {
     let mut s = heavy();
+    run(&mut s, json!({"op": "create_component", "name": "Child"}));
+    run(&mut s, json!({"op": "primitive", "type": "box", "width": 2, "depth": 3, "height": 4}));
     s.cache_policy = CachePolicy::Always;
     let path = dir().join("future.ferr");
     s.save(&path).unwrap();
@@ -168,6 +186,16 @@ fn a_newer_file_shows_its_cache_read_only() {
     let mut view = Session::open(&future).unwrap();
     assert!(view.read_only && view.from_cache);
     assert_eq!(volumes(&view), volumes(&s), "the newer file's geometry is shown");
+    assert_eq!(view.visible_bodies().count(), 2, "component-owned cache geometry stays visible");
+    let before = volumes(&view);
+    let script = "const META = #{name: \"read\"}; fn run(i) { scene() }";
+    assert!(execute(&mut view, &json!({"op": "run_script", "source": script}), None).unwrap_err().contains("read-only"));
+    assert_eq!(volumes(&view), before, "a refused script must not rebuild away the cache");
+    let revision = view.rev;
+    view.rebuild();
+    assert_eq!(view.rev, revision);
+    assert_eq!(volumes(&view), before, "a future read-only cache must survive a direct rebuild call");
+    assert!(view.from_cache && view.read_only);
     let refused = execute(&mut view, &json!({"op": "primitive", "type": "box", "width": 1, "depth": 1, "height": 1}), None);
     assert!(refused.is_err_and(|e| e.contains("read-only")));
     assert!(view.save(&dir().join("nope.ferr")).is_err());
@@ -177,4 +205,21 @@ fn a_newer_file_shows_its_cache_read_only() {
     let stl = dir().join("future.stl");
     run(&mut view, json!({"op": "export_stl", "path": stl.display().to_string()}));
     assert!(std::fs::metadata(&stl).unwrap().len() > 84);
+}
+
+#[test]
+fn cache_identity_survives_precise_sketch_coordinate_round_trip() {
+    let mut s = Session::default();
+    run(&mut s, json!({"op": "primitive", "type": "box", "width": 2, "depth": 3, "height": 4}));
+    run(&mut s, json!({"op": "create_sketch", "plane": "XY"}));
+    run(&mut s, json!({"op": "add_geometry", "items": [
+        {"type": "point", "at": [12.865789473684213_f64, 62.300000000000004_f64]},
+        {"type": "point", "at": [9.186842105263159_f64, 9.677777777777777_f64]}
+    ]}));
+    s.cache_policy = CachePolicy::Always;
+    let path = dir().join("precise-coordinates.ferr");
+    s.save(&path).unwrap();
+    let reopened = Session::open(&path).unwrap();
+    assert_eq!(reopened.doc, s.doc, "JSON must retain the exact saved f64 values");
+    assert!(reopened.from_cache, "round-trip rounding must not invalidate a matching cache");
 }

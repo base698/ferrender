@@ -821,9 +821,11 @@ fn dialogs(app: &mut App, ctx: &Context) {
         Dialog::Sculpt(mut d) => {
             dialog_window(app, "Sculpt").show(ctx, |ui| {
                 egui::Grid::new("sculpt").num_columns(3).show(ui, |ui| {
+                    let was_scalar = d.brush >= 3;
                     ui.label("Brush"); egui::ComboBox::from_id_salt("brush").selected_text(crate::app::BRUSHES[d.brush]).show_ui(ui, |ui| { for (i, n) in crate::app::BRUSHES.iter().enumerate() { ui.selectable_value(&mut d.brush, i, *n); } }); ui.end_row();
+                    if was_scalar != (d.brush >= 3) { d.strength = if d.brush >= 3 { "0.5".into() } else { "1 mm".into() }; }
                     value_row(app, ui, "Radius", &mut d.radius, Kind::Length);
-                    value_row(app, ui, if d.brush >= 3 { "Strength (0 to 1)" } else { "Depth" }, &mut d.strength, Kind::Length);
+                    value_row(app, ui, if d.brush >= 3 { "Strength (0 to 1)" } else { "Depth" }, &mut d.strength, if d.brush >= 3 { Kind::Scalar } else { Kind::Length });
                 });
                 ui.label(RichText::new(format!("Click the body to sculpt. Each click is one stroke in the timeline ({} so far).", d.strokes)).color(colors.muted));
                 app.dialog = Dialog::Sculpt(d);
@@ -892,7 +894,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 let before = p.editing.and_then(|id| app.doc().features.iter().position(|f| f.id == id)).unwrap_or(app.doc().active());
                 let owner = p.editing.and_then(|id| app.doc().feature(id).map(|f| f.owner));
                 let sources: Vec<(Id, String)> = app.doc().features.iter().take(before)
-                    .filter(|f| !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner) && owner.is_none_or(|owner| f.owner == owner))
+                    .filter(|f| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner) && owner.is_none_or(|owner| f.owner == owner))
                     .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
                     .map(|f| (f.id, format!("{} · {}", f.name, app.doc().component_name(f.owner)))).collect();
                 let shown = sources.iter().find(|s| Some(s.0) == p.source).map_or("choose".to_owned(), |s| s.1.clone());

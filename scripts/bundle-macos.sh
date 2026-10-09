@@ -4,6 +4,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+# Verify the official archive before cadrum can consume native libraries.
+OCCT_ROOT=$(python3 scripts/prepare-occt.py)
+export OCCT_ROOT
 cargo build --locked --release -p ferrender
 
 app=dist/Ferrender.app

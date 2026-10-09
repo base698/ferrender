@@ -122,10 +122,29 @@ fn large_meshes_import_pick_and_round_trip_within_budget() {
             m
         };
         let t = Instant::now();
-        let cut = fr_core::meshops::boolean(&mesh, &tool, fr_core::csg::Bool::Subtract).unwrap();
+        let cut = fr_core::meshops::boolean(&mesh, &tool, fr_core::csg::Bool::Subtract);
         let bool_s = t.elapsed().as_secs_f64();
-        println!("  cut with a {}-triangle tool in {bool_s:.2} s: {} triangles, {} open edges", tool.len(), cut.len(), cut.open_edges());
-        assert!(cut.len() > mesh.len() / 2);
+        match cut {
+            Ok(cut) => {
+                println!("  cut with a {}-triangle tool in {bool_s:.2} s: {} triangles, {} open edges", tool.len(), cut.len(), cut.open_edges());
+                assert!(report.watertight, "invalid input must be refused");
+                assert!(cut.inspect().watertight, "a successful solid boolean must stay closed and manifold");
+                assert!(cut.len() > mesh.len() / 2);
+            }
+            Err(error) => {
+                assert!(error.contains("closed, manifold"), "unexpected refusal: {error}");
+                println!("  cut safely refused in {bool_s:.2} s: {error}");
+                let mut check = Session::default();
+                let target = check.edit(|d| Ok(d.add_feature(fr_core::FeatureKind::Import(mesh.clone())))).unwrap();
+                let tool_id = check.edit(|d| Ok(d.add_feature(fr_core::FeatureKind::Import(tool.clone())))).unwrap();
+                let before = check.doc.clone();
+                let error = execute(&mut check, &json!({"op":"combine", "target":target, "tools":[tool_id], "operation":"cut"}), None).unwrap_err();
+                assert!(error.contains("closed, manifold"));
+                assert_eq!(check.doc, before, "a failed boolean must preserve the complete design");
+                assert_eq!(check.built.bodies.len(), 2);
+                assert!(check.built.errors.is_empty());
+            }
+        }
         assert!(bool_s < 10.0 * m.max(0.5), "the culled boolean took {bool_s:.1} s");
 
         let mut s = Session::default();

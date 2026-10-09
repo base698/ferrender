@@ -71,7 +71,10 @@ pub struct Running {
     /// The chip this run replaces, if it is a re-run, and where the chip goes.
     pub rerun: Option<Id>,
     pub insert_at: usize,
-    pub first_id: Id,
+    pub owner: Id,
+    pub base_doc: fr_core::Document,
+    pub base_path: Option<PathBuf>,
+    pub base_rev: u64,
     /// Features after the re-run's position, put back after it.
     pub tail: Vec<fr_core::Feature>,
     pub script_name: String,
@@ -99,7 +102,7 @@ fn read_dir(dir: &PathBuf) -> Vec<Entry> {
     let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "rhai")).collect();
     paths.sort();
     paths.into_iter().filter_map(|p| {
-        let source = std::fs::read_to_string(&p).ok()?;
+        let source = fr_core::script::read_source(&p).ok()?;
         let meta = fr_core::script::meta(&source);
         Some(Entry { file_name: p.file_name()?.to_string_lossy().into_owned(), path: Some(p), source, meta, sample: false })
     }).collect()
@@ -190,30 +193,35 @@ impl App {
 
     /// Starts the run on a worker thread; the result is committed when it arrives.
     pub fn start_script(&mut self, dlg: ScriptDlg) {
+        if self.session.read_only { self.toast("Scripts cannot run on this read-only design; update Ferrender first."); return; }
         if self.scripts.busy() { self.toast("A script is already running."); return; }
         let inputs = Self::script_inputs(&dlg.fields);
         self.config.scripts.last_inputs.insert(dlg.name.clone(), inputs.to_string());
         let _ = self.config.save();
         // A re-run replaces the chip and everything it made, and starts where the chip was: the
         // features after it are set aside and put back once the run has appended its own.
-        let (insert_at, first_id, tail, mut session) = match dlg.rerun {
+        let base_doc = self.doc().clone();
+        let base_path = self.session.path.clone();
+        let base_rev = self.session.rev;
+        let (insert_at, owner, tail, mut session) = match dlg.rerun {
             Some(chip) => {
                 let doc = self.doc();
                 let at = doc.features.iter().position(|f| f.id == chip).unwrap_or(doc.features.len());
-                let first = doc.features.iter().filter(|f| f.made_by == Some(chip)).map(|f| f.id).min().unwrap_or(doc.next_id);
+                let previous: Vec<_> = doc.features.iter().filter(|f| f.made_by == Some(chip)).cloned().collect();
+                let owner = doc.feature(chip).map_or(doc.active_component, |f| f.owner);
                 let mut s = self.session.fork();
                 s.doc.features.retain(|f| f.id != chip && f.made_by != Some(chip));
                 let tail = s.doc.features.split_off(at.min(s.doc.features.len()));
-                // New features take the old ids when nothing after the run has taken them, so later references survive.
-                if !tail.iter().any(|f| f.id >= first) && !s.doc.features.iter().any(|f| f.id >= first) { s.doc.next_id = first; }
+                s.doc.reuse_feature_ids(&previous);
+                s.doc.active_component = owner;
                 s.doc.rollback = None;
                 s.rebuild();
-                (at, first, tail, s)
+                (at, owner, tail, s)
             }
             None => {
                 let s = self.session.fork();
                 let at = s.doc.active();
-                (at, s.doc.next_id, Vec::new(), s)
+                (at, s.doc.active_component, Vec::new(), s)
             }
         };
         let mut req = Request::new(dlg.source.clone());
@@ -234,7 +242,7 @@ impl App {
             let _ = dtx.send(result);
             ctx.request_repaint();
         }).ok();
-        self.scripts.running = Some(Running { name: dlg.name.clone(), events: erx, done: drx, cancel, progress: 0.0, message: "starting".into(), log: Vec::new(), started: std::time::Instant::now(), rerun: dlg.rerun, insert_at, first_id, tail, script_name: dlg.name, source: dlg.source, inputs });
+        self.scripts.running = Some(Running { name: dlg.name.clone(), events: erx, done: drx, cancel, progress: 0.0, message: "starting".into(), log: Vec::new(), started: std::time::Instant::now(), rerun: dlg.rerun, insert_at, owner, base_doc, base_path, base_rev, tail, script_name: dlg.name, source: dlg.source, inputs });
         self.dialog = Dialog::None;
     }
 
@@ -247,13 +255,21 @@ impl App {
                 Event::Progress(f, m) => { run.progress = f as f32; if !m.is_empty() { run.message = m; } }
             }
         }
-        let Ok(result) = run.done.try_recv() else { self.ctx.request_repaint_after(std::time::Duration::from_millis(100)); return };
+        let result = match run.done.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => { self.ctx.request_repaint_after(std::time::Duration::from_millis(100)); return; }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the script worker stopped unexpectedly; the document was left unchanged".into()),
+        };
         let run = self.scripts.running.take().unwrap();
         self.scripts.log.extend(run.log.iter().cloned());
         match result {
             Ok((worked, outcome)) => {
                 self.scripts.log.extend(outcome.log.iter().cloned());
                 if outcome.cancelled { self.toast(format!("{} cancelled.", run.name)); return; }
+                if self.session.rev != run.base_rev || self.session.path != run.base_path || self.doc() != &run.base_doc {
+                    self.toast(format!("{} finished, but the document changed while it ran. Its modeling changes were not applied; run it again to use the current document.", run.name));
+                    return;
+                }
                 let made: Vec<Id> = outcome.features.clone();
                 let script_name = run.script_name.clone();
                 let (source, inputs) = (run.source.clone(), run.inputs.clone());
@@ -262,17 +278,19 @@ impl App {
                 let tail = run.tail.clone();
                 let r = self.session.edit(|d| {
                     *d = new_doc;
+                    d.finish_feature_id_reuse();
                     d.rollback = None;
                     for f in &tail { d.next_id = d.next_id.max(f.id + 1); }
                     d.features.extend(tail.iter().cloned());
                     if made.is_empty() { return Ok(()); }
                     // The chip goes where the run started; what it made points back at it.
-                    let chip = d.next_id;
-                    d.next_id += 1;
+                    let chip = run.rerun.unwrap_or(d.next_id);
+                    d.next_id = d.next_id.max(chip + 1);
                     let hash = crc32fast::hash(source.as_bytes());
                     let at = d.features.iter().position(|f| made.contains(&f.id)).unwrap_or(insert_at.min(d.features.len()));
-                    d.features.insert(at, fr_core::Feature { id: chip, name: script_name.clone(), suppressed: false, owner: d.active_component, made_by: None, kind: FeatureKind::ScriptRun(fr_core::doc::ScriptRun { script_name: script_name.clone(), source: source.clone(), source_hash: hash, inputs: inputs.clone() }) });
+                    d.features.insert(at, fr_core::Feature { id: chip, name: script_name.clone(), suppressed: false, owner: run.owner, made_by: None, kind: FeatureKind::ScriptRun(fr_core::doc::ScriptRun { script_name: script_name.clone(), source: source.clone(), source_hash: hash, inputs: inputs.clone() }) });
                     for f in &mut d.features { if made.contains(&f.id) { f.made_by = Some(chip); } }
+                    fr_core::validation::document(d)?;
                     Ok(())
                 });
                 match r {
@@ -303,6 +321,7 @@ impl App {
         self.scripts_loaded();
         let current = self.scripts.entries.iter().find(|e| !e.sample && e.meta.as_ref().is_ok_and(|m| m.name == meta.name)).cloned();
         let (source, dir) = match current { Some(e) => (e.source.clone(), e.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()))), None => (r.source.clone(), None) };
+        let meta = match fr_core::script::meta(&source) { Ok(m) => m, Err(e) => { self.toast(e); return; } };
         self.open_script_dialog(&meta, &source, dir, &r.inputs, Some(chip));
         if !edit_inputs && let Dialog::Script(d) = self.dialog.clone() {
             self.start_script(d);
@@ -312,6 +331,9 @@ impl App {
     /// Turns the chip's features into ordinary ones and removes the chip.
     pub fn detach_script(&mut self, chip: Id) {
         let _ = self.session.edit(|d| {
+            if let Some(at) = d.rollback {
+                d.rollback = Some(at - d.features.iter().take(at).filter(|f| f.id == chip).count());
+            }
             d.features.retain(|f| f.id != chip);
             for f in &mut d.features { if f.made_by == Some(chip) { f.made_by = None; } }
             Ok(())
@@ -322,8 +344,7 @@ impl App {
     /// Deletes the chip and everything it made.
     pub fn delete_script_run(&mut self, chip: Id) {
         let _ = self.session.edit(|d| {
-            d.features.retain(|f| f.id != chip && f.made_by != Some(chip));
-            if let Some(r) = d.rollback { d.rollback = Some(r.min(d.features.len())); }
+            d.delete_feature(chip)?;
             Ok(())
         });
         self.refresh();

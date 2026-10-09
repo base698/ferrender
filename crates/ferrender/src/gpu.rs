@@ -104,7 +104,7 @@ fn vs_show(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
     return vec4f(f32(i32(i & 1u) * 4 - 1), f32(i32(i >> 1u) * 4 - 1), 0.0, 1.0);
 }
 
-fn differ(pa: vec4f, ia: vec3f, at: vec2i, size: vec2i) -> bool {
+fn differ(pa: vec4f, ia: vec3f, source_pixel: vec2i, at: vec2i, size: vec2i) -> bool {
     if (at.x < 0 || at.y < 0 || at.x >= size.x || at.y >= size.y) {
         return false;
     }
@@ -121,7 +121,20 @@ fn differ(pa: vec4f, ia: vec3f, at: vec2i, size: vec2i) -> bool {
         return ia.z != ib.z;
     }
     let d = dot(pa.xyz, pb.xyz);
-    return d < 0.94 || (d > 0.9999 && abs(pa.w - pb.w) > 0.02);
+    if (d < 0.94) { return true; }
+    if (d <= 0.9999) { return false; }
+    // Plane offsets alone are comparable only for identical normals. At a
+    // shared screen sample, smooth adjacent facets agree regardless of where
+    // the model sits relative to the world origin.
+    let ndc = (vec2f(source_pixel + at) + vec2f(1.0)) / vec2f(size) - vec2f(1.0);
+    let origin = u.right.xyz * ((ndc.x - u.right.w) / dot(u.right.xyz, u.right.xyz))
+               + u.up.xyz * ((-ndc.y - u.up.w) / dot(u.up.xyz, u.up.xyz));
+    let along = dot(pa.xyz, u.eye.xyz);
+    if (abs(along) < 0.000001) { return false; }
+    let point = origin + u.eye.xyz * ((pa.w - dot(pa.xyz, origin)) / along);
+    let pixel_mm = max(2.0 / (length(u.right.xyz) * f32(size.x)), 2.0 / (length(u.up.xyz) * f32(size.y)));
+    let tolerance = 0.02 + 2.0 * pixel_mm * sqrt(max(0.0, 2.0 * (1.0 - d)));
+    return abs(dot(pb.xyz, point) - pb.w) > tolerance;
 }
 
 @fragment
@@ -134,9 +147,9 @@ fn fs_show(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let plane = textureLoad(t_plane, at, 0);
     let both = textureLoad(t_id, at, 0).xyz;
     let id = both.x;
-    var edge = differ(plane, both, at + vec2i(1, 0), size) || differ(plane, both, at + vec2i(0, 1), size);
+    var edge = differ(plane, both, at, at + vec2i(1, 0), size) || differ(plane, both, at, at + vec2i(0, 1), size);
     if (u.misc.w > 1.5) {
-        edge = edge || differ(plane, both, at - vec2i(1, 0), size) || differ(plane, both, at - vec2i(0, 1), size);
+        edge = edge || differ(plane, both, at, at - vec2i(1, 0), size) || differ(plane, both, at, at - vec2i(0, 1), size);
     }
     if (id == 0.0 && !edge) {
         discard;
@@ -228,6 +241,7 @@ pub struct Gpu {
     targets: Option<Targets>,
     verts: Option<(wgpu::Buffer, u32)>,
     bigs: Vec<BigBuffers>,
+    big_source: Option<Arc<Vec<BigMesh>>>,
     rev: u64,
 }
 
@@ -335,7 +349,7 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
-        Gpu { geom, big, show, show_layout, uniforms, geom_bind, targets: None, verts: None, bigs: Vec::new(), rev: 0 }
+        Gpu { geom, big, show, show_layout, uniforms, geom_bind, targets: None, verts: None, bigs: Vec::new(), big_source: None, rev: 0 }
     }
 
     fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) {
@@ -467,12 +481,18 @@ impl egui_wgpu::CallbackTrait for Frame {
                 let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("ferrender bodies"), contents: &bytes(&self.verts), usage: wgpu::BufferUsages::VERTEX });
                 (buf, (self.verts.len() / STRIDE) as u32)
             });
+        }
+        // Selecting a face updates the small per-face vertices, but the large
+        // indexed buffers remain identical. Upload those only when their shared
+        // source actually changes, not on every overall scene revision.
+        if gpu.big_source.as_ref().is_none_or(|source| !Arc::ptr_eq(source, &self.big)) {
             let upload = |verts: &[f32], indices: &[u32]| {
                 let v = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("ferrender big mesh"), contents: &bytes(verts), usage: wgpu::BufferUsages::VERTEX });
                 let i = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("ferrender big mesh indices"), contents: &index_bytes(indices), usage: wgpu::BufferUsages::INDEX });
                 (v, i, indices.len() as u32)
             };
             gpu.bigs = self.big.iter().map(|m| BigBuffers { full: upload(&m.verts, &m.indices), coarse: m.coarse.as_ref().map(|(v, i)| upload(v, i)) }).collect();
+            gpu.big_source = Some(self.big.clone());
         }
         queue.write_buffer(&gpu.uniforms, 0, &bytes(&self.uniforms()));
         let t = gpu.targets.as_ref().unwrap();

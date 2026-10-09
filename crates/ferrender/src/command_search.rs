@@ -66,7 +66,7 @@ pub fn commands(app: &App) -> Vec<Command> {
     add("Redo",Action::Redo,"","Redo the last undone change.","edit history",(!app.session.can_redo()).then_some("There is nothing to redo."));
     add("New Sketch",Action::NewSketch,"","Draw on a plane or flat face.","create sketch drawing",None);
     add("Text / Emboss",Action::Text,"",if sketch.is_some(){"Creates solid lettering; finishes the current sketch."}else{"Create solid lettering, or emboss or engrave a flat face."},"text font lettering letters emboss engrave label",None);
-    let profiles=app.doc().sketches().any(|(f,s)|!f.suppressed && app.session.built.sketch_plane(app.doc(),f.id).is_some() && !fr_core::profile::profiles(s).is_empty());
+    let profiles=app.doc().sketches().any(|(f,s)|!app.doc().is_suppressed(f.id) && app.session.built.sketch_plane(app.doc(),f.id).is_some() && !fr_core::profile::profiles(s).is_empty());
     add("Extrude",Action::Extrude,"E","Pull a closed profile or flat face into a solid.","model extrude pad pocket",(!(profiles || app.sel_face.as_ref().is_some_and(|f|f.plane.is_some()))).then_some("Draw a closed profile or select a flat face first."));
     add("Revolve",Action::Revolve,"","Turn a closed profile around an axis.","model revolve lathe",(!profiles).then_some("Draw a closed profile first."));
     if let Some((_,sk))=sketch {
@@ -117,7 +117,7 @@ pub fn commands(app: &App) -> Vec<Command> {
         add("Join Bodies",Action::JoinBodies,"","Join selected bodies into one.","model join union combine",two);
         add("Combine",Action::Combine,"","Join, cut or intersect selected bodies.","model boolean combine cut subtract intersect",two);
         let chosen=app.sel_feature.or(app.sel_body);
-        let source=app.doc().features.iter().take(app.doc().active()).any(|f|!f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner)
+        let source=app.doc().features.iter().take(app.doc().active()).any(|f|!app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner)
             && (Some(f.id)==chosen || f.owner==app.doc().active_component)
             && (matches!(f.kind,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)) || matches!(&f.kind,FeatureKind::Text(t) if t.op==Op::New)));
         add("Pattern / Mirror",Action::Pattern,"","Repeat a source in a line, grid, circle or mirror.","model pattern array mirror circular linear grid",(!source).then_some("Create a repeatable solid feature first."));

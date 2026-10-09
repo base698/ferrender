@@ -232,7 +232,8 @@ pub fn draw_bodies<'a>(img: &mut Image, bodies: impl IntoIterator<Item = &'a Bod
         }
     }
     // Two faces meet at a visible edge when they turn sharply, step apart or belong to different bodies.
-    let differ = |a: u32, b: u32| {
+    let (eye, right, up) = cam.basis();
+    let differ = |a: u32, b: u32, pixel: DVec2| {
         if a == b {
             return false;
         }
@@ -248,12 +249,24 @@ pub fn draw_bodies<'a>(img: &mut Image, bodies: impl IntoIterator<Item = &'a Bod
             return ga != gb;
         }
         let dot = fa.0.dot(fb.0);
-        dot < 0.94 || (dot > 0.9999 && (fa.1 - fb.1).abs() > 0.02)
+        if dot < 0.94 { return true; }
+        if dot <= 0.9999 { return false; }
+        // Compare at the shared screen sample. Subtracting offsets from world
+        // zero creates false edges on translated smooth surfaces whose normals
+        // are similar but not identical. Keep genuine parallel depth steps.
+        let screen = pixel - half;
+        let origin = cam.target + (right * screen.x - up * screen.y) / cam.scale;
+        let along = fa.0.dot(eye);
+        if along.abs() < 1e-6 { return false; }
+        let point = origin + eye * ((fa.1 - fa.0.dot(origin)) / along);
+        let tolerance = 0.02 + 2.0 * (2.0 * (1.0 - dot)).max(0.0).sqrt() / cam.scale;
+        (fb.0.dot(point) - fb.1).abs() > tolerance
     };
     for y in 0..h {
         for x in 0..w {
             let i = y * w + x;
-            let edge = (x + 1 < w && differ(face[i], face[i + 1])) || (y + 1 < h && differ(face[i], face[i + w]));
+            let edge = (x + 1 < w && differ(face[i], face[i + 1], DVec2::new(x as f64 + 1.0, y as f64 + 0.5)))
+                || (y + 1 < h && differ(face[i], face[i + w], DVec2::new(x as f64 + 0.5, y as f64 + 1.0)));
             if face[i] != u32::MAX {
                 let f = faces[face[i] as usize];
                 let base = if selected == Some(f.2) { BODY_SELECTED } else { BODY };

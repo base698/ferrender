@@ -23,6 +23,7 @@
 //! Files are reachable only inside the script's folder, the document's folder
 //! and any folders the caller allows.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,6 +44,8 @@ pub const MAX_STRING: usize = 1024 * 1024;
 pub const MAX_ARRAY: usize = 1_000_000;
 pub const MAX_MAP: usize = 100_000;
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_EVENTS: usize = 10_000;
 
 /// The bundled sample scripts: name and source.
 pub const SAMPLES: &[(&str, &str)] = &[
@@ -149,6 +152,13 @@ fn engine_with_limits() -> Engine {
     engine.set_max_map_size(MAX_MAP);
     engine.set_max_expr_depths(64, 64);
     engine.disable_symbol("eval");
+    // Engine::new installs a filesystem module resolver. Imports must not bypass
+    // the host file sandbox, including while the Scripts menu reads META.
+    engine.disable_symbol("import");
+    engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
+    // Metadata inspection must not write into the MCP JSON-RPC stdout stream.
+    engine.on_print(|_| {});
+    engine.on_debug(|_, _, _| {});
     engine
 }
 
@@ -178,12 +188,34 @@ fn allowed(sandbox: &Sandbox, path: &Path, for_write: bool) -> R<PathBuf> {
         _ => return Err(format!("{} is not a file path", path.display())),
     };
     let dir = dir.canonicalize().map_err(|_| format!("the folder of {} does not exist", path.display()))?;
-    let full = dir.join(name);
+    let unresolved = dir.join(name);
+    let full = match std::fs::symlink_metadata(&unresolved) {
+        Ok(_) => unresolved.canonicalize().map_err(|_| format!("could not resolve {}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => unresolved,
+        Err(e) => return Err(format!("could not inspect {}: {e}", path.display())),
+    };
     let inside = sandbox.allowed.iter().filter_map(|a| a.canonicalize().ok()).any(|a| full.starts_with(&a));
     if !inside {
         return Err(format!("the script may not {} {}: it is outside the allowed folders ({})", if for_write { "write" } else { "read" }, full.display(), sandbox.allowed.iter().map(|a| a.display().to_string()).collect::<Vec<_>>().join(", ")));
     }
     Ok(full)
+}
+
+/// Bounded source loading shared by the app, CLI and API. In particular, reject
+/// devices and pipes before opening them so inspecting script metadata cannot hang.
+pub fn read_source(path: &Path) -> R<String> {
+    read_text_bounded(path, MAX_SOURCE_BYTES)
+}
+
+fn read_text_bounded(path: &Path, max: usize) -> R<String> {
+    let metadata = std::fs::metadata(path).map_err(|e| format!("could not inspect {}: {e}", path.display()))?;
+    if !metadata.is_file() { return Err(format!("{} is not a regular file", path.display())); }
+    if metadata.len() > max as u64 { return Err(format!("{} exceeds the {} byte limit", path.display(), max)); }
+    let mut text = String::new();
+    std::fs::File::open(path).and_then(|f| f.take(max as u64 + 1).read_to_string(&mut text))
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    if text.len() > max { return Err(format!("{} exceeds the {} byte limit", path.display(), max)); }
+    Ok(text)
 }
 
 fn to_value(d: &Dynamic) -> Fallible {
@@ -201,8 +233,13 @@ fn dynamic_to_json(d: &Dynamic) -> Result<Value, Box<EvalAltResult>> {
 /// Runs a script against the session. The session is edited in place: the
 /// caller decides what the run counts as (one undo step in the app).
 pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
+    if session.read_only { return Err("this newer design is read-only; scripts cannot run against it".into()); }
     if req.source.len() > MAX_SOURCE_BYTES { return Err("the script is larger than 1 MB".into()); }
     let meta = meta(&req.source)?;
+    // Validate before moving the session into the host callbacks: an invalid
+    // input must never replace the caller's document with Session::default().
+    let inputs = resolve_inputs(&meta, &req.inputs, session)?;
+    let inputs_dynamic = rhai::serde::to_dynamic(&inputs).map_err(|e| e.to_string())?;
     let before: Vec<Id> = session.doc.features.iter().map(|f| f.id).collect();
     let mut engine = engine_with_limits();
     let ast = engine.compile(&req.source).map_err(|e| format!("the script does not parse: {e}"))?;
@@ -213,6 +250,7 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     let script_dir = req.script_dir.clone();
     let document_dir = shared.lock().unwrap().path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
     let events = req.events.clone();
+    let event_budget = Arc::new(Mutex::new((0usize, 0usize)));
     let cancel = req.cancel.clone();
     let asker = req.ask.clone();
     let selection = req.selection.clone();
@@ -240,10 +278,10 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     }
     {
         let (shared, outcome, sandbox) = (shared.clone(), outcome.clone(), sandbox.clone());
-        engine.register_fn("run", move |cmd: Map| -> Fallible {
-            let op = cmd.get("op").and_then(|o| o.clone().into_string().ok()).ok_or_else(|| runtime("run(map) needs an \"op\""))?;
+        engine.register_fn("command", move |cmd: Map| -> Fallible {
+            let op = cmd.get("op").and_then(|o| o.clone().into_string().ok()).ok_or_else(|| runtime("command(map) needs an \"op\""))?;
             if op == "batch" { return Err(runtime("run a script's commands one at a time, not as a batch")); }
-            command(&shared, &outcome, &sandbox, Box::leak(op.into_boxed_str()), cmd)
+            command(&shared, &outcome, &sandbox, &op, cmd)
         });
     }
     // Reading helpers.
@@ -304,9 +342,7 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
         let sandbox = sandbox.clone();
         engine.register_fn("read_text", move |path: String| -> Fallible {
             let full = allowed(&sandbox, Path::new(&path), false).map_err(runtime)?;
-            let meta = std::fs::metadata(&full).map_err(|e| runtime(format!("could not read {}: {e}", full.display())))?;
-            if meta.len() > MAX_FILE_BYTES as u64 { return Err(runtime("the file is larger than 16 MiB")); }
-            std::fs::read_to_string(&full).map(Dynamic::from).map_err(|e| runtime(format!("could not read {}: {e}", full.display())))
+            read_text_bounded(&full, MAX_FILE_BYTES).map(Dynamic::from).map_err(runtime)
         });
     }
     {
@@ -322,8 +358,7 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
         let sandbox = sandbox.clone();
         engine.register_fn("read_csv", move |path: String| -> Fallible {
             let full = allowed(&sandbox, Path::new(&path), false).map_err(runtime)?;
-            let text = std::fs::read_to_string(&full).map_err(|e| runtime(format!("could not read {}: {e}", full.display())))?;
-            if text.len() > MAX_FILE_BYTES { return Err(runtime("the file is larger than 16 MiB")); }
+            let text = read_text_bounded(&full, MAX_FILE_BYTES).map_err(runtime)?;
             let rows: Vec<Value> = text.lines().filter(|l| !l.trim().is_empty()).map(|l| Value::Array(csv_fields(l).into_iter().map(Value::String).collect())).collect();
             json_to_dynamic(&Value::Array(rows))
         });
@@ -337,6 +372,7 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
                 let cells: Vec<String> = row.into_array().map_err(|_| runtime("write_csv takes an array of rows, each an array of cells"))?.into_iter().map(|c| csv_quote(&c.to_string())).collect();
                 text.push_str(&cells.join(","));
                 text.push('\n');
+                if text.len() > MAX_FILE_BYTES { return Err(runtime("the CSV exceeds 16 MiB")); }
             }
             std::fs::write(&full, text).map_err(|e| runtime(format!("could not write {}: {e}", full.display())))?;
             outcome.lock().unwrap().exports.push(full);
@@ -382,18 +418,18 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     }
     // Flow.
     {
-        let (outcome, events) = (outcome.clone(), events.clone());
-        engine.register_fn("log", move |msg: Dynamic| {
-            let text = msg.to_string();
-            if let Some(e) = &events { let _ = e.send(Event::Log(text.clone())); }
-            let mut o = outcome.lock().unwrap();
-            if o.log.len() < 10_000 { o.log.push(text); }
-        });
+        let (outcome, events, budget) = (outcome.clone(), events.clone(), event_budget.clone());
+        let log = move |text: String| report_event(&outcome, &events, &budget, Event::Log(text));
+        let print = log.clone();
+        engine.on_print(move |text| print(text.to_owned()));
+        let debug = log.clone();
+        engine.on_debug(move |text, _, _| debug(text.to_owned()));
+        engine.register_fn("log", move |msg: Dynamic| log(msg.to_string()));
     }
     {
-        let (events, cancel) = (events.clone(), cancel.clone());
+        let (outcome, events, cancel, budget) = (outcome.clone(), events.clone(), cancel.clone(), event_budget.clone());
         let report = move |fraction: f64, msg: String| -> Fallible {
-            if let Some(e) = &events { let _ = e.send(Event::Progress(fraction.clamp(0.0, 1.0), msg)); }
+            report_event(&outcome, &events, &budget, Event::Progress(fraction.clamp(0.0, 1.0), msg));
             if cancel.load(Ordering::Relaxed) { return Err(runtime("cancelled")); }
             Ok(Dynamic::UNIT)
         };
@@ -422,11 +458,10 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
 
     // The inputs: declared defaults filled in, lengths and angles as numbers in millimetres and degrees,
     // with the typed expressions beside them in `inputs.expr`.
-    let inputs = resolve_inputs(&meta, &req.inputs, &shared.lock().unwrap())?;
-    let inputs_dynamic = rhai::serde::to_dynamic(&inputs).map_err(|e| e.to_string())?;
     let mut scope = Scope::new();
-    engine.run_ast_with_scope(&mut scope, &ast).map_err(|e| format!("the script's top level failed: {e}"))?;
-    let result = engine.call_fn::<Dynamic>(&mut scope, &ast, "run", (inputs_dynamic,));
+    // Restore ownership on every evaluation result, including a failed top level.
+    let result = engine.run_ast_with_scope(&mut scope, &ast)
+        .and_then(|_| engine.call_fn::<Dynamic>(&mut scope, &ast, "run", (inputs_dynamic,)));
     drop(engine);
     let mut out = Arc::try_unwrap(outcome).map(|m| m.into_inner().unwrap()).unwrap_or_default();
     *session = Arc::try_unwrap(shared).map(|m| m.into_inner().unwrap()).map_err(|_| "the script engine kept a handle on the session")?;
@@ -439,20 +474,42 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     Ok(out)
 }
 
+/// Both the retained log and an unconsumed UI event queue have a shared budget.
+/// Exceeding it drops further reporting, without preventing cancellation or work.
+fn report_event(outcome: &Arc<Mutex<Outcome>>, events: &Option<std::sync::mpsc::Sender<Event>>, budget: &Arc<Mutex<(usize, usize)>>, event: Event) {
+    let bytes = match &event { Event::Log(s) | Event::Progress(_, s) => s.len() };
+    let mut budget = budget.lock().unwrap();
+    if budget.0 >= MAX_EVENTS || bytes > MAX_EVENT_BYTES.saturating_sub(budget.1) { return; }
+    budget.0 += 1;
+    budget.1 += bytes;
+    if let Event::Log(text) = &event { outcome.lock().unwrap().log.push(text.clone()); }
+    if let Some(events) = events { let _ = events.send(event); }
+}
+
 /// The host function name of a command: the command's name unless Rhai reserves it.
-pub fn script_name(op: &str) -> &'static str {
+pub fn script_name(op: &str) -> &str {
     match op {
         "new" => "new_design",
         "thread" => "add_thread",
-        other => Box::leak(other.to_owned().into_boxed_str()),
+        other => other,
     }
 }
 
 /// Runs one command for a script, checking paths against the sandbox and noting exports.
 fn command(shared: &Arc<Mutex<Session>>, outcome: &Arc<Mutex<Outcome>>, sandbox: &Sandbox, op: &str, args: Map) -> Fallible {
+    // The generic command(map) entry point must have exactly the same privileges as
+    // named host functions; nested scripts could otherwise supply a wider allow list.
+    if matches!(op, "run_script" | "script_meta" | "batch") {
+        return Err(runtime(format!("{op} cannot be called from a script")));
+    }
     let mut cmd = dynamic_to_json(&Dynamic::from(args))?;
     if !cmd.is_object() { cmd = json!({}); }
     cmd["op"] = json!(op);
+    if op == "save" && cmd.get("path").and_then(Value::as_str).is_none() {
+        if let Some(path) = shared.lock().unwrap().path.as_ref() {
+            cmd["path"] = json!(path.display().to_string());
+        }
+    }
     let path = cmd.get("path").and_then(Value::as_str).map(str::to_owned);
     let writes = matches!(op, "save" | "export_stl" | "export_step" | "get_viewport_screenshot");
     if let Some(p) = &path && matches!(op, "save" | "export_stl" | "export_step" | "import_stl" | "import_mesh" | "mesh_from_image" | "open") {
@@ -523,40 +580,119 @@ fn csv_quote(s: &str) -> String {
     if s.contains([',', '"', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_owned() }
 }
 
-/// A script that rebuilds the document: every parameter becomes an input and
-/// every feature a command, so the on-ramp to a generator is a saved design.
+/// A script that rebuilds the document: every parameter becomes an expression
+/// input and every feature a command. Unsupported replay states are refused
+/// before the caller writes a script that cannot reproduce the saved design.
 pub fn export_timeline(session: &Session) -> R<String> {
     let doc = &session.doc;
+    if session.read_only { return Err("a read-only cached design has no editable timeline to export".into()); }
+    if doc.rollback.is_some() { return Err("move the timeline marker to the end before exporting it as a script".into()); }
+    if !session.built.errors.is_empty() { return Err("fix or suppress failed timeline features before exporting a script".into()); }
+    if doc.hidden_bodies.iter().any(|id| session.built.body(*id).is_none()) {
+        return Err("the timeline has hidden bodies that are currently suppressed or removed; show those bodies before exporting a script".into());
+    }
+    crate::validation::document(doc)?;
     let mut out = String::new();
-    out.push_str("// Exported by Ferrender: rebuilds the document it was exported from.\n");
-    out.push_str("const META = #{\n    name: \"Exported design\",\n    description: \"Rebuilds the exported timeline; parameters are inputs.\",\n    inputs: [\n");
-    for p in &doc.params {
-        let kind = if p.expr.contains("deg") { "angle" } else { "length" };
-        out.push_str(&format!("        #{{ name: {:?}, kind: {:?}, initial: {:?} }},\n", p.name, kind, p.expr));
+    source_push(&mut out, "// Exported by Ferrender: rebuilds the complete document.\n// Parameter inputs are expressions, evaluated in this design's units.\n")?;
+    source_push(&mut out, "const META = #{\n    name: \"Exported design\",\n    description: \"Rebuilds the exported timeline; parameters accept expressions.\",\n    inputs: [\n")?;
+    // Text inputs retain dependencies, scalar values and radians. Typed script
+    // inputs would be evaluated before new_design, against the caller's document.
+    // `expr` is reserved by resolve_inputs for its per-input expression map.
+    let names: Vec<_> = doc.params.iter().map(|p| {
+        let mut name = p.name.clone();
+        if name == "expr" {
+            name = "parameter_expr".into();
+            while doc.params.iter().any(|p| p.name == name) { name.push('_'); }
+        }
+        name
+    }).collect();
+    for (p, name) in doc.params.iter().zip(&names) {
+        source_push(&mut out, &format!("        #{{ name: {name:?}, label: {:?}, kind: \"text\", initial: {:?}, help: \"A parameter expression in the exported design's units.\" }},\n", p.name, p.expr))?;
     }
-    out.push_str("    ],\n};\n\nfn run(inputs) {\n");
-    out.push_str(&format!("    new_design(#{{ units: {:?} }});\n", doc.units.name()));
+    source_push(&mut out, "    ],\n};\n\nfn run(inputs) {\n")?;
+    source_push(&mut out, &format!("    new_design(#{{ units: {:?} }});\n", doc.units.name()))?;
+    // Seed every name before installing its expression: valid saved parameter
+    // tables may contain forward references. Seeds preserve each original unit.
     for p in &doc.params {
-        out.push_str(&format!("    set_parameter(#{{ name: {:?}, expr: inputs.expr.{} }});\n", p.name, p.name));
+        let q = doc.quantity(&format!("${}", p.name))?;
+        let suffix = match q.dim { crate::expr::Dim::None => "", crate::expr::Dim::Length => " mm", crate::expr::Dim::Angle => " deg" };
+        source_push(&mut out, &format!("    set_parameter(#{{ name: {:?}, expr: {:?} }});\n", p.name, format!("{}{suffix}", q.v)))?;
     }
-    // Features go in as their JSON, through edit_feature-free replay: each feature is added as it was saved.
+    for (p, name) in doc.params.iter().zip(&names) {
+        source_push(&mut out, &format!("    set_parameter(#{{ name: {:?}, expr: inputs[{name:?}] }});\n", p.name))?;
+    }
     for f in &doc.features {
-        let v = serde_json::to_value(f).map_err(|e| e.to_string())?;
-        out.push_str(&format!("    add_feature(#{{ feature: {} }});\n", rhai_literal(&v)));
+        // Inline mesh serialization expands to 48 bytes per triangle and itself
+        // allocates a temporary buffer. Reject large meshes before invoking it.
+        if let crate::FeatureKind::Import(mesh) = &f.kind
+            && mesh.len() > MAX_SOURCE_BYTES.saturating_sub(out.len()) / 48 {
+            return Err("the embedded mesh exceeds the script's 1 MB limit; save a .ferr design or write a script that imports the mesh file instead".into());
+        }
+        let mut bytes = LimitedJson { bytes: Vec::new(), limit: MAX_SOURCE_BYTES.saturating_sub(out.len()) };
+        serde_json::to_writer(&mut bytes, f).map_err(|e| format!("cannot export feature {}: {e}", f.name))?;
+        let value: Value = serde_json::from_slice(&bytes.bytes).map_err(|e| e.to_string())?;
+        source_push(&mut out, "    add_feature(#{ feature: ")?;
+        rhai_literal(&value, &mut out)?;
+        source_push(&mut out, " });\n")?;
     }
-    out.push_str("}\n");
+    for id in &doc.hidden_bodies {
+        source_push(&mut out, &format!("    set_visible(#{{ id: {id}, visible: false }});\n"))?;
+    }
+    if doc.active_component != 0 {
+        source_push(&mut out, &format!("    activate_component(#{{ id: {} }});\n", doc.active_component))?;
+    }
+    source_push(&mut out, "}\n")?;
+    // Rhai has narrower literal/depth limits than JSON (for example u64 inputs).
+    // Refuse those cases here, rather than saving a script the user cannot run.
+    meta(&out).map_err(|e| format!("this timeline cannot be represented as a runnable script: {e}"))?;
     Ok(out)
 }
 
-/// A JSON value as Rhai source.
-fn rhai_literal(v: &Value) -> String {
+fn source_push(out: &mut String, text: &str) -> R<()> {
+    if text.len() > MAX_SOURCE_BYTES.saturating_sub(out.len()) {
+        return Err("the exported script exceeds the 1 MB limit; save a .ferr design or reduce embedded mesh/image data".into());
+    }
+    out.push_str(text);
+    Ok(())
+}
+
+struct LimitedJson { bytes: Vec<u8>, limit: usize }
+impl std::io::Write for LimitedJson {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("the exported script exceeds the 1 MB limit; save a .ferr design or reduce embedded mesh/image data"));
+        }
+        self.bytes.extend_from_slice(bytes); Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+/// A bounded JSON value as Rhai source. Strings remain data, including script
+/// sources held by existing ScriptRun features; they are never evaluated here.
+fn rhai_literal(v: &Value, out: &mut String) -> R<()> {
     match v {
-        Value::Null => "()".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("{s:?}"),
-        Value::Array(a) => format!("[{}]", a.iter().map(rhai_literal).collect::<Vec<_>>().join(", ")),
-        Value::Object(o) => format!("#{{{}}}", o.iter().map(|(k, v)| format!("{k:?}: {}", rhai_literal(v))).collect::<Vec<_>>().join(", ")),
+        Value::Null => source_push(out, "()"),
+        Value::Bool(b) => source_push(out, &b.to_string()),
+        Value::Number(n) => {
+            if n.as_u64().is_some_and(|v| v > i64::MAX as u64) {
+                return Err("this timeline cannot be represented as a runnable script: an integer exceeds Rhai's signed 64-bit range".into());
+            }
+            source_push(out, &n.to_string())
+        },
+        Value::String(s) => source_push(out, &format!("{s:?}")),
+        Value::Array(a) => {
+            source_push(out, "[")?;
+            for (i, v) in a.iter().enumerate() { if i > 0 { source_push(out, ", ")?; } rhai_literal(v, out)?; }
+            source_push(out, "]")
+        }
+        Value::Object(o) => {
+            source_push(out, "#{")?;
+            for (i, (k, v)) in o.iter().enumerate() {
+                if i > 0 { source_push(out, ", ")?; }
+                source_push(out, &format!("{k:?}: "))?; rhai_literal(v, out)?;
+            }
+            source_push(out, "}")
+        }
     }
 }
 
@@ -564,3 +700,18 @@ fn rhai_literal(v: &Value) -> String {
 fn _keep(_: &dyn Fn(&Dynamic) -> Fallible) {}
 #[allow(dead_code)]
 fn _keep2() { let _ = to_value; }
+
+#[cfg(test)]
+mod sandbox_tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_commands_cannot_expand_script_authority() {
+        let shared = Arc::new(Mutex::new(Session::default()));
+        let outcome = Arc::new(Mutex::new(Outcome::default()));
+        for op in ["run_script", "script_meta", "batch"] {
+            let err = command(&shared, &outcome, &Sandbox::default(), op, Map::new()).unwrap_err();
+            assert!(err.to_string().contains("cannot be called from a script"));
+        }
+    }
+}
