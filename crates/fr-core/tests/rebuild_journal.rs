@@ -161,6 +161,31 @@ fn fillet_all_resolves_edges_that_share_a_tag() {
 }
 
 #[test]
+fn a_shell_opens_a_face_whose_edge_was_filleted() {
+    // The kernel's thick solid keeps a face next to a fillet and seals an offset of it
+    // underneath, which looked like a shell that did nothing: the cap stayed on the bottle.
+    let mut s = Session::default();
+    let rod = made(&run(&mut s, json!({"op": "primitive", "type": "cylinder", "diameter": 20, "height": 30})));
+    run(&mut s, json!({"op": "fillet_edges", "body": rod, "edges": [[10, 0, 30]], "radius": 3}));
+    let solid = s.built.body(rod).unwrap().solids[0].volume();
+    run(&mut s, json!({"op": "shell", "body": rod, "open_faces": [[0, 0, 30]], "thickness": 2}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    let hollow = s.built.body(rod).unwrap().solids[0].volume();
+    assert!(hollow < solid * 0.6, "hollowed: {hollow} of {solid}");
+    let down = s.built.body(rod).unwrap().mesh.ray(DVec3::new(0.0, 0.0, 40.0), -DVec3::Z);
+    let faces = run(&mut s, json!({"op": "get_object_info", "id": rod}))["topology"]["faces"].as_array().unwrap().clone();
+    let cap = std::f64::consts::PI * 7.0 * 7.0;
+    let top_planes: Vec<f64> = faces.iter().filter(|f| f["shape"] == "plane" && (f["point"][2].as_f64().unwrap() - 30.0).abs() < 1e-6).map(|f| f["area"].as_f64().unwrap()).collect();
+    assert!(top_planes.iter().all(|a| (a - cap).abs() > 1.0), "the picked face is gone or shrunk to a rim: {top_planes:?}");
+    assert!(!faces.iter().any(|f| f["area"].as_f64().unwrap() < 0.0), "no inverted inner cap: {faces:?}");
+    // A ray down the axis from above passes straight into the cavity.
+    // From 10 mm above, a closed top is hit after 10 mm; the cavity floor is 38 mm down.
+    assert!(down.is_some_and(|hit| hit.0 > 11.0), "nothing closes the top: {down:?}");
+    // The bottom is still closed, and a plain cylinder still shells through the kernel alone.
+    assert!(faces.iter().any(|f| f["shape"] == "plane" && f["point"][2].as_f64().unwrap().abs() < 1e-6 && (f["area"].as_f64().unwrap() - std::f64::consts::PI * 100.0).abs() < 1.0));
+}
+
+#[test]
 fn a_save_says_why_a_wanted_cache_was_not_written() {
     let mut s = Session::default();
     let rod = made(&run(&mut s, json!({"op": "primitive", "type": "cylinder", "diameter": 10, "height": 30})));

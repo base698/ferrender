@@ -873,6 +873,45 @@ pub fn blend(lumps: &[Solid], tags: &Tags, picks: &[EdgePick], size: f64, chamfe
     Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect(), points })
 }
 
+/// A point for a message, in millimetres.
+fn point_text(p: DVec3) -> String {
+    format!("({}, {}, {}) mm", crate::units::trim_num(p.x, 2), crate::units::trim_num(p.y, 2), crate::units::trim_num(p.z, 2))
+}
+
+/// Whether a face picked to be opened is still in the result, unchanged: same surface,
+/// same extent. A face that became an opening's rim keeps its surface but not its area.
+fn face_kept(made: &Solid, face: &Face) -> bool {
+    let (at, normal) = face.project(face.center());
+    let (at, normal) = (g(at), g(normal));
+    made.iter_face().any(|f| {
+        if kind_of(f) != kind_of(face) { return false; }
+        let (on, n) = f.project(c(at));
+        g(on).distance(at) < 1e-6 && g(n).dot(normal) > 1.0 - 1e-7 && (f.area() - face.area()).abs() <= 1e-6 * face.area().abs().max(1.0)
+    })
+}
+
+/// Opens flat faces of a shell the kernel could not: hollows the body into a sealed
+/// shell with an inner void, then cuts the cap over each face away with a prism of the
+/// face's outline, a little deeper than the wall so the void is reached.
+fn open_through_cap(lump: &Solid, thickness: f64, faces: &[&Face]) -> R<Solid> {
+    if let Some(f) = faces.iter().find(|f| kind_of(f) != Kind::Plane) {
+        let (at, _) = f.project(f.center());
+        return Err(format!("the face at {} meets a fillet or a tangent face and is not flat, so it cannot be opened; shell before filleting the edges around it, or choose a flat face", point_text(g(at))));
+    }
+    let mut made = lump.shell(-thickness, std::iter::empty()).map_err(|_| "the body cannot be hollowed to that wall thickness".to_owned())?;
+    for face in faces {
+        let (at, normal) = face.project(face.center());
+        let (at, normal) = (g(at), g(normal).normalize_or_zero());
+        if normal == DVec3::ZERO { return Err("the face to open has no normal".into()); }
+        let reach = thickness + 0.02;
+        let prism = Solid::extrude(face.iter_edge(), c(-normal * reach)).map_err(|e| format!("the kernel could not build the opening: {e}"))?.translate(c(normal * 0.01));
+        let cut = boolean(std::slice::from_ref(&made), std::slice::from_ref(&prism), Bool::Subtract)?;
+        made = cut.into_iter().max_by(|a, b| a.volume().total_cmp(&b.volume())).ok_or("the opening left nothing of the body")?;
+        let _ = at;
+    }
+    Ok(made)
+}
+
 /// Hollows the body to a wall of `thickness`, open at the picked faces.
 pub fn shell(lumps: &[Solid], tags: &Tags, picks: &[FacePick], thickness: f64, feature: Id) -> R<Blended<Tag>> {
     if thickness <= 0.0 {
@@ -894,10 +933,19 @@ pub fn shell(lumps: &[Solid], tags: &Tags, picks: &[FacePick], thickness: f64, f
             out.push(lump.clone());
             continue;
         }
-        let made = lump.shell(-thickness, faces).map_err(|_| "the body cannot be hollowed to that wall thickness".to_owned())?;
+        let mut made = lump.shell(-thickness, faces.iter().copied()).map_err(|_| "the body cannot be hollowed to that wall thickness".to_owned())?;
         // A shell that did not carve anything out is the kernel failing quietly.
         if !(made.volume() > 0.0) || made.volume() > lump.volume() * (1.0 - 1e-9) {
             return Err("the wall is too thick to leave a cavity".into());
+        }
+        // The kernel also fails quietly when an open face meets a fillet or another tangent
+        // face: it keeps the face and seals an offset of it underneath. Open it ourselves then.
+        if faces.iter().any(|f| face_kept(&made, f)) {
+            made = open_through_cap(lump, thickness, &faces)?;
+            if let Some(f) = faces.iter().find(|f| face_kept(&made, f)) {
+                let (at, _) = f.project(f.center());
+                return Err(format!("the face at {} could not be opened; shell before filleting the edges around it, or choose another face", point_text(g(at))));
+            }
         }
         out.push(made);
     }

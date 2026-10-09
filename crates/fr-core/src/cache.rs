@@ -25,8 +25,9 @@ use crate::tag::Level;
 pub const KERNEL: &str = "cadrum 0.8.20";
 /// Bump whenever Ferrender changes feature evaluation or mesh geometry. Kernel
 /// version alone cannot invalidate results from an older application algorithm.
-/// Revision 0 (a missing field) denotes the original 0.4 development caches.
-pub const GEOMETRY_REVISION: u32 = 2;
+/// Revision 0 (a missing field) denotes the original 0.4 development caches; 3 opens
+/// shell faces next to fillets that the kernel used to keep.
+pub const GEOMETRY_REVISION: u32 = 3;
 /// A cache larger than this is not written; the design rebuilds instead.
 pub const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
 /// Designs that rebuild faster than this are not worth caching unless the file is a container anyway.
