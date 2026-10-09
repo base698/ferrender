@@ -15,6 +15,13 @@ pub(super) fn base(s: &Session, v: &J) -> R<PlaneRef> {
         _=>Err("the base should be XY, XZ, YZ, a face, or a construction plane".into())
     }; }
     if !v["face"].is_null() { return face_ref(s,&v["face"]); }
+    if !v["normal"].is_null() {
+        let u=s.doc.units.mm();
+        let origin=if v["origin"].is_null() { glam::DVec3::ZERO } else { xyz(&v["origin"])?*u };
+        let normal=xyz(&v["normal"])?.try_normalize().ok_or("the plane normal has no length")?;
+        let plane=match xyz(&v["x"]) { Ok(x) => crate::planes::three_points([origin,origin+x.normalize_or_zero(),origin+normal.cross(x).normalize_or_zero()]).map_err(|_|"the plane's x axis must not be parallel to its normal")?, Err(_) => crate::Plane::from_normal(origin,normal) };
+        return Ok(PlaneRef::Free(plane));
+    }
     let id=id_of(v,"plane")?;
     if !s.built.planes.contains_key(&id) { return Err("the construction plane is not available at this history position".into()); }
     Ok(PlaneRef::Plane(id))

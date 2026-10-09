@@ -24,7 +24,7 @@ use crate::units::Unit;
 pub const FORMAT: &str = "ferrender";
 /// The newest version this build reads. 9 is the ZIP container; the JSON inside
 /// a container keeps its own, lower version, computed as for a plain file.
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 pub const CONTAINER_VERSION: u32 = 9;
 pub const CONTAINER_FORMAT: &str = "ferrender-container";
 
@@ -85,7 +85,8 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if doc.features.iter().any(|f| has_tags(&f.kind)) { 10 }
+    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::MeshOp(_) | FeatureKind::Relief(_))) { 11 }
+    else if doc.features.iter().any(|f| has_tags(&f.kind)) { 10 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Remove(_) | FeatureKind::Split(_))) { 8 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Primitive(_))) { 7 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Pattern(crate::doc::Pattern { kind: crate::doc::PatternKind::Linear { second: Some(_), .. }, .. }))) { 6 }
@@ -150,7 +151,7 @@ pub fn to_json(doc: &Document) -> String {
 pub fn needs_container(doc: &Document) -> bool {
     doc.features.iter().any(|f| match &f.kind {
         FeatureKind::Sketch(s) => s.reference.is_some(),
-        FeatureKind::Import(_) => true,
+        FeatureKind::Import(_) | FeatureKind::Relief(_) => true,
         _ => false,
     })
 }
@@ -175,6 +176,12 @@ fn detach_blobs(v: &mut Value, mut meshes: Vec<Vec<u8>>) -> Result<Vec<Blob>, St
             f["kind"]["sketch"]["reference"]["png"] = json!({"blob": name});
             blobs.push(Blob { name, bytes, stored: true });
         }
+        if let Some(png) = f["kind"]["relief"]["image"]["png"].as_str() {
+            let bytes = B64.decode(png).map_err(|_| "a relief image is not valid base64")?;
+            let name = format!("images/{id}.png");
+            f["kind"]["relief"]["image"]["png"] = json!({"blob": name});
+            blobs.push(Blob { name, bytes, stored: true });
+        }
         if let Some(k) = f["kind"]["import"]["blob"].as_str().and_then(|m| m.strip_prefix('#')).and_then(|k| k.parse::<usize>().ok()) {
             let bytes = std::mem::take(meshes.get_mut(k).ok_or("a mesh marker points past the detached meshes")?);
             let name = format!("meshes/{id}.mesh");
@@ -193,6 +200,10 @@ fn attach_blobs(v: &mut Value, mut read: impl FnMut(&str, usize) -> Result<Vec<u
         if let Some(name) = f["kind"]["sketch"]["reference"]["png"]["blob"].as_str().map(str::to_owned) {
             let bytes = read(&name, MAX_IMAGE_BLOB)?;
             f["kind"]["sketch"]["reference"]["png"] = json!(B64.encode(bytes));
+        }
+        if let Some(name) = f["kind"]["relief"]["image"]["png"]["blob"].as_str().map(str::to_owned) {
+            let bytes = read(&name, MAX_IMAGE_BLOB)?;
+            f["kind"]["relief"]["image"]["png"] = json!(B64.encode(bytes));
         }
         if let Some(name) = f["kind"]["import"]["blob"].as_str().map(str::to_owned) {
             let bytes = read(&name, MAX_MESH_BLOB)?;

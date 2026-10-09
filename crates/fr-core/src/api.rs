@@ -44,6 +44,20 @@ DOCUMENT
    In the GUI, new and open refuse to discard unsaved work. Save first or set "discard_unsaved":true on that command to explicitly discard it, including inside a batch.
 {"op":"export_stl","path":"/abs/part.stl","units":"mm"}   units default to mm, which is what slicers expect
 {"op":"import_mesh","path":"/abs/in.stl","units":"mm"}    adds an STL, OBJ or 3MF as a mesh body, repaired (degenerate and duplicate triangles dropped, orientation made consistent) with a report; import_stl is the same command
+
+Mesh editing. Each is a timeline feature that takes a mesh body and replaces it (an exact body becomes a mesh). Coordinates are in document units.
+{"op":"mesh_measure","body":BODY,"at":[x,y,z]}        triangles, vertices, shells, open and non-manifold edges, watertight, volume, area, bounds; with "at", the wall thickness under that point
+{"op":"mesh_repair","body":BODY,"fill_holes":12}      drops degenerate and duplicate triangles, makes orientation consistent, turns closed shells outward, fills holes of up to that many edges
+{"op":"mesh_decimate","body":BODY,"target":50000,"method":"quadric","preserve_boundary":true}   quadric edge collapse to about that many triangles; "method":"cluster" is the fast coarse alternative
+{"op":"mesh_smooth","body":BODY,"iterations":10,"strength":0.5,"region":REGION}   Taubin smoothing (no shrink); region optional
+{"op":"mesh_subdivide","body":BODY,"levels":1,"scheme":"loop"}   loop | midpoint; each level quadruples the triangles
+{"op":"mesh_cut","body":BODY,"plane":PLANE,"keep":"negative","cap":true}   plane as for split_body; keep negative | positive | both (both makes a second body); cap closes the cut flat
+{"op":"mesh_mirror","body":BODY,"plane":PLANE,"weld":true}   adds the mirror image; weld joins the halves along the plane
+{"op":"mesh_offset","body":BODY,"distance":2,"direction":[0,0,-1]}   thickens an open surface into a closed solid (walls along its rim), or hollows a closed one; direction optional, else along the surface normals
+{"op":"mesh_extrude_region","body":BODY,"region":REGION,"distance":3,"direction":[0,0,1]}   moves the region's triangles with walls around it
+   REGION is {"sphere":{"centre":[x,y,z],"radius":r}} | {"box":{"lo":[..],"hi":[..]}} | {"side":{"plane":PLANE}} (the plane's positive side) | {"normal":{"direction":[x,y,z],"degrees":30}} | {"connected":{"seed":[x,y,z]}}
+{"op":"mesh_from_image","path":"/abs/photo.png","width":100,"depth":4,"base":2,"resolution":300,"invert":false,"blur":1,"gamma":1,"plane":"XY","origin":[x,y,z],"operation":"new"}
+   a relief: the image's luminance becomes height on a grid (resolution cells along the longer side, at most 1200), bright high (invert for a lithophane), on a slab "base" thick; "depth" is the height of the brightest pixel. The image (PNG or JPEG) is embedded, as a reference image is. A depth map rendered elsewhere works the same way. Then mesh_smooth, mesh_cut to trim, combine onto a plaque, export_stl.
 {"op":"export_stl","path":"...","union":true}      merges overlapping bodies into one shell first (exact bodies only)
 {"op":"export_step","path":"/abs/part.step"}       exact bodies as true surfaces; meshes are skipped
 {"op":"batch","commands":[...]}                    runs several commands; stops at the first error
@@ -431,6 +445,25 @@ fn face_picks(s: &Session, body: Id, v: &J, key: &str) -> R<(Vec<DVec3>, Vec<Opt
     Ok((points, tags))
 }
 
+/// A mesh region from its JSON (see the reference), with lengths scaled from document units.
+fn region_of(s: &Session, v: &J, u: f64) -> R<crate::meshops::RegionSpec> {
+    use crate::meshops::RegionSpec;
+    let o = v.as_object().ok_or("\"region\" must be an object such as {\"sphere\":{\"centre\":[x,y,z],\"radius\":r}}")?;
+    let (kind, body) = o.iter().next().ok_or("\"region\" is empty")?;
+    Ok(match kind.as_str() {
+        "sphere" => RegionSpec::Sphere { centre: xyz(&body["centre"])? * u, radius: body["radius"].as_f64().ok_or("the sphere region needs a \"radius\"")? * u },
+        "box" => RegionSpec::Box { lo: xyz(&body["lo"])? * u, hi: xyz(&body["hi"])? * u },
+        "side" => {
+            let reference = planes_api::base(s, &body["plane"])?;
+            let (plane, _) = s.doc.plane_reference(&reference, &s.built, s.doc.active_component)?;
+            RegionSpec::Side { plane }
+        }
+        "normal" => RegionSpec::Normal { direction: xyz(&body["direction"])?, degrees: body["degrees"].as_f64().unwrap_or(30.0) },
+        "connected" => RegionSpec::Connected { seed: xyz(&body["seed"])? * u },
+        other => return Err(format!("unknown region kind {other}; use sphere, box, side, normal or connected")),
+    })
+}
+
 fn points_of(s: &Session, v: &J, key: &str) -> R<Vec<DVec3>> {
     v[key].as_array().ok_or(format!("\"{key}\" should be a list of [x, y, z] points"))?.iter().map(|p| xyz(p).map(|p| p * s.doc.units.mm())).collect()
 }
@@ -494,6 +527,23 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["translate"] = json!(t.translate.iter().map(|v| v.expr.clone()).collect::<Vec<_>>());
             o["rotate"] = json!(t.rotate.iter().map(|v| v.expr.clone()).collect::<Vec<_>>());
             o["scale"] = json!(t.scale.expr);
+        }
+        FeatureKind::MeshOp(m) => {
+            o["body"] = json!(m.body);
+            o["op"] = serde_json::to_value(&m.op).unwrap_or(J::Null);
+            if let Some(r) = &m.region { o["region"] = serde_json::to_value(r).unwrap_or(J::Null); }
+        }
+        FeatureKind::Relief(r) => {
+            o["image"] = json!({"name": r.image.name, "pixels": [r.image.pixel_width, r.image.pixel_height]});
+            o["width"] = json!({"expr": r.width.expr, "value": len_out(doc, r.width.v)});
+            o["depth"] = json!({"expr": r.depth.expr, "value": len_out(doc, r.depth.v)});
+            o["base"] = json!({"expr": r.base.expr, "value": len_out(doc, r.base.v)});
+            o["resolution"] = json!(r.resolution);
+            o["invert"] = json!(r.invert);
+            o["blur"] = json!(r.blur);
+            o["gamma"] = json!(r.gamma);
+            o["operation"] = json!(r.op.name());
+            o["plane"] = json!({"origin": (r.plane.origin / doc.units.mm()).to_array(), "normal": r.plane.normal().to_array(), "x": r.plane.x.to_array()});
         }
         FeatureKind::Pattern(p) => {
             o["feature"] = json!(p.source);
@@ -1699,6 +1749,88 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 Ok(id)
             })?;
             Ok(json!({"feature": id, "body": body_info(s, id), "report": report, "summary": report.summary()}))
+        }
+        "mesh_measure" => {
+            let body = id_of(c, "body")?;
+            let b = s.built.body(body).ok_or(format!("there is no body {body}"))?;
+            let u = s.doc.units.mm();
+            let at = if c["at"].is_null() { None } else { Some(b.to_local(xyz(&c["at"])? * u)) };
+            let mut m = b.bare();
+            if !m.is_welded() { m.weld_exact(); }
+            let mut measure = crate::meshops::measure(&m, at);
+            measure.volume /= u.powi(3);
+            measure.area /= u.powi(2);
+            measure.min = measure.min.map(|v| v / u);
+            measure.max = measure.max.map(|v| v / u);
+            measure.thickness_at = measure.thickness_at.map(|t| t / u);
+            let mut out = serde_json::to_value(measure).unwrap_or(J::Null);
+            out["body"] = json!(body);
+            out["kind"] = json!(if b.is_exact() { "exact" } else { "mesh" });
+            Ok(out)
+        }
+        "mesh_repair" | "mesh_decimate" | "mesh_smooth" | "mesh_subdivide" | "mesh_cut" | "mesh_mirror" | "mesh_offset" | "mesh_extrude_region" => {
+            use crate::doc::MeshOpKind;
+            use crate::meshops::{DecimateMethod, Keep, Scheme};
+            let body = id_of(c, "body")?;
+            let u = s.doc.units.mm();
+            let num = |key: &str, default: f64| -> R<f64> { if c[key].is_null() { Ok(default) } else { c[key].as_f64().ok_or_else(|| format!("\"{key}\" must be a number")) } };
+            let int = |key: &str, default: u64| -> R<u32> { if c[key].is_null() { Ok(default as u32) } else { c[key].as_u64().map(|v| v as u32).ok_or_else(|| format!("\"{key}\" must be a whole number")) } };
+            let direction = if c["direction"].is_null() { None } else { Some(xyz(&c["direction"])?) };
+            let distance = || s.doc.value(&text_of(&c["distance"]).map_err(|_| format!("{op} needs a \"distance\""))?, Kind::Length);
+            let kind = match op {
+                "mesh_repair" => MeshOpKind::Repair { fill_holes: int("fill_holes", 0)? },
+                "mesh_decimate" => MeshOpKind::Decimate {
+                    target: int("target", 0).and_then(|t| if t >= 4 { Ok(t) } else { Err("mesh_decimate needs a \"target\" of at least 4 triangles".into()) })?,
+                    method: match c["method"].as_str().unwrap_or("quadric") { "quadric" => DecimateMethod::Quadric, "cluster" => DecimateMethod::Cluster, other => return Err(format!("unknown decimation method {other}; use quadric or cluster")) },
+                    preserve_boundary: c["preserve_boundary"].as_bool().unwrap_or(true),
+                },
+                "mesh_smooth" => MeshOpKind::Smooth { iterations: int("iterations", 10)?, strength: num("strength", 0.5)? },
+                "mesh_subdivide" => MeshOpKind::Subdivide { levels: int("levels", 1)?, scheme: match c["scheme"].as_str().unwrap_or("loop") { "loop" => Scheme::Loop, "midpoint" => Scheme::Midpoint, other => return Err(format!("unknown subdivision scheme {other}; use loop or midpoint")) } },
+                "mesh_cut" => MeshOpKind::Cut { plane: planes_api::base(s, &c["plane"])?, keep: match c["keep"].as_str().unwrap_or("negative") { "negative" => Keep::Negative, "positive" => Keep::Positive, "both" => Keep::Both, other => return Err(format!("unknown side {other}; keep negative, positive or both")) }, cap: c["cap"].as_bool().unwrap_or(true) },
+                "mesh_mirror" => MeshOpKind::Mirror { plane: planes_api::base(s, &c["plane"])?, weld: c["weld"].as_bool().unwrap_or(true) },
+                "mesh_offset" => MeshOpKind::Offset { distance: distance()?, direction },
+                _ => MeshOpKind::ExtrudeRegion { distance: distance()?, direction },
+            };
+            let region = if c["region"].is_null() { None } else { Some(region_of(s, &c["region"], u)?) };
+            if op == "mesh_extrude_region" && region.is_none() { return Err("mesh_extrude_region needs a \"region\"".into()); }
+            let id = s.edit_feature(|d| {
+                let id = d.add_feature(FeatureKind::MeshOp(crate::doc::MeshOp { body, op: kind, region }));
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            if let Some(b) = body_info(s, body) { out["body"] = b; }
+            Ok(out)
+        }
+        "mesh_from_image" => {
+            let path = c["path"].as_str().ok_or("mesh_from_image needs a \"path\" to a PNG or JPEG")?;
+            let u = s.doc.units.mm();
+            let image = crate::reference::ReferenceImage::from_file(std::path::Path::new(path), 100.0)?;
+            let value = |key: &str, default: &str| -> R<Value> { s.doc.value(&if c[key].is_null() { default.to_owned() } else { text_of(&c[key])? }, Kind::Length) };
+            let plane = match &c["plane"] {
+                J::Null => Plane::XY,
+                J::String(p) => match p.as_str() { "XY" => Plane::XY, "XZ" => Plane::XZ, "YZ" => Plane::YZ, other => return Err(format!("unknown plane {other}; use XY, XZ or YZ")) },
+                v => Plane::from_normal(xyz(&v["origin"]).unwrap_or(DVec3::ZERO) * u, xyz(&v["normal"])?),
+            };
+            let plane = if c["origin"].is_null() { plane } else { Plane { origin: xyz(&c["origin"])? * u, ..plane } };
+            let relief = crate::doc::Relief {
+                image, plane,
+                width: value("width", "100 mm")?, depth: value("depth", "4 mm")?, base: value("base", "2 mm")?,
+                resolution: c["resolution"].as_u64().unwrap_or(300) as u32,
+                invert: c["invert"].as_bool().unwrap_or(false),
+                blur: c["blur"].as_u64().unwrap_or(1) as u32,
+                gamma: c["gamma"].as_f64().unwrap_or(1.0),
+                op: op_of(c, Op::New)?,
+            };
+            let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
+            let id = s.edit_feature(|d| {
+                let id = d.add_feature(FeatureKind::Relief(relief));
+                if let Some(n) = name { d.feature_mut(id).unwrap().name = n; }
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            Ok(out)
         }
         "transform" => {
             let body = id_of(c, "body")?;

@@ -516,6 +516,89 @@ impl Text {
     }
 }
 
+/// An operation on a mesh body (see `meshops`). Applied to an exact body, it turns the body into a mesh.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeshOp {
+    pub body: Id,
+    pub op: MeshOpKind,
+    /// Limits smoothing to a region, or names the region to extrude.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<crate::meshops::RegionSpec>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshOpKind {
+    Repair { fill_holes: u32 },
+    Decimate { target: u32, #[serde(default)] method: crate::meshops::DecimateMethod, #[serde(default = "yes")] preserve_boundary: bool },
+    Smooth { iterations: u32, strength: f64 },
+    Subdivide { levels: u32, #[serde(default)] scheme: crate::meshops::Scheme },
+    Cut { plane: PlaneRef, #[serde(default)] keep: crate::meshops::Keep, #[serde(default)] cap: bool },
+    Mirror { plane: PlaneRef, #[serde(default)] weld: bool },
+    Offset { distance: Value, #[serde(default, skip_serializing_if = "Option::is_none")] direction: Option<DVec3> },
+    ExtrudeRegion { distance: Value, #[serde(default, skip_serializing_if = "Option::is_none")] direction: Option<DVec3> },
+}
+
+fn yes() -> bool { true }
+
+impl MeshOpKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            MeshOpKind::Repair { .. } => "mesh_repair",
+            MeshOpKind::Decimate { .. } => "mesh_decimate",
+            MeshOpKind::Smooth { .. } => "mesh_smooth",
+            MeshOpKind::Subdivide { .. } => "mesh_subdivide",
+            MeshOpKind::Cut { .. } => "mesh_cut",
+            MeshOpKind::Mirror { .. } => "mesh_mirror",
+            MeshOpKind::Offset { .. } => "mesh_offset",
+            MeshOpKind::ExtrudeRegion { .. } => "mesh_extrude_region",
+        }
+    }
+}
+
+/// A height field from an image: a relief or lithophane, built as a mesh body.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Relief {
+    /// The pixels, embedded like a sketch's reference image. Its placement fields are unused.
+    pub image: crate::reference::ReferenceImage,
+    /// Where the relief's lower-left corner sits and which way it faces; Z of the plane is up.
+    pub plane: Plane,
+    pub width: Value,
+    /// How high the brightest pixel stands above the plane.
+    pub depth: Value,
+    /// Slab under the relief; zero leaves an open surface.
+    pub base: Value,
+    pub resolution: u32,
+    #[serde(default)]
+    pub invert: bool,
+    #[serde(default)]
+    pub blur: u32,
+    #[serde(default = "one")]
+    pub gamma: f64,
+    pub op: Op,
+}
+
+fn one() -> f64 { 1.0 }
+
+impl Relief {
+    pub fn params(&self) -> crate::meshops::ReliefParams {
+        crate::meshops::ReliefParams { width: self.width.v, depth: self.depth.v, base: self.base.v, resolution: self.resolution, invert: self.invert, blur: self.blur, gamma: self.gamma }
+    }
+
+    /// The relief as a mesh in the document's frame.
+    pub fn mesh(&self) -> Result<Mesh, String> {
+        if self.resolution < 2 || self.resolution > 1200 { return Err("the relief resolution must be between 2 and 1200 cells".into()); }
+        if !self.gamma.is_finite() || self.gamma <= 0.0 || self.gamma > 10.0 { return Err("the relief gamma must be between 0 and 10".into()); }
+        let pixels = self.image.pixels()?;
+        let mut m = crate::meshops::from_image(&pixels, &self.params())?;
+        let plane = self.plane;
+        let n = plane.normal();
+        m.map(|p| plane.to_world(DVec2::new(p.x, p.y)) + n * p.z);
+        m.snap();
+        Ok(m)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Combine {
     pub target: Id,
@@ -546,6 +629,8 @@ pub enum FeatureKind {
     Hole(Hole),
     Thread(Thread),
     Text(Text),
+    MeshOp(MeshOp),
+    Relief(Relief),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -582,6 +667,8 @@ impl Feature {
             FeatureKind::Hole(_) => "hole",
             FeatureKind::Thread(_) => "thread",
             FeatureKind::Text(_) => "text",
+            FeatureKind::MeshOp(m) => m.op.name(),
+            FeatureKind::Relief(_) => "relief",
         }
     }
 }
@@ -1056,6 +1143,7 @@ impl Document {
                 Ok(Some((Shape::Exact(l, tags), Op::New)))
             }
             FeatureKind::Import(m) => Ok(Some((Shape::Mesh(m.clone()), Op::New))),
+            FeatureKind::Relief(r) => Ok(Some((Shape::Mesh(r.mesh()?), r.op))),
             _ => Ok(None),
         }
     }
@@ -1141,6 +1229,11 @@ impl Document {
                     c.placement.translate.iter_mut().for_each(|v|set(v,Kind::Length));
                     c.placement.rotate.iter_mut().for_each(|v|set(v,Kind::Angle));
                 }
+                FeatureKind::MeshOp(m) => match &mut m.op {
+                    MeshOpKind::Offset { distance, .. } | MeshOpKind::ExtrudeRegion { distance, .. } => set(distance, Kind::Length),
+                    _ => {}
+                },
+                FeatureKind::Relief(r) => { for v in [&mut r.width, &mut r.depth, &mut r.base] { set(v, Kind::Length); } }
                 FeatureKind::Import(_) | FeatureKind::Combine(_) | FeatureKind::Remove(_) | FeatureKind::Split(_) => {}
             }
             if let Some(e) = err {
@@ -1286,6 +1379,38 @@ impl Document {
                 bodies[i].set_exact(made, tags)?;
                 bodies.retain(|b| !b.mesh.is_empty());
                 Ok(Some(level))
+            }
+            FeatureKind::MeshOp(op) => {
+                use crate::meshops as mo;
+                let i = find(bodies, op.body)?;
+                if !bodies[i].threads.is_empty() {
+                    return Err("mesh operations cannot keep modeled threads; put the operation before the thread".into());
+                }
+                let component = bodies[i].component;
+                let mut src = bodies[i].bare();
+                if !src.is_welded() { src.weld_exact(); }
+                let mask = op.region.as_ref().map(|r| mo::region(&src, r));
+                let made = match &op.op {
+                    MeshOpKind::Repair { fill_holes } => mo::repair(&src, *fill_holes as usize)?.0,
+                    MeshOpKind::Decimate { target, method, preserve_boundary } => mo::decimate_by(&src, *target as usize, *method, *preserve_boundary)?,
+                    MeshOpKind::Smooth { iterations, strength } => mo::smooth(&src, *iterations, *strength, mask.as_deref())?,
+                    MeshOpKind::Subdivide { levels, scheme } => mo::subdivide(&src, *levels, *scheme)?,
+                    MeshOpKind::Mirror { plane, weld } => { let (plane, _) = self.plane_reference(plane, context, component)?; mo::mirror(&src, plane, *weld)? }
+                    MeshOpKind::Offset { distance, direction } => mo::offset(&src, distance.v, *direction)?,
+                    MeshOpKind::ExtrudeRegion { distance, direction } => mo::extrude_region(&src, mask.as_deref().ok_or("extruding a region needs a \"region\"")?, distance.v, *direction)?,
+                    MeshOpKind::Cut { plane, keep, cap } => {
+                        let (plane, _) = self.plane_reference(plane, context, component)?;
+                        let mut pieces = mo::cut(&src, plane, *keep, *cap)?.into_iter();
+                        let first = pieces.next().ok_or("the cut left nothing")?;
+                        for (k, piece) in pieces.enumerate() {
+                            *count += 1;
+                            bodies.push(Shape::Mesh(piece).body(id * 1000 + k as Id + 1, format!("Body{count}"), component)?);
+                        }
+                        first
+                    }
+                };
+                bodies[i].set_mesh(made);
+                Ok(None)
             }
             FeatureKind::Transform(t) => {
                 let i = find(bodies, t.body)?;

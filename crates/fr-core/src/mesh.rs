@@ -706,7 +706,7 @@ impl Mesh {
                 if *s == 2 { t.swap(1, 2); }
             }
         }
-        // Closed components turned inside out are turned outward.
+        // Closed components are turned to face outward: a shell inside another (a cavity) faces inward.
         if report.open_edges == 0 && report.non_manifold_edges == 0 {
             let mut vol = vec![0.0f64; report.components];
             let o = self.positions.first().copied().unwrap_or(DVec3::ZERO);
@@ -715,7 +715,25 @@ impl Mesh {
                 let v = a.dot(b.cross(c));
                 vol[component[i] as usize] += if state[i] == 2 && !fix { -v } else { v };
             }
-            let inside_out: Vec<bool> = vol.iter().map(|v| *v < 0.0).collect();
+            // How many other components enclose a point of each: odd means a cavity.
+            let mut depth = vec![0usize; report.components];
+            if report.components > 1 && report.components <= 64 {
+                let first_tri: Vec<usize> = (0..report.components).map(|c| component.iter().position(|k| *k as usize == c).unwrap()).collect();
+                let dir = DVec3::new(0.577_215, 0.618_034, 0.532_601).normalize();
+                for c in 0..report.components {
+                    let t = self.indices[first_tri[c]];
+                    let p = (self.positions[t[0] as usize] + self.positions[t[1] as usize] + self.positions[t[2] as usize]) / 3.0;
+                    for other in 0..report.components {
+                        if other == c { continue; }
+                        let hits = self.indices.iter().enumerate().filter(|(i, _)| component[*i] as usize == other).filter(|(_, t)| {
+                            let tri = [self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize]];
+                            ray_tri(p, dir, &tri).is_some_and(|d| d > 1e-9)
+                        }).count();
+                        if hits % 2 == 1 { depth[c] += 1; }
+                    }
+                }
+            }
+            let inside_out: Vec<bool> = vol.iter().zip(&depth).map(|(v, d)| (*v < 0.0) != (d % 2 == 1)).collect();
             let turned = self.indices.iter().enumerate().filter(|(i, _)| inside_out[component[*i] as usize]).count();
             if turned > 0 {
                 report.flipped += turned;

@@ -138,6 +138,8 @@ pub fn commands(app: &App) -> Vec<Command> {
         ("About Ferrender",Action::About,"Check version and commit information."),
     ] {add(title,action,"",hint,"file edit help",None);}
     add("Export STL",Action::Export,"","Export visible bodies for printing.","file export stl print",need_body);
+    for (k,name) in crate::app::MESH_OPS.iter().enumerate() { add(name,Action::Mesh(k),"","Mesh editing: applies to the selected body as a timeline step.","mesh scan stl decimate smooth repair cut mirror offset thicken",need_body); }
+    add("Relief from Image",Action::Relief,"","Build a height-field mesh from a photo or depth map.","mesh relief lithophane image photo",None);
     add("Export STEP",Action::ExportStep,"","Export visible exact solids.","file export step cad",need_exact);
     for (title,name) in [("Home View","iso"),("Top View","top"),("Front View","front"),("Right View","right"),("Back View","back"),("Left View","left"),("Bottom View","bottom")] {add(title,Action::View(name),"","Change the viewing direction.","view camera",None);}
     add("Fit View",Action::Fit,"F","Fit the design in the view.","view zoom fit",None);

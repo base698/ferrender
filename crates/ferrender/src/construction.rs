@@ -106,6 +106,7 @@ pub fn reference_name(doc: &Document, r: &PlaneRef) -> String {
     match r {
         PlaneRef::Origin(p) => format!("{p:?} origin plane"),
         PlaneRef::Plane(id) => doc.feature(*id).map_or(format!("Missing plane {id}"), |f| f.name.clone()),
+        PlaneRef::Free(_) => "Given plane".into(),
         PlaneRef::Face { body, .. } => format!("Flat face of body {body}"),
     }
 }

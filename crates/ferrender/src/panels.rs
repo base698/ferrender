@@ -124,6 +124,12 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Hole", "", Action::Hole);
             item(app, ui, "Thread", "", Action::Thread);
         });
+        ui.menu_button("Mesh", |ui| {
+            item(app, ui, "Import Mesh\u{2026}", &cmd("I"), Action::Import);
+            item(app, ui, "Relief from Image\u{2026}", "", Action::Relief);
+            ui.separator();
+            for (k, name) in crate::app::MESH_OPS.iter().enumerate() { item(app, ui, name, "", Action::Mesh(k)); }
+        });
         ui.menu_button("View", |ui| {
             for (label, view) in [("Home", "iso"), ("Top", "top"), ("Front", "front"), ("Right", "right"), ("Back", "back"), ("Left", "left"), ("Bottom", "bottom")] {
                 item(app, ui, label, "", Action::View(view));
@@ -438,6 +444,8 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Hole(_) => icon::CIRCLE_DASHED,
         FeatureKind::Thread(_) => icon::SPIRAL,
         FeatureKind::Text(_) => icon::TEXT_T,
+        FeatureKind::MeshOp(_) => icon::POLYGON,
+        FeatureKind::Relief(_) => icon::IMAGE,
     }
 }
 
@@ -751,6 +759,72 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     ui.label(RichText::new(if inward { "A negative distance pushes the face in and cuts." } else { "Pulls the face out. A negative distance pushes it in and cuts." }).color(colors.muted));
                 }
                 app.dialog = Dialog::Feature(f);
+                confirm(app, ui, "OK");
+            });
+        }
+        Dialog::Mesh(mut m) => {
+            dialog_window(app, crate::app::MESH_OPS[m.kind]).show(ctx, |ui| {
+                let name = m.body.and_then(|b| app.session.built.body(b)).map_or("Click a body".to_owned(), |b| b.name.clone());
+                ui.label(RichText::new(name).strong());
+                egui::Grid::new("mesh-op").num_columns(3).show(ui, |ui| {
+                    match m.kind {
+                        0 => { ui.label("Fill holes up to"); ui.add(egui::DragValue::new(&mut m.count).range(0..=100_000).suffix(" edges")); ui.end_row(); }
+                        1 => {
+                            ui.label("Target triangles"); ui.add(egui::DragValue::new(&mut m.count).range(4..=16_000_000)); ui.end_row();
+                            ui.label("Method"); egui::ComboBox::from_id_salt("decimate-method").selected_text(["Quadric (faithful)", "Cluster (fast)"][m.choice]).show_ui(ui, |ui| { for (i, n) in ["Quadric (faithful)", "Cluster (fast)"].iter().enumerate() { ui.selectable_value(&mut m.choice, i, *n); } }); ui.end_row();
+                            ui.label("Keep the outline"); ui.checkbox(&mut m.flag, ""); ui.end_row();
+                        }
+                        2 => {
+                            ui.label("Iterations"); ui.add(egui::DragValue::new(&mut m.count).range(1..=500)); ui.end_row();
+                            ui.label("Strength"); ui.add(egui::Slider::new(&mut m.amount, 0.0..=1.0)); ui.end_row();
+                        }
+                        3 => {
+                            ui.label("Levels"); ui.add(egui::DragValue::new(&mut m.count).range(1..=6)); ui.end_row();
+                            ui.label("Scheme"); egui::ComboBox::from_id_salt("subdivide-scheme").selected_text(["Loop (smooth)", "Midpoint"][m.choice]).show_ui(ui, |ui| { for (i, n) in ["Loop (smooth)", "Midpoint"].iter().enumerate() { ui.selectable_value(&mut m.choice, i, *n); } }); ui.end_row();
+                        }
+                        4 | 5 => {
+                            ui.label("Plane"); egui::ComboBox::from_id_salt("mesh-plane").selected_text(["XY", "XZ", "YZ"][m.plane]).show_ui(ui, |ui| { for (i, n) in ["XY", "XZ", "YZ"].iter().enumerate() { ui.selectable_value(&mut m.plane, i, *n); } }); ui.end_row();
+                            value_row(app, ui, "Offset along its normal", &mut m.text, Kind::Length);
+                            if m.kind == 4 {
+                                ui.label("Keep"); egui::ComboBox::from_id_salt("mesh-keep").selected_text(["Negative side", "Positive side", "Both (two bodies)"][m.choice]).show_ui(ui, |ui| { for (i, n) in ["Negative side", "Positive side", "Both (two bodies)"].iter().enumerate() { ui.selectable_value(&mut m.choice, i, *n); } }); ui.end_row();
+                                ui.label("Cap the cut"); ui.checkbox(&mut m.flag, ""); ui.end_row();
+                            } else {
+                                ui.label("Weld the halves"); ui.checkbox(&mut m.flag, ""); ui.end_row();
+                            }
+                        }
+                        _ => {
+                            value_row(app, ui, "Thickness", &mut m.text, Kind::Length);
+                            ui.label("Straight down (Z)"); ui.checkbox(&mut m.flag, ""); ui.end_row();
+                        }
+                    }
+                });
+                let hint = match m.kind {
+                    0 => "Drops bad triangles, makes the orientation consistent and closes small holes.",
+                    1 => "Fewer triangles; quadric keeps the shape, cluster is quick for huge scans.",
+                    2 => "Taubin smoothing: removes noise without shrinking.",
+                    3 => "Each level quadruples the triangles.",
+                    4 => "Keeps one side of the plane; the plane is the origin plane moved by the offset.",
+                    5 => "Adds the mirror image across the plane.",
+                    _ => "Thickens an open surface into a closed solid, or hollows a closed one to a wall.",
+                };
+                ui.label(RichText::new(hint).color(colors.muted));
+                app.dialog = Dialog::Mesh(m);
+                confirm(app, ui, "OK");
+            });
+        }
+        Dialog::Relief(mut r) => {
+            dialog_window(app, "Relief from Image").show(ctx, |ui| {
+                ui.label(RichText::new(r.path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())).strong());
+                egui::Grid::new("relief").num_columns(3).show(ui, |ui| {
+                    value_row(app, ui, "Width", &mut r.width, Kind::Length);
+                    value_row(app, ui, "Relief height", &mut r.depth, Kind::Length);
+                    value_row(app, ui, "Base thickness", &mut r.base, Kind::Length);
+                    ui.label("Resolution"); ui.add(egui::DragValue::new(&mut r.resolution).range(2..=1200).suffix(" cells")); ui.end_row();
+                    ui.label("Blur"); ui.add(egui::DragValue::new(&mut r.blur).range(0..=64).suffix(" cells")); ui.end_row();
+                    ui.label("Invert (lithophane)"); ui.checkbox(&mut r.invert, ""); ui.end_row();
+                });
+                ui.label(RichText::new("Bright pixels stand high; a depth map rendered elsewhere works the same way. Base 0 leaves an open surface.").color(colors.muted));
+                app.dialog = Dialog::Relief(r);
                 confirm(app, ui, "OK");
             });
         }

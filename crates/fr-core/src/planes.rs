@@ -15,6 +15,8 @@ pub enum PlaneRef {
     Origin(OriginPlane),
     Face { body: Id, at: DVec3, frame: Option<[DVec3; 2]>, #[serde(default, skip_serializing_if = "Option::is_none")] tag: Option<crate::tag::Tag> },
     Plane(Id),
+    /// A plane given outright, in the owner component's frame.
+    Free(Plane),
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,6 +150,7 @@ impl Document {
                 }
                 Ok((origin.plane(),points,None))
             }
+            PlaneRef::Free(plane) => { Sketch::new(*plane).validate()?; Ok((*plane,Vec::new(),None)) }
             PlaneRef::Plane(id) => built.planes.get(id).map(|p|{
                 let t=built.component_placement(owner).inverse()*if built.placements_applied {glam::DAffine3::IDENTITY} else {built.component_placement(p.component)};
                 (p.plane.transformed(t),p.corners.map(|p|t.transform_point3(p)).to_vec(),None)

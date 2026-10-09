@@ -295,6 +295,47 @@ pub struct PatternDlg {
     pub text2: String,
 }
 
+/// The Mesh menu's operations, in dialog order.
+pub const MESH_OPS: [&str; 7] = ["Repair Mesh", "Decimate", "Smooth", "Subdivide", "Cut Mesh", "Mirror Mesh", "Offset / Thicken"];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeshDlg {
+    pub body: Option<Id>,
+    /// Index into [`MESH_OPS`].
+    pub kind: usize,
+    /// Fill-hole size, target triangles, iterations or levels.
+    pub count: u32,
+    /// Smoothing strength.
+    pub amount: f64,
+    /// Method, scheme or kept side.
+    pub choice: usize,
+    /// Preserve boundary, cap, weld, or straight down.
+    pub flag: bool,
+    /// Origin plane index for cut and mirror.
+    pub plane: usize,
+    /// Plane offset or thickness.
+    pub text: String,
+}
+
+impl MeshDlg {
+    pub fn new(kind: usize, body: Option<Id>, unit: Unit) -> Self {
+        let count = match kind { 0 => 12, 1 => 50_000, 2 => 10, _ => 1 };
+        let text = match kind { 6 => format!("{} {}", if unit == Unit::In { "0.1" } else if unit == Unit::Cm { "0.2" } else { "2" }, unit.name()), _ => format!("0 {}", unit.name()) };
+        MeshDlg { body, kind, count, amount: 0.5, choice: 0, flag: true, plane: 0, text }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReliefDlg {
+    pub path: PathBuf,
+    pub width: String,
+    pub depth: String,
+    pub base: String,
+    pub resolution: u32,
+    pub blur: u32,
+    pub invert: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TransformDlg {
     pub body: Id,
@@ -343,6 +384,8 @@ pub enum Dialog {
     Measure(MeasureDlg),
     Export(Unit),
     Import(PathBuf, Unit),
+    Mesh(MeshDlg),
+    Relief(ReliefDlg),
 }
 
 impl PatternDlg {
@@ -500,6 +543,34 @@ impl Dialog {
                     None => d.add_feature_to(t.owner, kind),
                 }
             }
+            Dialog::Mesh(m) => {
+                use fr_core::doc::{MeshOp, MeshOpKind};
+                use fr_core::meshops::{DecimateMethod, Keep, Scheme};
+                use fr_core::planes::{OriginPlane, PlaneRef};
+                let body = m.body.ok_or("Click a body first.")?;
+                let offset = d.enter(&m.text, Kind::Length)?;
+                let plane = || -> Result<PlaneRef, String> {
+                    let base = [OriginPlane::XY, OriginPlane::XZ, OriginPlane::YZ][m.plane];
+                    Ok(if offset.v.abs() < 1e-12 { PlaneRef::Origin(base) } else { PlaneRef::Free(base.plane().offset(offset.v)) })
+                };
+                let op = match m.kind {
+                    0 => MeshOpKind::Repair { fill_holes: m.count },
+                    1 => MeshOpKind::Decimate { target: m.count.max(4), method: if m.choice == 1 { DecimateMethod::Cluster } else { DecimateMethod::Quadric }, preserve_boundary: m.flag },
+                    2 => MeshOpKind::Smooth { iterations: m.count.max(1), strength: m.amount },
+                    3 => MeshOpKind::Subdivide { levels: m.count.clamp(1, 6), scheme: if m.choice == 1 { Scheme::Midpoint } else { Scheme::Loop } },
+                    4 => MeshOpKind::Cut { plane: plane()?, keep: [Keep::Negative, Keep::Positive, Keep::Both][m.choice.min(2)], cap: m.flag },
+                    5 => MeshOpKind::Mirror { plane: plane()?, weld: m.flag },
+                    _ => MeshOpKind::Offset { distance: offset, direction: m.flag.then_some(glam::DVec3::NEG_Z) },
+                };
+                Ok(d.add_feature(FeatureKind::MeshOp(MeshOp { body, op, region: None })))
+            }
+            Dialog::Relief(r) => {
+                let image = fr_core::reference::ReferenceImage::from_file(&r.path, 100.0)?;
+                let relief = fr_core::doc::Relief { image, plane: Plane::XY, width: d.enter(&r.width, Kind::Length)?, depth: d.enter(&r.depth, Kind::Length)?, base: d.enter(&r.base, Kind::Length)?, resolution: r.resolution.clamp(2, 1200), invert: r.invert, blur: r.blur.min(64), gamma: 1.0, op: Op::New };
+                let id = d.add_feature(FeatureKind::Relief(relief));
+                if let Some(n) = r.path.file_stem().map(|n| n.to_string_lossy().into_owned()) { d.feature_mut(id).unwrap().name = n; }
+                Ok(id)
+            }
             Dialog::Thread(t) => {
                 let (body, face) = t.body.zip(t.face).ok_or("Click the rod or the hole to thread.")?;
                 let (offset, length) = if t.full { (None, None) } else { (Some(d.enter(&t.offset, Kind::Length)?), Some(d.enter(&t.length, Kind::Length)?)) };
@@ -511,7 +582,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
+        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_))
     }
 }
 
@@ -586,6 +657,9 @@ pub struct Opts {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     CommandSearch,
+    /// A Mesh menu operation, by index into [`MESH_OPS`].
+    Mesh(usize),
+    Relief,
     Primitive(usize),
     RemoveBody,
     SplitBody,
@@ -1977,6 +2051,20 @@ impl App {
                         self.dialog = Dialog::Transform(TransformDlg { body, translate: [z(), z(), z()], rotate: [z(), z(), z()], scale: "1".into() });
                     }
                     None => self.toast("Click a body to select it first."),
+                }
+            }
+            Action::Mesh(kind) => {
+                self.finish_sketch();
+                let body = self.target_body().or(self.session.built.bodies.first().map(|b| b.id).filter(|_| self.session.built.bodies.len() == 1));
+                if body.is_none() { self.toast("Click a body to select it first."); }
+                self.dialog = Dialog::Mesh(MeshDlg::new(kind, body, self.doc().units));
+            }
+            Action::Relief => {
+                self.finish_sketch();
+                if let Some(path) = rfd::FileDialog::new().add_filter("PNG or JPEG", &["png", "jpg", "jpeg"]).pick_file() {
+                    let u = self.doc().units;
+                    let mm = |v: f64| format!("{} {}", fr_core::units::trim_num(v / u.mm(), 3), u.name());
+                    self.dialog = Dialog::Relief(ReliefDlg { path, width: mm(100.0), depth: mm(4.0), base: mm(2.0), resolution: 300, blur: 1, invert: false });
                 }
             }
             Action::RemoveBody => {
