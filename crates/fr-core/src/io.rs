@@ -26,7 +26,7 @@ use glam::DVec3;
 pub const FORMAT: &str = "ferrender";
 /// The newest version this build reads. 9 is the ZIP container; the JSON inside
 /// a container keeps its own, lower version, computed as for a plain file.
-pub const FORMAT_VERSION: u32 = 13;
+pub const FORMAT_VERSION: u32 = 14;
 pub const CONTAINER_VERSION: u32 = 9;
 pub const CONTAINER_FORMAT: &str = "ferrender-container";
 
@@ -92,7 +92,8 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if doc.features.iter().any(|f| has_tags(&f.kind) || f.script_key.is_some() || matches!(&f.kind, FeatureKind::Sweep(_))) { 13 }
+    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Loft(_))) { 14 }
+    else if doc.features.iter().any(|f| has_tags(&f.kind) || f.script_key.is_some() || matches!(&f.kind, FeatureKind::Sweep(_))) { 13 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::ScriptRun(_)) || f.made_by.is_some()) { 12 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::MeshOp(_) | FeatureKind::Relief(_))) { 11 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Remove(_) | FeatureKind::Split(_))) { 8 }

@@ -255,6 +255,24 @@ pub struct Sweep {
     pub op: Op,
 }
 
+/// One closed outline of a loft: a region of a sketch, named by the entities on its boundary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LoftSection {
+    pub sketch: Id,
+    pub profile: Vec<Id>,
+}
+
+/// Skins one solid through closed outlines drawn in sketches on different planes, in order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Loft {
+    pub sections: Vec<LoftSection>,
+    /// Straight walls between neighbouring sections, instead of one smooth surface through them all.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ruled: bool,
+    #[serde(default)]
+    pub op: Op,
+}
+
 /// Moves a body: scale about the origin, then rotate about X, Y and Z, then translate.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
@@ -678,6 +696,7 @@ pub enum FeatureKind {
     Extrude(Extrude),
     Revolve(Revolve),
     Sweep(Sweep),
+    Loft(Loft),
     /// A mesh brought in from a file, already in millimetres.
     Import(Mesh),
     Transform(Transform),
@@ -724,6 +743,7 @@ impl Feature {
             FeatureKind::Extrude(_) => "extrude",
             FeatureKind::Revolve(_) => "revolve",
             FeatureKind::Sweep(_) => "sweep",
+            FeatureKind::Loft(_) => "loft",
             FeatureKind::Import(_) => "import",
             FeatureKind::Transform(_) => "transform",
             FeatureKind::Combine(_) => "combine",
@@ -1374,6 +1394,24 @@ impl Document {
                 let t = exact::tag_swept(&l, &picked, &plane, &path, &path_plane, follow, &w.spans, f.id);
                 Ok(Some((Shape::Exact(l, t), w.op)))
             }
+            FeatureKind::Loft(l) => {
+                // Each section's outline, in the frame of the component the loft belongs to.
+                let mut drawn = Vec::with_capacity(l.sections.len());
+                for (i, section) in l.sections.iter().enumerate() {
+                    let n = i + 1;
+                    let s = sk(section.sketch).map_err(|e| e.replace("its sketch", &format!("section {n}'s sketch")))?;
+                    let plane = s.plane.transformed(context.component_placement(f.owner).inverse() * context.component_placement(self.feature(section.sketch).unwrap().owner));
+                    drawn.push((profile::profiles(s), plane, n));
+                }
+                let mut sections = Vec::with_capacity(drawn.len());
+                for ((all, plane, n), section) in drawn.iter().zip(&l.sections) {
+                    let profile = all.iter().find(|p| p.edges == section.profile).ok_or_else(|| format!("section {n}'s outline is no longer closed"))?;
+                    sections.push(exact::Section { profile, plane: *plane });
+                }
+                let solids = exact::loft(&sections, l.ruled)?;
+                let t = exact::tag_loft(&solids, &sections, f.id);
+                Ok(Some((Shape::Exact(solids, t), l.op)))
+            }
             FeatureKind::Text(t) if t.op == Op::New => {
                 let profiles = t.outlines()?;
                 let plane = t.placement(None)?;
@@ -1510,7 +1548,7 @@ impl Document {
                     _ => {}
                 },
                 FeatureKind::Relief(r) => { for v in [&mut r.width, &mut r.depth, &mut r.base] { set(v, Kind::Length); } }
-                FeatureKind::Import(_) | FeatureKind::Combine(_) | FeatureKind::Remove(_) | FeatureKind::Split(_) | FeatureKind::ScriptRun(_) | FeatureKind::Sweep(_) => {}
+                FeatureKind::Import(_) | FeatureKind::Combine(_) | FeatureKind::Remove(_) | FeatureKind::Split(_) | FeatureKind::ScriptRun(_) | FeatureKind::Sweep(_) | FeatureKind::Loft(_) => {}
             }
             if let Some(e) = err {
                 built.errors.insert(f.id, e);
@@ -1913,7 +1951,7 @@ impl Document {
                 if context.errors.contains_key(&source.id) || !context.components.contains_key(&source.owner) {
                     return Err("the feature it repeats could not be built".into());
                 }
-                let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, sweeps, primitives, imports and standalone text can be patterned")?;
+                let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, sweeps, lofts, primitives, imports and standalone text can be patterned")?;
                 let mut landed = 0;
                 for (k, place) in p.placements()?.iter().enumerate() {
                     // Include the pattern feature in copy identity; separate patterns of the

@@ -14,7 +14,7 @@ use base64::Engine;
 use glam::{DVec2, DVec3};
 use serde_json::{Value as J, json};
 
-use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Op, Pattern, PatternKind, Revolve, Session, Shell, Sweep, SweepOrient, Text, Thread, Transform};
+use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Loft, LoftSection, Op, Pattern, PatternKind, Revolve, Session, Shell, Sweep, SweepOrient, Text, Thread, Transform};
 use crate::measure::{self, Item};
 use crate::threads;
 use crate::exact;
@@ -130,12 +130,14 @@ FEATURES
    carries the profile along a path drawn in ANOTHER sketch: lines, arcs and splines joined end to end, or one circle. Draw the path first, then the profile on a plane that crosses it (for a path on XY starting along X, a profile on YZ). "path" names the entities to follow; omitted, it is every non-construction entity of path_sketch, which must then be one unbranched run. A closed path gives a ring or a frame. Pieces that meet tangentially are followed exactly; a sharp corner is mitred like a picture frame (it may turn by at most 150 degrees). The profile may sit anywhere along the path and off to one side of it. orientation: follow (the profile turns with the path) | fixed (it keeps its orientation; the path may not run sideways to it). Refused with a reason when a bend is tighter than the profile reaches on its inside, or a stretch between corners is too short. get_object_info on the feature lists the path in the order it is walked. Each side face is named by its profile entity and path entity. "spans" sweeps only parts of the path: each pair is a start and an end as fractions of the path's length, 0 at its start and 1 at its end, in walking order ([[0,0.5]] is the first half, [[0.1,0.3],[0.6,0.7]] two separate pieces in one body). Omitted or [] is the whole path. Each piece is the part of the whole sweep that lies there, so the profile stays where it would be on the full sweep. Pieces that touch or overlap are joined. On a circle, 0 is at the sketch's +X side and the fractions run anticlockwise.
    extrude also takes "extent":"all" (go through bodies in its component; the sign of distance picks the side), "taper":DEGREES (walls lean outward, negative inward), and instead of a sketch, "face":{"body":BODY,"point":[x,y,z]} to pull the flat face nearest that point out (or, with a negative distance, push it in and cut).
 {"op":"create_sketch","face":{"body":BODY,"point":[x,y,z]}}   sketch on a flat face
-{"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve, sweep, primitive, import or standalone text around a component-local axis through its origin; count includes the original
+{"op":"loft","sections":[SKETCH,SKETCH,{"sketch":SKETCH,"profile":INDEX}],"ruled":false,"operation":"new"}
+   skins one solid through closed outlines drawn in sketches on DIFFERENT planes, in the order given: two or more sections, each a sketch id (the sketch's one outer region) or a sketch with the index of a region from get_object_info. Stack the sketches with create_sketch's "offset", on construction planes, or on faces. Every section needs the same number of edges: four lines to four lines, a circle to a circle; a mismatch is refused with both counts. Sections are matched corner to nearest corner, so it does not matter where each outline was started or which way round it was drawn. A region with a hole cannot be a section. "ruled":true joins neighbouring sections with straight walls (a frustum between two squares); otherwise the surface curves smoothly through all of them, which only differs from ruled with three or more sections. The ends are flat caps on the first and last sections. Returns the feature and the body it made or changed.
+{"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve, sweep, loft, primitive, import or standalone text around a component-local axis through its origin; count includes the original
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":4,"spacing":V}
 {"op":"pattern","feature":ID,"type":"linear","axis":"x","count":2,"spacing":V,"axis2":"y","count2":2,"spacing2":V}
    Optional axis2/count2/spacing2 form a rectangular grid; supply all three together, with distinct component-local axes. Each count includes the source and must be at least 2; their product is at most 1000. Spacing is between adjacent instances and can be negative; both spacings in a grid must be nonzero. Without a second direction, count is at most 1000 and zero spacing remains allowed for compatibility (coincident copies).
 {"op":"pattern","feature":ID,"type":"mirror","normal":"x"}   one reflected copy through the origin plane with that normal
-{"op":"edit_feature","feature":ID, ...}            any of distance, angle, operation, symmetric, extent, taper, axis, name, suppressed; on a sweep, path, spans and orientation
+{"op":"edit_feature","feature":ID, ...}            any of distance, angle, operation, symmetric, extent, taper, axis, name, suppressed; on a sweep, path, spans and orientation; on a loft, sections and ruled
 {"op":"delete_feature","feature":ID}
 {"op":"remove_body","bodies":[BODY_IDS]}           removes only these bodies at this timeline point; keeps their source features and previously patterned copies. body:ID is a single-body alias. Undo or suppress this feature to restore them.
 {"op":"split_body","body":BODY,"plane":"XY"}       plane: XY | XZ | YZ in target-component axes, {"plane":CONSTRUCTION_ID}, or {"face":{"body":ID,"point":[x,y,z]}} with a world-space planar-face pick in document units. Uses the infinite plane. Exact unthreaded bodies only; tangent/nonintersecting planes are rejected. Each solid piece becomes an independent body in the target component; the first negative-side piece keeps the target ID, others have stable synthetic IDs. edit_feature accepts body/plane for Split and bodies for Remove; picks resolve before that operation. Combine with operation:join joins selected pieces again.
@@ -184,7 +186,7 @@ pub const OPS: &[&str] = &[
     "export_stl", "export_step", "get_reference", "text", "rollback", "fillet_edges", "chamfer_edges", "shell", "measure",
     "list_threads", "hole", "thread", "move", "set_units", "set_parameter", "delete_parameter", "create_component",
     "activate_component", "move_component", "create_plane", "create_sketch", "add_geometry", "point_coordinates",
-    "add_constraint", "set_dimension", "delete", "extrude", "revolve", "sweep", "remove_body", "split_body", "primitive", "pattern",
+    "add_constraint", "set_dimension", "delete", "extrude", "revolve", "sweep", "loft", "remove_body", "split_body", "primitive", "pattern",
     "trim", "mirror", "offset", "fillet", "chamfer", "project", "edit_feature", "delete_feature", "import_stl", "import_mesh",
     "mesh_measure", "mesh_repair", "mesh_decimate", "mesh_smooth", "mesh_subdivide", "mesh_cut", "mesh_mirror", "mesh_offset",
     "mesh_extrude_region", "mesh_sculpt", "mesh_from_image", "transform", "combine", "set_visible", "run_script", "script_meta", "add_feature",
@@ -555,6 +557,19 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["spans"] = json!(w.spans);
             o["operation"] = json!(w.op.name());
         }
+        FeatureKind::Loft(l) => {
+            // Each section with the index its region has in its sketch now, as the command takes it.
+            o["sections"] = J::Array(l.sections.iter().map(|section| {
+                let mut out = json!({"sketch": section.sketch, "edges": section.profile.len()});
+                match doc.sketch(section.sketch).map(profiles).and_then(|all| all.iter().position(|p| p.edges == section.profile)) {
+                    Some(index) => out["profile"] = json!(index),
+                    None => out["error"] = json!("its outline is no longer closed"),
+                }
+                out
+            }).collect());
+            o["ruled"] = json!(l.ruled);
+            o["operation"] = json!(l.op.name());
+        }
         FeatureKind::Text(t) => {
             o["text"] = json!(t.text);
             for (key, v) in [("height", &t.height), ("depth", &t.depth), ("spacing", &t.spacing), ("x", &t.x), ("y", &t.y)] {
@@ -826,6 +841,43 @@ fn pick_profiles(doc: &Document, sid: Id, c: &J) -> R<Vec<Vec<Id>>> {
         J::Array(list) => list.iter().map(|v| v.as_u64().and_then(|i| all.get(i as usize)).map(|p| p.edges.clone()).ok_or(format!("\"profiles\" should be indices below {}", all.len()))).collect(),
         _ => Err("\"profiles\" should be a list of indices or \"all\"".into()),
     }
+}
+
+/// A loft's "sections": sketches, each with the one closed region to use. A bare
+/// sketch id means the sketch's only outer region.
+fn loft_sections_of(doc: &Document, c: &J) -> R<Vec<LoftSection>> {
+    let wrong = "\"sections\" should list two or more sketches in order, each a sketch id or {\"sketch\": ID, \"profile\": INDEX}";
+    let list = c["sections"].as_array().ok_or(wrong)?;
+    if list.len() < 2 {
+        return Err("a loft needs at least two sections, each in its own sketch on its own plane".into());
+    }
+    list.iter().enumerate().map(|(i, v)| {
+        let n = i + 1;
+        let (sid, index) = match v {
+            J::Number(_) => (v.as_u64().ok_or(wrong)? as Id, None),
+            J::Object(o) => (o.get("sketch").and_then(J::as_u64).ok_or(wrong)? as Id, match o.get("profile") {
+                None | Some(J::Null) => None,
+                Some(p) => Some(p.as_u64().ok_or("a section's \"profile\" should be the index of a region of its sketch")? as usize),
+            }),
+            _ => return Err(wrong.to_owned()),
+        };
+        let sk = doc.sketch(sid).ok_or(format!("section {n}: feature {sid} is not a sketch"))?;
+        let all = profiles(sk);
+        if all.is_empty() {
+            return Err(format!("section {n}: sketch {sid} has no closed outline"));
+        }
+        let profile = match index {
+            Some(k) => all.get(k).ok_or(format!("section {n}: sketch {sid} has {} region{}, so \"profile\" should be below {}", all.len(), if all.len() == 1 { "" } else { "s" }, all.len()))?,
+            None => {
+                let outer: Vec<_> = all.iter().filter(|p| p.depth == 0).collect();
+                match outer[..] {
+                    [one] => one,
+                    _ => return Err(format!("section {n}: sketch {sid} has {} separate outlines; say which with {{\"sketch\": {sid}, \"profile\": INDEX}}", outer.len())),
+                }
+            }
+        };
+        Ok(LoftSection { sketch: sid, profile: profile.edges.clone() })
+    }).collect()
 }
 
 /// A sweep's "spans": the parts of its path to follow, as pairs of fractions of the
@@ -1668,6 +1720,27 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             out["feature"] = json!(id);
             Ok(out)
         }
+        "loft" => {
+            let owner = s.doc.active_component;
+            let has_bodies = s.built.bodies.iter().any(|b| b.component == owner);
+            let c = c.clone();
+            let id = s.edit_feature(|d| {
+                let sections = loft_sections_of(d, &c)?;
+                let ruled = match &c["ruled"] {
+                    J::Null => false,
+                    J::Bool(v) => *v,
+                    _ => return Err("\"ruled\" should be true or false".into()),
+                };
+                let sketches: Vec<Id> = sections.iter().map(|section| section.sketch).collect();
+                let kind = FeatureKind::Loft(Loft { sections, ruled, op: op_of(&c, if has_bodies { Op::Join } else { Op::New })? });
+                let id = d.add_feature_to(owner, kind)?;
+                for sid in sketches { sk_mut(d, sid).visible = false; }
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            Ok(out)
+        }
         "remove_body" | "split_body" => {
             let id=body_ops_api::create(s,c)?;
             let mut out=changed(s,&before);
@@ -1867,6 +1940,17 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                             w.orient = SweepOrient::parse(name).ok_or(format!("unknown orientation '{name}'; use follow or fixed"))?;
                         }
                         w.op = op_of(&c, w.op)?;
+                    }
+                    FeatureKind::Loft(l) => {
+                        if !c["sections"].is_null() {
+                            l.sections = loft_sections_of(&probe, &c)?;
+                        }
+                        match &c["ruled"] {
+                            J::Null => {}
+                            J::Bool(v) => l.ruled = *v,
+                            _ => return Err("\"ruled\" should be true or false".into()),
+                        }
+                        l.op = op_of(&c, l.op)?;
                     }
                     _ => {}
                 }
