@@ -35,6 +35,7 @@ The helper needs Python 3.12 or a security-backported Python providing `tarfile.
 The build records the outcome in the executable. `crates/fr-core/build.rs` reads the same `OCCT_ROOT` as cadrum's build script and checks that it is the directory the helper prepared from the archive pinned for the target. Help > About and `--version` then show `OpenCascade: verified occt-8_0_1_rev2 sha256:<archive digest>`. The Cargo lockfile does not authenticate that separately downloaded native archive, so:
 
 - A release-profile build without a verified `OCCT_ROOT` fails with the command above, instead of silently using cadrum's upstream downloader or an arbitrary directory.
+- `OCCT_ROOT` must be absolute: Cargo runs Ferrender's and cadrum's build scripts in different package directories, so a relative path cannot establish that both checked the same libraries.
 - `FERRENDER_ALLOW_UNVERIFIED_OCCT=1` permits such a build, for example on a platform with no pinned archive. Like every debug build made without the helper, it reports `OpenCascade: unverified`.
 - `scripts/package-release.py` refuses an executable whose `OpenCascade:` line is not the pinned archive for its platform, so an existing unverified binary cannot be packaged.
 
@@ -45,3 +46,5 @@ This is a statement made by the build, not a signature. It guards against an unp
 GitHub Actions are pinned to full commit hashes with the release they correspond to in a trailing comment; `python3 scripts/test_workflow_pins.py` (run by CI) rejects a movable tag. To update one, review the upstream release, then change the hash and the comment together.
 
 CI also runs `cargo deny --locked check advisories sources` against `deny.toml`: every locked crate on the three release targets is checked against the current RustSec database, including unmaintained, unsound and yanked notices, and crates must come from crates.io. Accepted notices are listed in `deny.toml` with the reason each remains. A new advisory fails the `RustSec advisories and crate sources` job, separately from build and test results.
+
+The normal build-and-test workflow also builds release executables and runs `package-release.py` end to end on Apple Silicon macOS, Intel macOS and Linux. This checks provenance, notices, signing where applicable, archive generation, and the packaged executable's geometry smoke test before tagging a release. These verification jobs do not publish releases.

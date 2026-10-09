@@ -26,11 +26,17 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-24.04]
+        include:
+          - os: macos-latest
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x86_64
+          - os: ubuntu-24.04
+            platform: linux-x86_64
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
@@ -92,3 +98,15 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
           xvfb-run -a cargo test --locked --workspace --all-targets
+      # Exercise packaging before a release tag is created. These archives stay
+      # on the runner; this workflow cannot publish a GitHub release.
+      - name: Build macOS release app
+        if: runner.os == 'macOS'
+        run: sh scripts/bundle-macos.sh
+      - name: Build Linux release app
+        if: runner.os == 'Linux'
+        run: cargo build --locked --release -p ferrender
+      - name: Package and smoke-test native release
+        env:
+          PACKAGE_PLATFORM: ${{ matrix.platform }}
+        run: python3 scripts/package-release.py --platform "$PACKAGE_PLATFORM"

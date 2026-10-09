@@ -8,8 +8,13 @@ const ALLOW: &str = "FERRENDER_ALLOW_UNVERIFIED_OCCT";
 
 /// The pinned release and digest, when `root` is the directory that
 /// scripts/prepare-occt.py extracted from the pinned archive for `target`.
-fn verified(pins: &Value, target: &str, root: Option<&Path>) -> Result<String, String> {
+pub(crate) fn verified(pins: &Value, target: &str, root: Option<&Path>) -> Result<String, String> {
     let root = root.ok_or("OCCT_ROOT is not set, so cadrum chooses or downloads its own archive")?;
+    // Cargo runs each build script in its own package directory. A relative
+    // value would name different directories here and in cadrum's build script.
+    if !root.is_absolute() {
+        return Err("OCCT_ROOT must be absolute so Ferrender and cadrum verify the same directory".into());
+    }
     let asset = &pins["assets"][target];
     let (Some(digest), Some(size)) = (asset["sha256"].as_str(), asset["size"].as_u64()) else {
         return Err(format!("there is no pinned OpenCascade archive for {target}"));
