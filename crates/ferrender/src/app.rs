@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Color32, Context, Key, Modifiers, Pos2, Rect, ViewportCommand};
-use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Pattern, PatternKind, LinearDirection, Revolve, Shell, Sweep, SweepOrient, Text, Thread, Transform};
+use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Loft, LoftSection, Pattern, PatternKind, LinearDirection, Revolve, Shell, Sweep, SweepOrient, Text, Thread, Transform};
 pub use fr_core::face::Face;
 use fr_core::render::Camera;
 use fr_core::sketch::Clip;
@@ -128,6 +128,17 @@ pub struct SweepDlg {
     /// The parts of the path to sweep, as fractions of its length; empty means all of it.
     pub spans: Vec<[f64; 2]>,
     pub orient: SweepOrient,
+}
+
+/// The Loft dialog: closed regions of sketches on different planes, in the order they are skinned.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LoftDlg {
+    /// The feature being edited, or none when creating one.
+    pub editing: Option<Id>,
+    pub sections: Vec<LoftSection>,
+    /// Straight walls between neighbouring sections instead of one smooth surface.
+    pub ruled: bool,
+    pub op: Op,
 }
 
 /// The Extrude, Revolve and Sweep dialogs.
@@ -405,6 +416,7 @@ pub enum Dialog {
     PickPlane,
     PointCoordinates(PointCoordsDlg),
     Feature(FeatureDlg),
+    Loft(LoftDlg),
     Transform(TransformDlg),
     Combine(CombineDlg),
     Pattern(PatternDlg),
@@ -525,6 +537,24 @@ impl Dialog {
                     }
                 }
             }
+            Dialog::Loft(l) => {
+                if l.sections.len() < 2 {
+                    return Err("Click a closed region in each of two or more sketches on different planes.".into());
+                }
+                let kind = FeatureKind::Loft(Loft { sections: l.sections.clone(), ruled: l.ruled, op: l.op });
+                match l.editing {
+                    Some(id) => {
+                        d.feature_mut(id).ok_or("That feature no longer exists.")?.kind = kind;
+                        Ok(id)
+                    }
+                    None => {
+                        for section in &l.sections {
+                            if let Some(s) = d.sketch_mut(section.sketch) { s.visible = false; }
+                        }
+                        Ok(d.add_feature(kind))
+                    }
+                }
+            }
             Dialog::Primitive(p) => p.apply(d),
             Dialog::Transform(t) => {
                 let v = |d: &mut Document, s: &String, kind| d.enter(if s.trim().is_empty() { "0" } else { s }, kind);
@@ -625,7 +655,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_))
+        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Loft(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_))
     }
 }
 
@@ -732,6 +762,7 @@ pub enum Action {
     Extrude,
     Revolve,
     Sweep,
+    Loft,
     Transform,
     Combine,
     Parameters,
@@ -1677,6 +1708,10 @@ impl App {
                 self.finish_sketch();
                 self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch: Some(w.path_sketch), path: w.path.clone(), spans: w.spans.clone(), orient: w.orient }), editing: Some(id), sketch: Some(w.sketch), profiles: w.profiles.clone(), text: String::new(), symmetric: false, op: w.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
             }
+            FeatureKind::Loft(l) => {
+                self.finish_sketch();
+                self.dialog = Dialog::Loft(LoftDlg { editing: Some(id), sections: l.sections.clone(), ruled: l.ruled, op: l.op });
+            }
             FeatureKind::Revolve(r) => {
                 self.finish_sketch();
                 self.dialog = Dialog::Feature(FeatureDlg { revolve: true, sweep: None, editing: Some(id), sketch: Some(r.sketch), profiles: r.profiles.clone(), text: shown(&r.angle), symmetric: false, op: r.op, axis: r.axis, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
@@ -1708,6 +1743,20 @@ impl App {
         let path_sketch = visible.iter().rev().copied().find(|id| Some(*id) != sketch && fr_core::profile::chain(doc.sketch(*id).unwrap(), &[]).is_ok());
         let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
         self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch, path: Vec::new(), spans: Vec::new(), orient: SweepOrient::Follow }), editing: None, sketch, profiles, text: String::new(), symmetric: false, op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
+    }
+
+    /// Opens Loft with the sections that can be told already: every visible sketch that has
+    /// exactly one closed region, in timeline order, when there are at least two of them.
+    fn open_loft_dialog(&mut self) {
+        self.finish_sketch();
+        let doc = self.doc();
+        let mut sections: Vec<LoftSection> = doc.sketches().filter(|(f, s)| s.visible && !doc.is_suppressed(f.id)).filter_map(|(f, s)| match fr_core::profile::profiles(s).as_slice() {
+            [only] => Some(LoftSection { sketch: f.id, profile: only.edges.clone() }),
+            _ => None,
+        }).collect();
+        if sections.len() < 2 { sections.clear(); }
+        let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
+        self.dialog = Dialog::Loft(LoftDlg { editing: None, sections, ruled: false, op });
     }
 
     fn open_feature_dialog(&mut self, revolve: bool) {
@@ -2236,6 +2285,7 @@ impl App {
             Action::Extrude => self.open_feature_dialog(false),
             Action::Revolve => self.open_feature_dialog(true),
             Action::Sweep => self.open_sweep_dialog(),
+            Action::Loft => self.open_loft_dialog(),
             Action::Text => self.open_text_dialog(),
             Action::Transform => {
                 if let Some(component) = self.sel_component { self.move_component_dialog(component); return; }
@@ -2387,14 +2437,14 @@ impl App {
             }
             Action::Pattern => {
                 self.finish_sketch();
-                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Sweep(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
+                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Sweep(_) | FeatureKind::Loft(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
                 let available = |f: &&fr_core::Feature| !self.doc().is_suppressed(f.id) && !self.session.built.errors.contains_key(&f.id) && self.session.built.components.contains_key(&f.owner) && ok(&f.kind);
                 let sources: Vec<_> = self.doc().features.iter().take(self.doc().active()).filter(available).collect();
                 let chosen = self.sel_feature.or(self.sel_body).filter(|id| sources.iter().any(|f| f.id == *id));
                 let source = chosen.or_else(|| sources.iter().rev().find(|f| f.owner == self.doc().active_component).map(|f| f.id));
                 match source {
                     Some(_) => self.dialog = Dialog::Pattern(PatternDlg::new(source)),
-                    None => self.toast("There is no extrusion, revolve, sweep, primitive, standalone text or imported mesh to repeat yet."),
+                    None => self.toast("There is no extrusion, revolve, sweep, loft, primitive, standalone text or imported mesh to repeat yet."),
                 }
             }
             Action::Section => self.show_section = !self.show_section,

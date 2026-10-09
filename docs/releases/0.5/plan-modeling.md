@@ -56,11 +56,21 @@ What it could not do:
 
 cadrum 0.8.20 exposes `loft(sections, ruled)`, `helix(radius, pitch, height, axis, x_ref)`, a 3-D `bspline` edge, and `sweep(profile, spine, orient)` over any edges, not only planar ones. The kernel side of both features exists; the Ferrender side is the work:
 
-- **Loft.** `FeatureKind::Loft { sketches: Vec<Id>, profiles, ruled, closed, op }` taking two or more closed regions from sketches on different planes (construction planes already stack them), tags per section so later fillets and shells find faces, the usual join/cut/intersect, the dialog and the MCP command. Mismatched vertex counts between sections are the classic failure and should be refused with the count, not silently twisted.
+- **Loft: built** (see "Loft as built" below). The plan was: `FeatureKind::Loft { sketches: Vec<Id>, profiles, ruled, closed, op }` taking two or more closed regions from sketches on different planes (construction planes already stack them), tags per section so later fillets and shells find faces, the usual join/cut/intersect, the dialog and the MCP command. Mismatched vertex counts between sections are the classic failure and should be refused with the count, not silently twisted.
 - **3-D paths for Sweep.** Two curve sources that are not sketches: a helix (axis, radius, pitch, turns, taper) and a 3-D spline through points, each a timeline feature with a handle in the viewport. `Sweep` gains `path3d: Option<Id>` as an alternative to `path_sketch`, plus `twist` (degrees over the path) and `scale` at the end (a tapering stem is scale 0.2). The existing span logic should carry over unchanged.
 - **Splines with n points** in `add_geometry` and the solver, keeping four as the drawn default.
 
 With these, the pumpkin is three sections lofted, a helix-and-spline stem swept with taper and twist, and a fillet: about five features and no Boolean.
+
+### Loft as built
+
+`FeatureKind::Loft { sections: [{sketch, profile}], ruled, op }`, the `loft` command (also `edit_feature`, scripts and MCP), Model → Loft with numbered sections picked in the viewport, and file format 14. Kernel tests are in `crates/fr-core/tests/loft_kernel.rs`, feature tests in `tests/loft.rs`, app tests in `uitest/loft.rs`.
+
+- Unequal edge counts are refused with both counts, as planned. That includes a circle to a square, which is a common wish; the way through is to draw the circle as four arcs, and a "split to match" helper would remove the chore.
+- Each section after the first is turned and, if need be, reversed so its corners sit nearest the matching corners of the one before, compared about each section's own centre. Without this, two squares started at different corners loft into a twisted solid with no error.
+- Faces: the ends are caps, and each side face carries the entity of the first section's edge it grew from, so a fillet on a loft resolves by tag.
+- Not built: `closed` (the binding's `loft` always caps the ends, so a ring of sections needs a kernel change), a section that is a single point (the pumpkin's poles: the binding takes edges only), sections with holes, and guide rails. The pumpkin therefore still needs small end sections rather than true points.
+- The result is checked for positive volume, a closed triangulation that agrees with the exact volume, and extents that contain every section (and, with straight walls, do not exceed them). There is no closed-form volume to compare against, unlike extrude, revolve and sweep.
 
 ## 3. Materials and appearance
 

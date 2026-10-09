@@ -71,7 +71,9 @@ Ordered roughly by how much each one cost.
       mitred, closed paths, Follow or Fixed orientation. Still missing: paths that leave one
       plane (helix, 3D splines), twist and scale along the path, a guide rail, and rounded
       instead of mitred corners.
-- [ ] **Loft** between profiles, for limbs, snouts and tails that change section.
+- [x] **Loft** between profiles, for limbs, snouts and tails that change section. Sections
+      need equal edge counts and no holes; a section that is a single point, guide rails and
+      a closed loop of sections are not built.
 - [x] **Spline sketch items.** 0.2 adds editable curves through four fit points.
 - [ ] **Sphere and ellipse** sketch items or primitives. Joints, eyes and beads
       were faked with flat-ended cylinders.
@@ -102,7 +104,7 @@ proposed or noted as limits along the way and are still open.
 
 ### Set aside after the Fusion tutorial review ("leave for later")
 
-- [ ] **Loft** between profiles (the moka pot's spout). The kernel has it; not wired up.
+- [x] **Loft** between profiles (the moka pot's spout).
 - [x] **Threads** and a **Hole** feature with a thread catalog (clearance, tapped,
       counterbore, countersink). Still open on these:
   - [ ] Check the catalog's tap drill and clearance numbers against ISO 273 and the inch

@@ -196,7 +196,7 @@ been tried against the live API.
 | **Sketch** | Line, rectangle, circle, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
 | **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; signed X/Y position, length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
-| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
+| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, loft through sections, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
@@ -210,7 +210,7 @@ been tried against the live API.
 | **Files** | `.ferr` documents, plain JSON or a container with images, meshes, a thumbnail and a geometry cache; STL, OBJ, 3MF in; STL and STEP out; recovery of unsaved work after a crash |
 | **AI** | MCP server, local command socket, built-in assistant |
 
-It is early, and smaller than what it imitates: no joints or linked component instances, no loft, no drawings, and the
+It is early, and smaller than what it imitates: no joints or linked component instances, no drawings, and the
 [limits](#limits) below are real. `TODO.md` has the list.
 
 ## Additions in 0.4.0
@@ -392,6 +392,23 @@ result does not have the volume the sweep must have. The path must lie in one
 sketch plane, so a helix or a path that leaves its plane is not possible yet,
 and the profile cannot twist or change size along the way.
 
+Loft skins one solid through closed profiles drawn in sketches on different
+planes: a bottle, a hull, a duct that changes from one outline to another. Draw
+each section in its own sketch (New Sketch on an offset or construction plane,
+or on a face), then Model → Loft. Sketches with a single closed region are
+offered in timeline order; otherwise click a region in each sketch, from one end
+to the other. Sections are numbered in the viewport in the order they are
+joined; click a numbered one to leave it out, or reorder them with the arrows in
+the dialog. Smooth walls curve through every section; Straight joins neighbours
+with flat or ruled walls, which is the same thing when there are only two. The
+ends are flat caps. Every section needs the same number of edges (four lines to
+four lines, a circle to a circle); a mismatch is refused with both counts
+rather than matched up by guesswork. Corners are paired nearest to nearest, so
+it does not matter where an outline was started or which way round it was drawn.
+A region with a hole cannot be a section: loft the hole separately and cut it.
+A loft's faces are named by the edges of its first section, so fillets and
+shells on it survive edits.
+
 ### Primitives (0.3 test build)
 
 Choose **Model → Primitives → Box, Cylinder, Sphere, Cone or Torus**, or use the **Primitive** toolbar button. Set dimensions, position, optional rotation, and New Body / Join / Cut / Intersect. Dimensions and placement accept units and named parameters. Place in view chooses a position on an origin plane, flat face or construction plane; optional alignment and colored arrows/rings refine it. Placement captures numeric values once. Double-click the timeline feature to edit it; no sketch is required.
@@ -414,7 +431,7 @@ its shape changes; see the [review](docs/releases/0.4/review.md) for the remaini
 
 ### Exact and mesh bodies
 
-An untapered sketch extrusion, revolve, sweep or primitive creates an exact solid: true
+An untapered sketch extrusion, revolve, sweep, loft or primitive creates an exact solid: true
 planes, cylinders and blends, turned into triangles only for display and STL.
 An imported mesh, a tapered extrude, and anything combined with one of those is
 a mesh body. Both kinds work with extrude, revolve, cut, join, move and
@@ -452,7 +469,7 @@ cancel. Dragging is disabled until the updated view finishes drawing.
 
 ### Pattern
 
-Repeats an extrude, revolve, sweep, primitive, standalone text or imported mesh: around an axis,
+Repeats an extrude, revolve, sweep, loft, primitive, standalone text or imported mesh: around an axis,
 in a row or rectangular grid, or mirrored through an origin plane. Axes belong
 to the source component. For four corners choose Linear, Count 2, and enable
 Second direction with Count 2 on another axis. Enter the distance between corner
@@ -759,7 +776,7 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 - Reference images are limited to 8 MiB of source data, 4,194,304 pixels, and
   8192 pixels per side. Calibration adjusts uniform scale; it cannot undo
   photographic perspective distortion.
-- Not built yet: helix and other paths that leave one sketch plane, sweeps that twist or scale, loft, sphere primitives, draft, and
+- Not built yet: helix and other paths that leave one sketch plane, sweeps that twist or scale, lofts through unequal or holed sections, sphere primitives, draft, and
   copying a whole body. See `TODO.md`.
 
 ## Credits

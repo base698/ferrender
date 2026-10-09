@@ -1644,9 +1644,9 @@ fn pick_path(app: &App, doc: &Document, pos: Pos2, profile: Option<Id>, selected
 }
 
 /// The smallest profile under a screen position among the sketches a feature can use.
-fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: Option<Id>) -> Option<(Id, Profile)> {
+fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: &[Id]) -> Option<(Id, Profile)> {
     doc.sketches()
-        .filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also == Some(f.id)))
+        .filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also.contains(&f.id)))
         .filter_map(|(f, s)| {
             let at = sketch_pos(app, s, pos)?;
             profiles(s).into_iter().filter(|p| p.contains(at)).min_by(|a, b| a.area().total_cmp(&b.area())).map(|p| (f.id, p))
@@ -1665,11 +1665,13 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
             if app.doc().is_suppressed(feature.id) || app.session.built.errors.contains_key(&feature.id) || !app.shown().component_visible(feature.owner) { sk.visible = false; }
         }
     }
-    let dlg_sketch = match &app.dialog {
-        Dialog::Feature(f) => f.sketch,
-        _ => None,
+    // Sketches a dialog is using are drawn even when they were put away.
+    let dlg_sketch: Vec<Id> = match &app.dialog {
+        Dialog::Feature(f) => f.sketch.into_iter().collect(),
+        Dialog::Loft(l) => l.sections.iter().map(|section| section.sketch).collect(),
+        _ => Vec::new(),
     };
-    for (f, sk) in doc.sketches().filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || dlg_sketch == Some(f.id))) {
+    for (f, sk) in doc.sketches().filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || dlg_sketch.contains(&f.id))) {
         let _ = f;
         draw_sketch(app, painter, sk, false, Hit::None, &mut Vec::new());
     }
@@ -1699,7 +1701,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
             }
         }
         Dialog::Feature(mut f) => {
-            let over = hover.and_then(|p| pick_profile(app, &doc, p, f.sketch));
+            let over = hover.and_then(|p| pick_profile(app, &doc, p, f.sketch.as_slice()));
             if let Some(sk) = f.sketch.and_then(|s| doc.sketch(s)) {
                 for p in profiles(sk).iter().filter(|p| f.profiles.contains(&p.edges)) {
                     fill(app, painter, sk, p, Color32::from_rgba_unmultiplied(0, 120, 255, 84));
@@ -1830,6 +1832,31 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                     }
                 }
                 app.dialog = Dialog::Feature(f);
+            }
+        }
+        Dialog::Loft(mut l) => {
+            let over = hover.and_then(|p| pick_profile(app, &doc, p, &dlg_sketch));
+            // Each section filled and numbered in the order it is joined.
+            for (i, section) in l.sections.iter().enumerate() {
+                let Some(sk) = doc.sketch(section.sketch) else { continue };
+                let all = profiles(sk);
+                let Some(p) = all.iter().find(|p| p.edges == section.profile) else { continue };
+                fill(app, painter, sk, p, Color32::from_rgba_unmultiplied(0, 120, 255, 84));
+                let at = on_screen(app, sk, p.centroid());
+                painter.circle_filled(at, 10.0, colors.selected);
+                painter.text(at, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(12.0), Color32::WHITE);
+            }
+            if let Some((sid, p)) = &over {
+                fill(app, painter, doc.sketch(*sid).unwrap(), p, Color32::from_rgba_unmultiplied(0, 120, 255, 40));
+            }
+            if clicked.is_some() && let Some((sid, p)) = over {
+                // A sketch gives one section: clicking its chosen region drops it, another region replaces it.
+                match l.sections.iter().position(|section| section.sketch == sid) {
+                    Some(i) if l.sections[i].profile == p.edges => { l.sections.remove(i); }
+                    Some(i) => l.sections[i].profile = p.edges,
+                    None => l.sections.push(fr_core::doc::LoftSection { sketch: sid, profile: p.edges }),
+                }
+                app.dialog = Dialog::Loft(l);
             }
         }
         Dialog::Blend(mut b) => {
@@ -2126,6 +2153,9 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Primitive(d), _) if d.pick_surface => "Click a flat face or construction plane for placement.",
         (Dialog::Primitive(d), _) if d.placing => "Click to place the primitive. Visible sketch geometry snaps; Alt releases. OK commits the feature.",
         (Dialog::Primitive(_), _) => "Use Place in view, colored arrows/rings, or Position fields. F fits the preview.",
+        (Dialog::Loft(l), _) if l.sections.is_empty() => "Click a closed region in the first sketch, then one in each sketch after it, in order.",
+        (Dialog::Loft(l), _) if l.sections.len() == 1 => "Click a closed region in the next sketch, drawn on another plane.",
+        (Dialog::Loft(_), _) => "Click another region to add a section, or a numbered one to leave it out. Reorder them in the dialog.",
         (Dialog::Pattern(p), _) if p.kind==1 => "Drag a last-copy handle to set the span. Visible sketch geometry snaps along that axis; Alt releases.",
         (Dialog::Pattern(_), _) => "The dots show where each copy will go.",
         (Dialog::Blend(_), _) => "Click edges of a body to add or remove them.",

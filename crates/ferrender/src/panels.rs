@@ -106,6 +106,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Extrude", "E", Action::Extrude);
             item(app, ui, "Revolve", "", Action::Revolve);
             item(app, ui, "Sweep", "", Action::Sweep);
+            item(app, ui, "Loft", "", Action::Loft);
             item(app, ui, "Text / Emboss", "", Action::Text);
             ui.menu_button("Primitives", |ui| {
                 for (kind, name) in crate::primitives::NAMES.into_iter().enumerate() { item(app, ui, name, "", Action::Primitive(kind)); }
@@ -320,6 +321,9 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 if big(ui, icon::PATH, "Sweep", sweep, "Carry a sketch profile along a path drawn in another sketch").clicked() {
                     app.run(&ctx, Action::Sweep);
                 }
+                if big(ui, icon::STACK, "Loft", matches!(app.dialog, Dialog::Loft(_)), "Skin a solid through closed profiles drawn on different planes").clicked() {
+                    app.run(&ctx, Action::Loft);
+                }
                 if big(ui, icon::CUBE, "Primitive", matches!(app.dialog, Dialog::Primitive(_)), "Create a box, cylinder, sphere, cone or torus").clicked() {
                     app.run(&ctx, Action::Primitive(0));
                 }
@@ -448,6 +452,7 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Extrude(_) => icon::ARROW_FAT_LINES_UP,
         FeatureKind::Revolve(_) => icon::ARROWS_CLOCKWISE,
         FeatureKind::Sweep(_) => icon::PATH,
+        FeatureKind::Loft(_) => icon::STACK,
         FeatureKind::Import(_) => icon::DOWNLOAD_SIMPLE,
         FeatureKind::Transform(_) => icon::ARROWS_OUT_CARDINAL,
         FeatureKind::Remove(_) => icon::MINUS_CIRCLE,
@@ -952,13 +957,54 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 confirm(app, ui, "OK");
             });
         }
+        Dialog::Loft(mut l) => {
+            dialog_window(app, if l.editing.is_some() { "Edit Loft" } else { "Loft" }).show(ctx, |ui| {
+                egui::Grid::new("loft").num_columns(2).show(ui, |ui| {
+                    ui.label("Sections");
+                    ui.vertical(|ui| {
+                        if l.sections.is_empty() {
+                            ui.label(RichText::new("click a closed region in each sketch").color(colors.accent));
+                        }
+                        // Reorder or drop a section; the order is the order they are joined in.
+                        let mut change = None;
+                        let last = l.sections.len().saturating_sub(1);
+                        for (i, section) in l.sections.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let name = app.doc().feature(section.sketch).map_or_else(|| format!("sketch {}", section.sketch), |x| x.name.clone());
+                                ui.label(format!("{}. {name} · {} edge{}", i + 1, section.profile.len(), if section.profile.len() == 1 { "" } else { "s" }));
+                                if ui.add_enabled(i > 0, egui::Button::new(icon::ARROW_UP).small()).on_hover_text("Join this section earlier").clicked() { change = Some((i, i - 1)); }
+                                if ui.add_enabled(i < last, egui::Button::new(icon::ARROW_DOWN).small()).on_hover_text("Join this section later").clicked() { change = Some((i, i + 1)); }
+                                if ui.add(egui::Button::new(icon::X).small()).on_hover_text("Leave this section out").clicked() { change = Some((i, usize::MAX)); }
+                            });
+                        }
+                        match change {
+                            Some((i, usize::MAX)) => { l.sections.remove(i); }
+                            Some((i, j)) => l.sections.swap(i, j),
+                            None => {}
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Walls");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut l.ruled, false, "Smooth").on_hover_text("One surface curving through every section");
+                        ui.selectable_value(&mut l.ruled, true, "Straight").on_hover_text("Flat or ruled walls between neighbouring sections");
+                    });
+                    ui.end_row();
+                    op_row(ui, &mut l.op, &Op::ALL);
+                });
+                ui.label(RichText::new("Click a closed region in each sketch, from one end to the other. Every section needs the same number of edges.").color(colors.muted));
+                if ui.small_button("Clear sections").clicked() { l.sections.clear(); }
+                app.dialog = Dialog::Loft(l);
+                confirm(app, ui, "OK");
+            });
+        }
         Dialog::Pattern(mut p) => {
             dialog_window(app, if p.editing.is_some() { "Edit Pattern" } else { "Pattern" }).show(ctx, |ui| {
                 let before = p.editing.and_then(|id| app.doc().features.iter().position(|f| f.id == id)).unwrap_or(app.doc().active());
                 let owner = p.editing.and_then(|id| app.doc().feature(id).map(|f| f.owner));
                 let sources: Vec<(Id, String)> = app.doc().features.iter().take(before)
                     .filter(|f| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner) && owner.is_none_or(|owner| f.owner == owner))
-                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Sweep(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
+                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Sweep(_) | FeatureKind::Loft(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
                     .map(|f| (f.id, format!("{} · {}", f.name, app.doc().component_name(f.owner)))).collect();
                 let shown = sources.iter().find(|s| Some(s.0) == p.source).map_or("choose".to_owned(), |s| s.1.clone());
                 egui::Grid::new("pattern").num_columns(3).show(ui, |ui| {
