@@ -1350,6 +1350,12 @@ impl Document {
                     Axis::Line(l) => s.line(l).ok_or("its axis line was deleted")?,
                 };
                 let picked = Self::pick(&all, &r.profiles)?;
+                // Say which points are across the axis, so they can be moved or the axis changed.
+                if let Some((past, by)) = Self::axis_crossing(s, &r.profiles, r.axis) {
+                    let axis = match r.axis { Axis::X => "the sketch's X axis".to_owned(), Axis::Y => "the sketch's Y axis".to_owned(), Axis::Line(l) => format!("line {l}") };
+                    let ids = past.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                    return Err(format!("the profile crosses the axis ({axis}) by {} mm: {} {} on the other side (point{} {ids}); choose an axis the profile does not cross, or move {} onto the axis", crate::units::trim_num(by, 3), past.len(), if past.len() == 1 { "point lies" } else { "points lie" }, if past.len() == 1 { "" } else { "s" }, if past.len() == 1 { "it" } else { "them" }));
+                }
                 let l = exact::revolve(&picked, &plane, a, b, r.angle.v)?;
                 let t = exact::tag_revolve(&l, &picked, &plane, a, b, r.angle.v, f.id);
                 Ok(Some((Shape::Exact(l, t), r.op)))
@@ -2004,6 +2010,27 @@ impl Document {
     }
 
     /// The axis line of a revolve in sketch coordinates, for drawing.
+    /// Where a revolve profile crosses its axis: the sketch points on the smaller side,
+    /// with how far that side reaches past the axis in sketch units. `None` when the
+    /// chosen profiles (as boundary edge sets; empty means every outer profile) lie on
+    /// one side, or the axis cannot be resolved.
+    pub fn axis_crossing(s: &Sketch, chosen: &[Vec<Id>], axis: Axis) -> Option<(Vec<Id>, f64)> {
+        let (a, b) = Self::axis_line(s, axis)?;
+        let along = b - a;
+        if along.length() < 1e-9 { return None; }
+        let all = profile::profiles(s);
+        let picked: Vec<&Profile> = if chosen.is_empty() { all.iter().filter(|p| p.depth % 2 == 0).collect() } else { all.iter().filter(|p| chosen.contains(&p.edges)).collect() };
+        let mut points: Vec<Id> = picked.iter().flat_map(|p| p.edges.iter().flat_map(|e| s.ent_points(*e))).collect();
+        points.sort();
+        points.dedup();
+        let side = |id: Id| along.perp_dot(s.pos(id) - a) / along.length();
+        let (lo, hi) = points.iter().map(|p| side(*p)).fold((0.0f64, 0.0f64), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        if !(lo < -1e-6 && hi > 1e-6) { return None; }
+        let below = lo.abs() < hi;
+        let past: Vec<Id> = points.into_iter().filter(|p| if below { side(*p) < -1e-6 } else { side(*p) > 1e-6 }).collect();
+        Some((past, lo.abs().min(hi)))
+    }
+
     pub fn axis_line(s: &Sketch, axis: Axis) -> Option<(DVec2, DVec2)> {
         match axis {
             Axis::X => Some((DVec2::ZERO, DVec2::X)),

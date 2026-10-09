@@ -777,6 +777,25 @@ fn dialogs(app: &mut App, ctx: &Context) {
                             }
                         });
                         ui.end_row();
+                        // A profile across the axis: say which points, show them, and offer the fixes.
+                        if let Some((sid, past, by)) = app.revolve_crossing() {
+                            let unit = app.doc().units;
+                            ui.label(RichText::new("Across the axis").color(colors.error));
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(format!("{} point{} {} {} {} past the axis, ringed in red.", past.len(), if past.len() == 1 { "" } else { "s" }, if past.len() == 1 { "lies" } else { "lie" }, fr_core::units::fmt_len(by, unit), unit.name())).color(colors.error));
+                                ui.horizontal(|ui| {
+                                    let sk = app.doc().sketch(sid).cloned();
+                                    for (axis, name) in [(Axis::X, "Use X"), (Axis::Y, "Use Y")] {
+                                        let fits = axis != f.axis && sk.as_ref().is_some_and(|sk| fr_core::Document::axis_line(sk, axis).is_some() && fr_core::Document::axis_crossing(sk, &f.profiles, axis).is_none());
+                                        if fits && ui.button(name).on_hover_text("The profile lies on one side of this axis").clicked() { f.axis = axis; }
+                                    }
+                                    if by <= 2.0 && ui.button(if past.len() == 1 { "Move it onto the axis" } else { "Move them onto the axis" }).on_hover_text("Puts the ringed points on the axis and keeps them there").clicked() {
+                                        app.move_points_onto_axis(sid, &past, f.axis);
+                                    }
+                                });
+                            });
+                            ui.end_row();
+                        }
                         value_row(app, ui, "Angle", &mut f.text, Kind::Angle);
                     } else {
                         if !f.through_all {

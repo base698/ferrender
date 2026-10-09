@@ -339,6 +339,47 @@ fn points_near_an_axis_land_on_it_and_splines_carry_on() {
 }
 
 #[test]
+fn a_revolve_across_the_axis_names_the_points_and_can_move_them_onto_it() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    // A profile right of the Y axis whose top-left corner is 3 mm past it: too far for the
+    // axis snap, close enough for the dialog's fix.
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x, y) in [(0.0, 0.0), (20.0, 0.0), (20.0, 30.0), (-3.0, 30.0), (0.0, 0.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    assert_eq!(sk.entities.len(), 4);
+    let corner = *sk.points.iter().find(|(_, p)| p.x < -1.0).map(|(id, _)| id).expect("the corner past the axis");
+    assert_eq!(fr_core::Document::axis_crossing(&sk, &[], fr_core::doc::Axis::Y).map(|(p, by)| (p, (by * 100.0).round() / 100.0)), Some((vec![corner], 3.0)));
+    assert!(fr_core::Document::axis_crossing(&sk, &[], fr_core::doc::Axis::X).is_none(), "it only touches X, which is allowed");
+
+    run(&mut h, Action::Revolve);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the revolve dialog should open") };
+    assert!(f.revolve && f.axis == fr_core::doc::Axis::Y);
+    h.run_steps(2);
+    let error = h.state().preview.as_ref().and_then(|p| p.2.clone()).expect("the preview refuses the revolve");
+    assert!(error.contains("crosses the axis") && error.contains(&format!("point {corner}")), "{error}");
+    let (dialog_sid, past, by) = h.state().revolve_crossing().expect("the dialog knows which points are across");
+    assert_eq!((dialog_sid, past.clone()), (sid, vec![corner]));
+    assert!((by - 3.0).abs() < 0.01);
+
+    h.state_mut().move_points_onto_axis(sid, &past, fr_core::doc::Axis::Y);
+    h.run_steps(2);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    assert!(sk.pos(corner).x.abs() < 1e-9, "the corner is on the axis: {:?}", sk.pos(corner));
+    assert!(sk.constraints.values().any(|c| c.kind == CKind::Vertical && c.refs.contains(&corner) && c.refs.contains(&0)), "and held there");
+    assert!(h.state().revolve_crossing().is_none());
+    assert_eq!(h.state().preview.as_ref().and_then(|p| p.2.clone()), None, "the preview now shows the revolve");
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    assert!(h.state().session.built.errors.is_empty());
+}
+
+#[test]
 fn move_tool_moves_the_selection_in_a_sketch() {
     let mut h = harness();
     h.state_mut().create_sketch(Plane::XY);

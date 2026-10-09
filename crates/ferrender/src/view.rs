@@ -1704,6 +1704,15 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 for p in profiles(sk).iter().filter(|p| f.profiles.contains(&p.edges)) {
                     fill(app, painter, sk, p, Color32::from_rgba_unmultiplied(0, 120, 255, 84));
                 }
+                // Points across the revolve axis are ringed in red, matching the dialog's offer to fix them.
+                if f.revolve && let Some((_, past, _)) = app.revolve_crossing() {
+                    let red = Color32::from_rgb(214, 48, 48);
+                    for p in past {
+                        let at = on_screen(app, sk, sk.pos(p));
+                        painter.circle_stroke(at, 8.0, Stroke::new(2.2, red));
+                        painter.circle_filled(at, 2.5, red);
+                    }
+                }
                 if f.revolve
                     && let Some((a, b)) = Document::axis_line(sk, f.axis)
                 {

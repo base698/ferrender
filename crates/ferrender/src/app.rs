@@ -1158,6 +1158,46 @@ impl App {
         self.drag = Drag::None;
     }
 
+    /// The points of the Revolve dialog's profile that lie across its axis, with how far,
+    /// when the preview is refusing the revolve for that reason.
+    pub fn revolve_crossing(&self) -> Option<(Id, Vec<Id>, f64)> {
+        let Dialog::Feature(f) = &self.dialog else { return None };
+        if !f.revolve { return None; }
+        let sid = f.sketch?;
+        let sk = self.doc().sketch(sid)?;
+        let (past, by) = Document::axis_crossing(sk, &f.profiles, f.axis)?;
+        Some((sid, past, by))
+    }
+
+    /// Moves the given sketch points onto the Revolve dialog's axis and holds them there,
+    /// so a profile that just crosses the axis can be revolved.
+    pub fn move_points_onto_axis(&mut self, sid: Id, points: &[Id], axis: Axis) {
+        let r = self.session.edit(|d| {
+            let mut sk = d.sketch(sid).cloned().ok_or("The sketch no longer exists.")?;
+            let (a, b) = Document::axis_line(&sk, axis).ok_or("The axis line no longer exists.")?;
+            let along = (b - a).normalize_or_zero();
+            for p in points {
+                let at = sk.pos(*p);
+                let on = a + along * (at - a).dot(along);
+                if let Some(q) = sk.points.get_mut(p) { *q = on; }
+                let _ = match axis {
+                    Axis::X => sk.add_constraint(CKind::Horizontal, &[*p, 0], None),
+                    Axis::Y => sk.add_constraint(CKind::Vertical, &[*p, 0], None),
+                    Axis::Line(l) => sk.add_constraint(CKind::Coincident, &[*p, l], None),
+                };
+            }
+            sk.validate()?;
+            let report = solver::solve(&mut sk, &[]);
+            if !report.ok { return Err("The points cannot move onto the axis with the sketch's other constraints; edit the sketch instead.".into()); }
+            *d.sketch_mut(sid).unwrap() = sk;
+            Ok(())
+        });
+        match r {
+            Ok(()) => { self.preview = None; self.refresh(); }
+            Err(e) => self.toast(e),
+        }
+    }
+
     /// Turns the placed clicks into geometry once the tool has enough of them.
     pub fn commit_clicks(&mut self) {
         let (tool, mut c, construction, sides) = (self.tool, self.clicks.clone(), self.opts.construction, self.opts.sides.clamp(3, 64));
