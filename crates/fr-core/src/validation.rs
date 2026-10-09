@@ -135,9 +135,16 @@ pub fn document(d: &Document) -> Result<(), String> {
         expression(&p.expr)?;
     }
     let mut ids = BTreeSet::new();
+    let mut script_outputs = BTreeSet::new();
     let mut depths = std::collections::BTreeMap::from([(0,0usize)]);
     for f in &d.features {
         if f.id == 0 || !ids.insert(f.id) || f.id >= d.next_id { return Err("feature ids must be unique and below the next id".into()); }
+        if let Some(key) = &f.script_key {
+            if key.is_empty() || key.len() > 1024 { return Err("script output identities must be nonempty and no longer than 1024 bytes".into()); }
+            if let Some(chip) = f.made_by && !script_outputs.insert((chip, key)) {
+                return Err("a script run has duplicate output identities".into());
+            }
+        }
         let depth=*depths.get(&f.owner).ok_or("each feature owner must be root or an earlier component")?;
         if let FeatureKind::Component(c)=&f.kind {
             if depth>=32 {return Err("components can nest at most 32 levels deep".into());}

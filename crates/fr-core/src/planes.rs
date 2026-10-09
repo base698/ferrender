@@ -109,19 +109,15 @@ pub fn face(body: &Body, at: DVec3, frame: Option<[DVec3;2]>) -> Result<crate::f
 pub fn face_tagged(body: &Body, at: DVec3, frame: Option<[DVec3;2]>, tag: Option<&crate::tag::Tag>) -> Result<(crate::face::Face,Option<crate::tag::Tag>,crate::tag::Level),String> {
     use crate::tag::Level;
     let mut tries: Vec<(DVec3,Level)> = Vec::new();
+    let mut resolved_tag=None;
     if let Some(tag)=tag {
-        let faces=crate::exact::faces_tagged(&body.solids,&body.tags);
-        let exact_hit=faces.iter().find(|f|f.tag.as_ref()==Some(tag));
-        let family=exact_hit.or_else(||faces.iter().filter(|f|f.tag.as_ref().is_some_and(|t|t.family()==tag.family())).min_by(|a,b|a.at.distance(at).total_cmp(&b.at.distance(at))));
-        if let Some(f)=family {
-            let level=if exact_hit.is_some() {Level::Tag} else {Level::Origin};
-            for p in candidates(body,at,frame) { tries.push((p-f.normal*(p-f.at).dot(f.normal),level)); }
-            tries.push((f.at,level));
-        } else if faces.iter().any(|f| f.tag.is_some()) {
-            return Err("the tagged face is gone; edit the plane and pick it again".into());
-        }
+        let points=crate::exact::candidates(&body.solids,&[at],frame)[0];
+        let (f,level)=crate::exact::resolve_face(&body.solids,&body.tags,&crate::exact::FacePick {points,tag:Some(tag.clone())})
+            .map_err(|e|format!("the tagged face is gone or ambiguous; edit the plane and pick it again: {e}"))?;
+        for p in candidates(body,at,frame) { tries.push((p-f.normal*(p-f.at).dot(f.normal),level)); }
+        tries.push((f.at,level)); resolved_tag=f.tag;
     }
-    tries.extend(candidates(body,at,frame).into_iter().map(|p|(p,Level::Position)));
+    if tag.is_none() { tries.extend(candidates(body,at,frame).into_iter().map(|p|(p,Level::Position))); }
     for (p,level) in tries {
         let Some(f)=crate::face::Face::near(body,p) else { continue };
         let Some(plane)=f.plane else { continue };
@@ -129,8 +125,8 @@ pub fn face_tagged(body: &Body, at: DVec3, frame: Option<[DVec3;2]>, tag: Option
         let q=plane.to_local(p);
         if f.loops.iter().filter(|ring| crate::profile::inside(ring,q)).count()%2==1 {
             let found=crate::exact::face_tag_at(&body.solids,&body.tags,p);
-            if let (Some(wanted), Some(actual)) = (tag, found.as_ref()) {
-                if wanted.family() != actual.family() { continue; }
+            if let (Some(wanted), Some(actual)) = (resolved_tag.as_ref(), found.as_ref()) {
+                if wanted != actual { continue; }
             }
             return Ok((f,found,level));
         }
@@ -165,7 +161,7 @@ impl Document {
                 let body=built.body(*body).ok_or("a body it used no longer exists")?;
                 let local=if built.placements_applied {std::borrow::Cow::Owned(body.local_copy()?)} else {std::borrow::Cow::Borrowed(body)};
                 let (f,found,level)=face_tagged(&local,*at,*frame,tag.as_ref())?;
-                if tag.is_none() { *tag=found; }
+                if tag.as_ref().is_none_or(crate::tag::Tag::legacy) { *tag=found; }
                 let t=built.component_placement(owner).inverse()*built.component_placement(body.component);
                 Ok((f.plane.unwrap().transformed(t),f.outline.into_iter().flatten().map(|p|t.transform_point3(p)).collect(),Some(level)))
             }

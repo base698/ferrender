@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope};
+use rhai::{Dynamic, Engine, EvalAltResult, Map, NativeCallContext, Position, Scope};
 use serde_json::{Value, json};
 
 use crate::doc::Session;
@@ -241,6 +241,8 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     let inputs = resolve_inputs(&meta, &req.inputs, session)?;
     let inputs_dynamic = rhai::serde::to_dynamic(&inputs).map_err(|e| e.to_string())?;
     let before: Vec<Id> = session.doc.features.iter().map(|f| f.id).collect();
+    session.doc.begin_script_run();
+    let source_id = Arc::new(ring::digest::digest(&ring::digest::SHA256, req.source.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect::<String>());
     let mut engine = engine_with_limits();
     let ast = engine.compile(&req.source).map_err(|e| format!("the script does not parse: {e}"))?;
 
@@ -266,22 +268,22 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     for op in crate::api::OPS.iter().copied().filter(|o| !matches!(*o, "run_script" | "script_meta" | "batch")) {
         let name = script_name(op);
         let with_args = {
-            let (shared, outcome, sandbox) = (shared.clone(), outcome.clone(), sandbox.clone());
-            move |args: Map| -> Fallible { command(&shared, &outcome, &sandbox, op, args) }
+            let (shared, outcome, sandbox, source_id) = (shared.clone(), outcome.clone(), sandbox.clone(), source_id.clone());
+            move |ctx: NativeCallContext, args: Map| -> Fallible { command(&shared, &outcome, &sandbox, op, args, &source_id, ctx.call_position()) }
         };
         let bare = {
-            let (shared, outcome, sandbox) = (shared.clone(), outcome.clone(), sandbox.clone());
-            move || -> Fallible { command(&shared, &outcome, &sandbox, op, Map::new()) }
+            let (shared, outcome, sandbox, source_id) = (shared.clone(), outcome.clone(), sandbox.clone(), source_id.clone());
+            move |ctx: NativeCallContext| -> Fallible { command(&shared, &outcome, &sandbox, op, Map::new(), &source_id, ctx.call_position()) }
         };
         engine.register_fn(name, with_args);
         engine.register_fn(name, bare);
     }
     {
-        let (shared, outcome, sandbox) = (shared.clone(), outcome.clone(), sandbox.clone());
-        engine.register_fn("command", move |cmd: Map| -> Fallible {
+        let (shared, outcome, sandbox, source_id) = (shared.clone(), outcome.clone(), sandbox.clone(), source_id.clone());
+        engine.register_fn("command", move |ctx: NativeCallContext, cmd: Map| -> Fallible {
             let op = cmd.get("op").and_then(|o| o.clone().into_string().ok()).ok_or_else(|| runtime("command(map) needs an \"op\""))?;
             if op == "batch" { return Err(runtime("run a script's commands one at a time, not as a batch")); }
-            command(&shared, &outcome, &sandbox, &op, cmd)
+            command(&shared, &outcome, &sandbox, &op, cmd, &source_id, ctx.call_position())
         });
     }
     // Reading helpers.
@@ -465,6 +467,7 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     drop(engine);
     let mut out = Arc::try_unwrap(outcome).map(|m| m.into_inner().unwrap()).unwrap_or_default();
     *session = Arc::try_unwrap(shared).map(|m| m.into_inner().unwrap()).map_err(|_| "the script engine kept a handle on the session")?;
+    session.doc.finish_feature_id_reuse();
     out.features = session.doc.features.iter().map(|f| f.id).filter(|id| !before.contains(id)).collect();
     match result {
         Ok(v) => { out.result = rhai::serde::from_dynamic(&v).unwrap_or(Value::Null); }
@@ -496,7 +499,7 @@ pub fn script_name(op: &str) -> &str {
 }
 
 /// Runs one command for a script, checking paths against the sandbox and noting exports.
-fn command(shared: &Arc<Mutex<Session>>, outcome: &Arc<Mutex<Outcome>>, sandbox: &Sandbox, op: &str, args: Map) -> Fallible {
+fn command(shared: &Arc<Mutex<Session>>, outcome: &Arc<Mutex<Outcome>>, sandbox: &Sandbox, op: &str, args: Map, source_id: &str, at: Position) -> Fallible {
     // The generic command(map) entry point must have exactly the same privileges as
     // named host functions; nested scripts could otherwise supply a wider allow list.
     if matches!(op, "run_script" | "script_meta" | "batch") {
@@ -505,6 +508,16 @@ fn command(shared: &Arc<Mutex<Session>>, outcome: &Arc<Mutex<Outcome>>, sandbox:
     let mut cmd = dynamic_to_json(&Dynamic::from(args))?;
     if !cmd.is_object() { cmd = json!({}); }
     cmd["op"] = json!(op);
+    let explicit = cmd.as_object_mut().and_then(|o| o.remove("output_key"));
+    let key = if let Some(value) = explicit {
+        let key = value.as_str().filter(|key| !key.trim().is_empty() && key.len() <= 256)
+            .ok_or_else(|| runtime("output_key must be a nonempty string of at most 256 bytes"))?;
+        format!("explicit:{key}")
+    } else if let Some(name) = cmd.get("name").and_then(Value::as_str).filter(|name| !name.trim().is_empty() && name.len() <= 256) {
+        format!("named:{op}:{name}")
+    } else {
+        format!("source:{source_id}:{}:{}", at.line().unwrap_or(0), at.position().unwrap_or(0))
+    };
     if op == "save" && cmd.get("path").and_then(Value::as_str).is_none() {
         if let Some(path) = shared.lock().unwrap().path.as_ref() {
             cmd["path"] = json!(path.display().to_string());
@@ -518,7 +531,11 @@ fn command(shared: &Arc<Mutex<Session>>, outcome: &Arc<Mutex<Outcome>>, sandbox:
         if writes { outcome.lock().unwrap().exports.push(full); }
     }
     let mut s = shared.lock().unwrap();
-    let out = crate::api::execute(&mut s, &cmd, None).map_err(|e| runtime(format!("{op}: {e}")))?;
+    s.doc.begin_script_command(key);
+    let result = crate::api::execute(&mut s, &cmd, None);
+    let identity = s.doc.end_script_command();
+    let out = result.map_err(|e| runtime(format!("{op}: {e}")))?;
+    identity.map_err(runtime)?;
     json_to_dynamic(&out)
 }
 
@@ -710,7 +727,7 @@ mod sandbox_tests {
         let shared = Arc::new(Mutex::new(Session::default()));
         let outcome = Arc::new(Mutex::new(Outcome::default()));
         for op in ["run_script", "script_meta", "batch"] {
-            let err = command(&shared, &outcome, &Sandbox::default(), op, Map::new()).unwrap_err();
+            let err = command(&shared, &outcome, &Sandbox::default(), op, Map::new(), "test", Position::NONE).unwrap_err();
             assert!(err.to_string().contains("cannot be called from a script"));
         }
     }

@@ -30,19 +30,19 @@ fn run(inputs) {
         let xy = sk.points[key];
         if used.contains(id) { continue; }
         if xy[0] == 0.0 && xy[1] == 0.0 { continue; }
-        points.push(#{ x: xy[0], y: xy[1] });
+        points.push(#{ id: id, x: xy[0], y: xy[1] });
     }
     if points.len() == 0 { fail("the sketch has no lone points; add points where the bosses go"); }
     let origin = plane.origin; let x = plane.x; let y = plane.y; let n = plane.normal;
     for (p, i) in points {
         progress(i.to_float() / points.len(), "boss " + (i + 1));
         let at = [origin[0] + x[0] * p.x + y[0] * p.y, origin[1] + x[1] * p.x + y[1] * p.y, origin[2] + x[2] * p.x + y[2] * p.y];
-        let s = create_sketch(#{ plane: #{ origin: at, normal: n, x: x } }).sketch;
+        let s = create_sketch(#{ output_key: "boss-sketch-" + p.id, plane: #{ origin: at, normal: n, x: x } }).sketch;
         add_geometry(#{ sketch: s, items: [#{ type: "circle", center: [0, 0], radius: "(" + inputs.expr.diameter + ") / 2" }] });
-        extrude(#{ sketch: s, distance: inputs.expr.height, operation: "join" });
+        extrude(#{ output_key: "boss-solid-" + p.id, sketch: s, distance: inputs.expr.height, operation: "join" });
         if inputs.hole > 0.0 {
             let top = [at[0] + n[0] * inputs.height, at[1] + n[1] * inputs.height, at[2] + n[2] * inputs.height];
-            hole(#{ body: body, at: top, diameter: inputs.expr.hole, depth: inputs.expr.height });
+            hole(#{ output_key: "boss-hole-" + p.id, body: body, at: top, diameter: inputs.expr.hole, depth: inputs.expr.height });
         }
     }
     log(points.len() + " bosses added");

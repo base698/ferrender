@@ -70,7 +70,7 @@ fn outline(p: &Profile, plane: &Plane, z: f64) -> R<Vec<Edge>> {
 }
 
 /// Joins solids that may or may not touch into as few lumps as they make.
-fn fuse(parts: Vec<Solid>) -> R<Lumps> {
+fn fuse_unmerged(parts: Vec<Solid>) -> R<Lumps> {
     let mut it = parts.iter();
     let Some(first) = it.next() else { return Ok(Vec::new()) };
     if parts.len() == 1 {
@@ -80,8 +80,10 @@ fn fuse(parts: Vec<Solid>) -> R<Lumps> {
     for s in it {
         all = all + s;
     }
-    tidy(all.build_vec().map_err(|e| format!("the kernel could not join the shapes: {e}"))?)
+    all.build_vec().map_err(|e| format!("the kernel could not join the shapes: {e}"))
 }
+
+fn fuse(parts: Vec<Solid>) -> R<Lumps> { tidy(fuse_unmerged(parts)?) }
 
 /// Merges faces that lie on the same surface, as a user expects after a join.
 fn tidy(lumps: Vec<Solid>) -> R<Lumps> {
@@ -135,11 +137,23 @@ pub fn revolve(profiles: &[&Profile], plane: &Plane, a: DVec2, b: DVec2, degrees
 }
 
 /// `a` joined with, cut by or intersected with `b`. An empty result means nothing is left.
-pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> {
+pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> { boolean_impl(a,b,op,true) }
+
+fn boolean_impl(a: &[Solid], b: &[Solid], op: Bool, clean: bool) -> R<Lumps> {
     let fail = |e: cadrum::Error| format!("the kernel could not combine the shapes: {e}");
     let (va, vb) = (volume(a), volume(b));
     let out = match op {
-        Bool::Union => fuse(a.iter().chain(b).cloned().collect())?,
+        Bool::Union => {
+            // Build from borrowed inputs: Solid::clone deep-copies topology and
+            // discards the face IDs needed to compose Boolean history.
+            let mut inputs=a.iter().chain(b);
+            let out=if let Some(first)=inputs.next() {
+                let mut expr:Boolean<Solid>=first.into();
+                for input in inputs {expr=expr+input;}
+                expr.build_vec().map_err(fail)?
+            } else {Vec::new()};
+            if clean {tidy(out)?} else {out}
+        },
         Bool::Subtract | Bool::Intersect => {
             let mut out = Vec::new();
             for lump in a {
@@ -155,7 +169,7 @@ pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> {
                     }
                 }
             }
-            tidy(out)?
+            if clean { tidy(out)? } else { out }
         }
     };
     let v = volume(&out);
@@ -311,10 +325,54 @@ pub fn no_tags(lumps: &[Solid]) -> Tags {
     lumps.iter().map(|s| vec![None; s.iter_face().count()]).collect()
 }
 
-/// Every face named `Made` by `feature`, in kernel order: primitives, text, drills.
+/// A conservative geometric identity for faces without modeling provenance.
+/// It is independent of traversal order. Changes to these surfaces invalidate
+/// references, rather than allowing an unrelated face to inherit an ordinal.
+fn surface_tag(face: &Face, feature: Id) -> Tag {
+    let (at, normal) = face.project(face.center());
+    let quantize = |v: f64| (v * 1e7).round() as i64;
+    let mut signature: Vec<_> = g(face.center()).to_array().into_iter()
+        .chain(g(at).to_array()).chain(g(normal).to_array()).chain([face.area()])
+        .map(quantize).collect();
+    let mut edges: Vec<_> = face.iter_edge().map(|e| {
+        let p = e.approximation_segments(FINE);
+        let first = p.first().copied().unwrap_or_default();
+        let last = p.last().copied().unwrap_or_default();
+        let mut ends = [g(first).to_array().map(quantize), g(last).to_array().map(quantize)];
+        ends.sort();
+        (ends, g(e.project(face.center()).0).to_array().map(quantize))
+    }).collect();
+    edges.sort();
+    for (ends, middle) in edges { signature.extend(ends.into_iter().flatten()); signature.extend(middle); }
+    Tag::new(Origin::Surface { feature, signature }, kind_of(face))
+}
+
 pub fn fresh_tags(lumps: &[Solid], feature: Id) -> Tags {
-    let mut n = 0;
-    lumps.iter().map(|s| s.iter_face().map(|f| { let t = Tag::new(Origin::Made { feature, n }, kind_of(f)); n += 1; Some(t) }).collect()).collect()
+    lumps.iter().map(|s| s.iter_face().map(|f| Some(surface_tag(f, feature))).collect()).collect()
+}
+
+/// Primitive roles are defined in the constructor's local frame, so changing
+/// dimensions, rotation or kernel traversal never exchanges two plane faces.
+pub fn primitive_tags(lumps: &[Solid], primitive: &crate::primitives::Primitive, feature: Id) -> Tags {
+    use crate::primitives::PrimitiveShape;
+    let placement = crate::components::Placement { translate: primitive.position.clone(), rotate: primitive.rotate.clone() }.affine().inverse();
+    lumps.iter().map(|s| s.iter_face().map(|f| {
+        let (at, normal) = f.project(f.center());
+        let p = placement.transform_point3(g(at));
+        let n = placement.transform_vector3(g(normal));
+        let role = match &primitive.shape {
+            PrimitiveShape::Box { width, depth, height } => {
+                let dimensions = [width.v, depth.v, height.v];
+                let axis = (0..3).max_by(|a,b| n[*a].abs().total_cmp(&n[*b].abs())).unwrap();
+                format!("box:{}:{}", ["x","y","z"][axis], if p[axis] > dimensions[axis]/2. { "max" } else { "min" })
+            }
+            PrimitiveShape::Cylinder { height, .. } => if kind_of(f) == Kind::Plane { format!("cylinder:{}", if p.z > height.v/2. {"end"} else {"start"}) } else {"cylinder:side".into()},
+            PrimitiveShape::Cone { height, .. } => if kind_of(f) == Kind::Plane { format!("cone:{}", if p.z > height.v/2. {"end"} else {"start"}) } else {"cone:side".into()},
+            PrimitiveShape::Sphere { .. } => "sphere:surface".into(),
+            PrimitiveShape::Torus { .. } => "torus:surface".into(),
+        };
+        Some(Tag::new(Origin::Semantic { feature, role }, kind_of(f)))
+    }).collect()).collect()
 }
 
 /// A point on a segment away from its ends, lifted off the sketch plane by `lift`.
@@ -341,25 +399,34 @@ fn segments<'a>(profiles: &'a [&Profile]) -> impl Iterator<Item = (&'a Seg, Id)>
 /// `probes` give, per sketch segment, a point that lies only on that segment's face;
 /// `caps` give for each end a plane and a point on it.
 fn tag_sweep(lumps: &[Solid], probes: &[(DVec3, Id)], caps: [(Plane, DVec3); 2], feature: Id) -> Tags {
-    let mut n = 0;
-    lumps.iter().map(|s| s.iter_face().map(|f| {
+    let mut tags: Tags = lumps.iter().map(|s| s.iter_face().map(|f| {
         let kind = kind_of(f);
         if kind == Kind::Plane && let Some(surface) = f.surface() {
-            for (end, (plane, on)) in caps.iter().enumerate() {
-                if g(surface.axis_z).dot(plane.normal()).abs() > 1.0 - 1e-8 && (g(surface.origin) - plane.origin).dot(plane.normal()).abs() < 1e-6 && g(f.project(c(*on)).0).distance(*on) < 1e-5 {
+            for (end, (plane, _)) in caps.iter().enumerate() {
+                if g(surface.axis_z).dot(plane.normal()).abs() > 1.0 - 1e-8 && (g(surface.origin) - plane.origin).dot(plane.normal()).abs() < 1e-6 {
                     return Some(Tag::new(Origin::Cap { feature, end: end == 1 }, kind));
                 }
             }
         }
-        for (p, entity) in probes {
-            if *entity != 0 && g(f.project(c(*p)).0).distance(*p) < 1e-5 {
-                return Some(Tag::new(Origin::Swept { feature, entity: *entity }, kind));
+        let mut source:Vec<_>=probes.iter().filter(|(p,entity)|*entity!=0 && g(f.project(c(*p)).0).distance(*p)<1e-5)
+            .map(|(_,entity)|Tag::new(Origin::Swept {feature,entity:*entity},kind)).collect();
+        source.sort();source.dedup();
+        Some(match source.len() {0=>surface_tag(f,feature),1=>source.pop().unwrap(),_=>Tag::new(Origin::Merged {sources:source},kind)})
+    }).collect()).collect();
+    for (li,lump) in lumps.iter().enumerate() {
+        let mut edges=std::collections::HashMap::new();
+        for (fi,f) in lump.iter_face().enumerate() {for e in f.iter_edge(){edges.entry(edge_key(e)).or_insert_with(Vec::new).push(fi);}}
+        let before=tags[li].clone();
+        for (fi,f) in lump.iter_face().enumerate() {
+            if let Some(Tag {origin:Origin::Cap {end,..},..})=&before[fi] {
+                let mut entities:Vec<_>=f.iter_edge().flat_map(|e|edges.get(&edge_key(e)).into_iter().flatten()).filter(|&&i|i!=fi)
+                    .filter_map(|&i|match &before[i].as_ref()?.origin {Origin::Swept {entity,..}=>Some(*entity),_=>None}).collect();
+                entities.sort();entities.dedup();
+                tags[li][fi]=Some(if entities.is_empty(){surface_tag(f,feature)}else{Tag::new(Origin::ProfileCap {feature,end:*end,entities},Kind::Plane)});
             }
         }
-        let t = Tag::new(Origin::Made { feature, n }, kind);
-        n += 1;
-        Some(t)
-    }).collect()).collect()
+    }
+    tags
 }
 
 /// Tags for the result of [`extrude`] with the same arguments.
@@ -369,6 +436,37 @@ pub fn tag_extrude(lumps: &[Solid], profiles: &[&Profile], plane: &Plane, z0: f6
     let on = |z: f64| profiles.first().map_or(plane.origin, |p| plane.to_world(p.centroid())) + plane.normal() * z;
     let at = |z: f64| Plane { origin: plane.origin + plane.normal() * z, ..*plane };
     tag_sweep(lumps, &probes, [(at(z0), on(z0)), (at(z1), on(z1))], feature)
+}
+
+/// Font outline order is deterministic for unchanged text. Give its segments
+/// explicit content-scoped identities before applying the normal sweep tags;
+/// resizing, depth, placement and spacing edits retain those identities while
+/// changing the text content invalidates them deliberately.
+pub fn tag_text(lumps:&[Solid],profiles:&[Profile],plane:&Plane,z0:f64,z1:f64,text:&str,feature:Id)->Tags {
+    let mut named=profiles.to_vec();let mut next=1;
+    let mut owners=std::collections::BTreeMap::new();
+    let topology:Vec<_>=profiles.iter().map(|p|(p.path.len(),p.hole_paths.iter().map(Vec::len).collect::<Vec<_>>())).collect();
+    for (profile,p) in named.iter_mut().enumerate() {
+        p.path_ids=(0..p.path.len()).map(|_|{let id=next;next+=1;owners.insert(id,profile);id}).collect();
+        p.hole_path_ids=p.hole_paths.iter().map(|path|(0..path.len()).map(|_|{let id=next;next+=1;owners.insert(id,profile);id}).collect()).collect();
+    }
+    fn scope(tag:&mut Tag,text:&str,topology:&str,owners:&std::collections::BTreeMap<Id,usize>) {
+        let role=match &mut tag.origin {
+            // Font curves are currently polygonized. A subdivision change must
+            // not let a different segment inherit an old side-face identity.
+            Origin::Swept {entity,..}=>Some(format!("text:{text:?}:outline:{topology}:{entity}")),
+            Origin::ProfileCap {end,entities,..}=>{
+                let profiles:std::collections::BTreeSet<_>=entities.iter().filter_map(|e|owners.get(e)).collect();
+                Some(format!("text:{text:?}:cap:{end}:{profiles:?}"))
+            },
+            Origin::Merged {sources}|Origin::Derived {sources,..}=>{for t in sources {scope(t,text,topology,owners);}None},
+            _=>None,
+        };
+        if let Some(role)=role {tag.origin=Origin::Semantic {feature:tag.feature(),role};}
+    }
+    let mut tags=tag_extrude(lumps,&named.iter().collect::<Vec<_>>(),plane,z0,z1,feature);
+    for t in tags.iter_mut().flatten().flatten(){scope(t,text,&format!("{topology:?}"),&owners);}
+    tags
 }
 
 /// Tags for the result of [`revolve`] with the same arguments.
@@ -397,46 +495,153 @@ fn same_surface(a: &cadrum::Surface, b: &cadrum::Surface) -> bool {
     }
 }
 
-/// Carries tags from the inputs of an operation to its result. Each result
-/// face takes the tag of the input face the kernel's history names when that
-/// is known, else of the input face on the same surface that contains it;
-/// several results from one input become its numbered `Split` pieces; faces
-/// with no ancestor are `Made` by `feature`.
+/// Carries every source relation through an operation. Ambiguous/merged
+/// ancestry is represented explicitly; no result inherits the first match.
+/// Split regions and newly generated blend faces are named by their adjacent
+/// source faces, independent of result order. Unprovable identities fall back
+/// to a conservative geometric signature that invalidates on shape changes.
 pub fn carry(sources: &[(&[Solid], &Tags)], result: &[Solid], feature: Id) -> Tags {
     struct Old<'a> { id: u64, face: &'a Face, surface: Option<cadrum::Surface>, tag: &'a Tag }
-    let old: Vec<Old> = sources.iter().flat_map(|(lumps, tags)| lumps.iter().zip(tags.iter()).flat_map(|(s, t)| s.iter_face().zip(t.iter()).filter_map(|(f, tag)| Some(Old { id: f.id(), face: f, surface: f.surface(), tag: tag.as_ref()? })))).collect();
-    // First pass: which old face (by index into `old`) each new face descends from.
-    let mut parent: Vec<Vec<Option<usize>>> = Vec::new();
+    let old: Vec<Old> = sources.iter().flat_map(|(lumps, tags)| lumps.iter().zip(tags.iter()).flat_map(|(s,t)| s.iter_face().zip(t.iter()).filter_map(|(f,tag)| Some(Old {id:f.id(),face:f,surface:f.surface(),tag:tag.as_ref()?})))).collect();
+    let mut faces = Vec::new();
+    let mut parents: Vec<Option<Tag>> = Vec::new();
     for lump in result {
-        let history: Vec<[u64; 2]> = lump.iter_history().collect();
-        parent.push(lump.iter_face().map(|f| {
-            let id = f.id();
-            // A history pair settles it only when the old id names one face: a fresh prism's two caps can share one.
-            if let Some(k) = history.iter().filter(|h| h[0] == id).find_map(|h| { let mut hits = old.iter().enumerate().filter(|(_, o)| o.id == h[1]); let k = hits.next()?.0; hits.next().is_none().then_some(k) }) {
-                return Some(k);
+        let history: Vec<_> = lump.iter_history().collect();
+        for f in lump.iter_face() {
+            let surface = f.surface(); let centre = f.project(f.center()).0;
+            let overlaps = |o: &&Old<'_>| {
+                match (&surface, &o.surface) { (Some(a),Some(b)) if same_surface(a,b) => {}, _ => return false }
+                g(o.face.project(centre).0).distance(g(centre)) < 1e-5
+                    || g(f.project(o.face.center()).0).distance(g(o.face.center())) < 1e-5
+            };
+            let history_old: Vec<_> = old.iter().filter(|o| history.iter().any(|h| h[0]==f.id() && h[1]==o.id)).collect();
+            let mut ancestors: Vec<_> = old.iter().filter(overlaps).map(|o| o.tag.clone()).collect();
+            // Modified surfaces can move (shell offsets). Trust a history relation
+            // only when both source and result IDs are spatially unambiguous.
+            let mut offset_source=false;
+            if ancestors.is_empty() && history_old.len()==1
+                && result.iter().flat_map(|s|s.iter_face()).filter(|other|other.id()==f.id()).count()==1
+                && kind_of(history_old[0].face)==kind_of(f) {
+                let source=history_old[0];
+                ancestors.push(source.tag.clone());
+                // Boolean trimming of a freeform surface keeps its provenance.
+                // Only an actual displacement (such as a shell offset) creates
+                // a generated face identity. History alone does not mean moved.
+                offset_source=g(source.face.project(centre).0).distance(g(centre))>1e-5;
             }
-            let kind = kind_of(f);
-            let surface = f.surface();
-            let (centre, _) = f.project(f.center());
-            old.iter().position(|o| {
-                kind_of(o.face) == kind
-                    && match (&surface, &o.surface) { (Some(a), Some(b)) => same_surface(a, b), (None, None) => true, _ => false }
-                    && g(o.face.project(centre).0).distance(g(centre)) < 1e-5
-            })
-        }).collect());
+            ancestors.sort(); ancestors.dedup();
+            parents.push(if offset_source {Some(Tag::new(Origin::Derived {feature,sources:ancestors},kind_of(f)))} else {match ancestors.len() { 0=>None, 1=>ancestors.pop(), _=>Some(Tag::new(Origin::Merged {sources:ancestors},kind_of(f))) }});
+            faces.push(f);
+        }
     }
-    // Second pass: number the pieces of inputs that split, and the faces nobody made.
-    let mut uses = std::collections::HashMap::<usize, u32>::new();
-    for k in parent.iter().flatten().flatten() { *uses.entry(*k).or_insert(0) += 1; }
-    let mut seen = std::collections::HashMap::<usize, u32>::new();
-    let mut made = 0;
-    result.iter().zip(parent).map(|(lump, parents)| lump.iter_face().zip(parents).map(|(f, k)| {
-        Some(match k {
-            Some(k) if uses[&k] > 1 => { let n = seen.entry(k).or_insert(0); let t = old[k].tag.split(*n); *n += 1; t }
-            Some(k) => old[k].tag.clone(),
-            None => { let t = Tag::new(Origin::Made { feature, n: made }, kind_of(f)); made += 1; t }
-        })
-    }).collect()).collect()
+    let mut by_edge = std::collections::HashMap::new();
+    for (i,f) in faces.iter().enumerate() { for e in f.iter_edge() { by_edge.entry(edge_key(e)).or_insert_with(Vec::new).push(i); } }
+    let adjacent:Vec<Vec<usize>>=faces.iter().enumerate().map(|(i,f)|f.iter_edge().flat_map(|e|by_edge.get(&edge_key(e)).into_iter().flatten()).copied().filter(|&j|j!=i).collect()).collect();
+    let mut named=parents.clone();
+    // Corner patches often touch only other generated fillet faces. Establish
+    // their source identities after the edge blends, flattening same-operation
+    // provenance so a radius edit does not depend on intermediate face order.
+    for _ in 0..32 {
+        let before=named.clone();let mut changed=false;
+        for i in 0..faces.len() {
+            if before[i].is_some(){continue;}
+            let mut source=Vec::new();
+            for &j in &adjacent[i] {if let Some(t)=&before[j] {
+                match &t.origin {Origin::Derived {feature:made,sources} if *made==feature=>source.extend(sources.iter().cloned()),_=>source.push(t.clone())}
+            }}
+            source.sort();source.dedup();
+            if source.len()>=2 {named[i]=Some(Tag::new(Origin::Derived {feature,sources:source},kind_of(faces[i])));changed=true;}
+        }
+        if !changed {break;}
+    }
+    let boundaries:Vec<Vec<Tag>>=adjacent.iter().enumerate().map(|(i,neighbors)| {
+        let mut boundary:Vec<_>=neighbors.iter().filter_map(|&j|named[j].clone()).filter(|t|parents[i].as_ref()!=Some(t)).collect();
+        boundary.sort();boundary.dedup();boundary
+    }).collect();
+    let mut counts = std::collections::HashMap::new();
+    for p in parents.iter().flatten() { *counts.entry(p.clone()).or_insert(0usize)+=1; }
+    let mut candidates: Vec<Tag> = faces.iter().enumerate().map(|(i,f)| match &parents[i] {
+        Some(p) if counts[p]>1 => Tag::new(Origin::Patch {of:Box::new(p.clone()),boundary:boundaries[i].clone(),cycles:Vec::new()},kind_of(f)),
+        Some(p)=>p.clone(),
+        None=>named[i].clone().unwrap_or_else(||surface_tag(f,feature)),
+    }).collect();
+    // Equal boundary provenance cannot distinguish symmetric/generated pieces.
+    // Keep them distinct by verified geometry; never number them by iteration.
+    let mut uses = std::collections::HashMap::new();
+    for t in &candidates { *uses.entry(t.clone()).or_insert(0usize)+=1; }
+    for (i,t) in candidates.iter_mut().enumerate() {
+        if uses[t]>1 {
+            if let Origin::Patch {cycles,..}=&mut t.origin {
+                if let Some(oriented)=boundary_cycles(i,&faces,&named,&by_edge) {*cycles=oriented;}
+            }
+        }
+    }
+    // Cycles distinguish complementary pieces of a ring without ranking their
+    // positions or areas. If orientation/connectivity is unavailable or still
+    // identical, retain the conservative geometry identity.
+    let mut resolved=std::collections::HashMap::new();
+    for t in &candidates {*resolved.entry(t.clone()).or_insert(0usize)+=1;}
+    for (i,t) in candidates.iter_mut().enumerate() {if resolved[t]>1 {*t=surface_tag(faces[i],feature);}}
+    let mut all=candidates.into_iter();
+    result.iter().map(|s|s.iter_face().map(|_|Some(all.next().unwrap())).collect()).collect()
+}
+
+/// Recover oriented face wires from endpoint connectivity and the local inside
+/// of each known boundary. The binding exposes neither wires nor edge-use
+/// orientation. Geometry is used only to orient/connect adjacent edges; identity
+/// is exclusively the cyclic sequence of source tags, never coordinates.
+fn boundary_cycles(index:usize,faces:&[&Face],named:&[Option<Tag>],by_edge:&std::collections::HashMap<(u64,[[i64;3];3]),Vec<usize>>)->Option<Vec<Vec<Tag>>> {
+    let face=faces[index];
+    let mut edges=Vec::new();
+    for edge in face.iter_edge() {
+        let mut neighbors:Vec<_>=by_edge.get(&edge_key(edge))?.iter().copied().filter(|&j|j!=index).collect();neighbors.sort();neighbors.dedup();
+        if neighbors.is_empty() {continue;} // periodic seam, not a region boundary
+        if neighbors.len()!=1 {return None;}
+        let tag=named[neighbors[0]].clone()?;
+        let points=edge.approximation_segments(FINE);
+        let sample=*points.get(points.len()/2)?;
+        let (point,tangent)=edge.project(sample);let point=g(point);let tangent=g(tangent).try_normalize()?;
+        let normal=g(face.project(c(point)).1);let left=normal.cross(tangent).try_normalize()?;
+        let length: f64=points.windows(2).map(|p|g(p[1]).distance(g(p[0]))).sum();
+        let epsilon=(length*1e-4).clamp(1e-6,1e-3);
+        let plus=point+left*epsilon;let minus=point-left*epsilon;
+        let dp=g(face.project(c(plus)).0).distance(plus);let dm=g(face.project(c(minus)).0).distance(minus);
+        let (mut start,mut end)=(g(edge.start_point()),g(edge.end_point()));
+        if dp<epsilon*0.25 && dm>epsilon*0.75 {} else if dm<epsilon*0.25 && dp>epsilon*0.75 {std::mem::swap(&mut start,&mut end);} else {return None;}
+        edges.push((start,end,tag));
+    }
+    let mut cycles=Vec::new();
+    while let Some((start,mut end,tag))=edges.pop() {
+        let mut cycle=vec![tag];
+        while end.distance(start)>1e-6 {
+            let next:Vec<_>=edges.iter().enumerate().filter(|(_,e)|e.0.distance(end)<=1e-6).map(|(i,_)|i).collect();
+            if next.len()!=1 {return None;}
+            let (_,to,tag)=edges.swap_remove(next[0]);end=to;
+            if cycle.last()!=Some(&tag) {cycle.push(tag);}
+        }
+        if cycle.len()>1 && cycle.first()==cycle.last() {cycle.pop();}
+        let canonical=(0..cycle.len()).map(|i|cycle[i..].iter().chain(&cycle[..i]).cloned().collect::<Vec<_>>()).min()?;
+        cycles.push(canonical);
+    }
+    cycles.sort();(!cycles.is_empty()).then_some(cycles)
+}
+
+/// The planar cut is a semantic output of Split, qualified by the source
+/// boundary so disconnected pieces cannot exchange identities when reordered.
+pub fn split_tags(source:&[Solid],source_tags:&Tags,result:&[Solid],plane:Plane,feature:Id)->Tags {
+    let mut tags=carry(&[(source,source_tags)],result,feature);
+    let old:Vec<_>=source.iter().zip(source_tags).flat_map(|(s,t)|s.iter_face().zip(t).filter_map(|(f,t)|Some((f,t.as_ref()?)))).collect();
+    for (li,lump) in result.iter().enumerate(){for (fi,f) in lump.iter_face().enumerate(){
+        let (at,n)=f.project(f.center());let at=g(at);let n=g(n);
+        if kind_of(f)!=Kind::Plane || n.dot(plane.normal()).abs()<1.-1e-7 || (at-plane.origin).dot(plane.normal()).abs()>1e-5 {continue;}
+        let mut boundary=Vec::new();
+        for edge in f.iter_edge(){
+            let pts=edge.approximation_segments(FINE);let Some(p)=pts.get(pts.len()/2) else {continue};
+            for (face,tag) in &old {if g(face.project(*p).0).distance(g(*p))<1e-5 {boundary.push((*tag).clone());}}
+        }
+        boundary.sort();boundary.dedup();
+        tags[li][fi]=Some(Tag::new(Origin::Section {feature,positive:n.dot(plane.normal())>0.,boundary},Kind::Plane));
+    }}tags
 }
 
 /// An edge's identity within one solid. A fresh prism's top edges share their
@@ -445,7 +650,8 @@ pub fn carry(sources: &[(&[Solid], &Tags)], result: &[Solid], feature: Id) -> Ta
 fn edge_key(e: &Edge) -> (u64, [[i64; 3]; 3]) {
     let pts = e.approximation_segments(FINE);
     let at = |i: usize| pts.get(i).map_or([0; 3], |p| g(*p).to_array().map(|c| (c * 1e6).round() as i64));
-    (e.id(), [at(0), at(pts.len() / 2), at(pts.len().saturating_sub(1))])
+    let mut ends = [at(0), at(pts.len().saturating_sub(1))]; ends.sort();
+    (e.id(), [ends[0], at(pts.len() / 2), ends[1]])
 }
 
 /// Every edge of the lumps with the tags of the two faces it separates.
@@ -491,48 +697,73 @@ pub struct EdgePick { pub points: [DVec3; 2], pub tag: Option<EdgeTag> }
 #[derive(Clone, Debug)]
 pub struct FacePick { pub points: [DVec3; 2], pub tag: Option<Tag> }
 
-/// The lump and edge each pick names, and how it was found.
+/// Select a unique identity. Multiple descendants can only be chosen when
+/// the saved/mapped point still lies on exactly one; proximity is not identity.
+fn choose_pick<'a,T>(hits: Vec<&'a T>, distance: impl Fn(&T)->f64) -> R<Option<&'a T>> {
+    if hits.len()==1 { return Ok(hits.into_iter().next()); }
+    let mut located=hits.into_iter().filter(|h|distance(h)<=1e-5);
+    let first=located.next();
+    if first.is_some() && located.next().is_none() {return Ok(first);}
+    Err("the topology reference is ambiguous after the body changed; select the intended face or edge again".into())
+}
+
 fn find_edges<'a>(lumps: &'a [Solid], tags: &Tags, picks: &[EdgePick]) -> R<Vec<(usize, &'a Edge, Level, Option<EdgeTag>)>> {
-    let table = edge_table(lumps, tags);
-    let dist = |e: &Edge, tries: &[DVec3; 2]| tries.iter().map(|p| g(e.project(c(*p)).0).distance(*p)).fold(f64::MAX, f64::min);
+    let table=edge_table(lumps,tags);
+    let dist=|e:&Edge,points:&[DVec3]|points.iter().map(|p|g(e.project(c(*p)).0).distance(*p)).fold(f64::MAX,f64::min);
     picks.iter().map(|pick| {
-        if let Some(tag) = &pick.tag {
-            // Pattern copies share tags; the nearest of equals is the one meant.
-            if let Some(hit) = table.iter().filter(|t| t.2.as_ref() == Some(tag)).min_by(|a, b| dist(a.1, &pick.points).total_cmp(&dist(b.1, &pick.points))) {
-                return Ok((hit.0, hit.1, Level::Tag, hit.2.clone()));
+        if let Some(tag)=&pick.tag {
+            if tag.legacy() {
+                let hits:Vec<_>=table.iter().filter(|t|t.2.as_ref().is_some_and(|new|tag.legacy_compatible(new)) && dist(t.1,&pick.points[..1])<=1e-5).collect();
+                if hits.len()==1 {let h=hits[0];return Ok((h.0,h.1,Level::Position,h.2.clone()));}
+                return Err("this legacy edge reference is missing or ambiguous; select the intended edge again".into());
             }
-            if let Some(hit) = table.iter().filter(|t| t.2.as_ref().is_some_and(|t| t.same_family(tag))).min_by(|a, b| dist(a.1, &pick.points).total_cmp(&dist(b.1, &pick.points))) {
-                return Ok((hit.0, hit.1, Level::Origin, hit.2.clone()));
-            }
-            // The body knows its faces and none of them is this edge's: it is gone. Guessing by position would
-            // put the blend on whatever edge now lies where this one was.
-            if table.iter().any(|t| t.2.is_some()) {
-                return Err("an edge it used is no longer there; the body changed shape under it".to_owned());
-            }
+            let hits:Vec<_>=table.iter().filter(|t|t.2.as_ref()==Some(tag)).collect();
+            if !hits.is_empty() {let h=choose_pick(hits,|t|dist(t.1,&pick.points))?.unwrap();return Ok((h.0,h.1,Level::Tag,h.2.clone()));}
+            let hits:Vec<_>=table.iter().filter(|t|t.2.as_ref().is_some_and(|new|new.same_family(tag))).collect();
+            if !hits.is_empty() {let h=choose_pick(hits,|t|dist(t.1,&pick.points))?.unwrap();return Ok((h.0,h.1,Level::Origin,h.2.clone()));}
+            return Err("an edge it used is no longer there; the body changed shape under it".into());
         }
-        table.iter().map(|t| (dist(t.1, &pick.points), t)).min_by(|a, b| a.0.total_cmp(&b.0)).filter(|h| h.0 <= NEAR).map(|h| (h.1.0, h.1.1, Level::Position, h.1.2.clone()))
-            .ok_or_else(|| "an edge it used is no longer there; the body changed shape under it".to_owned())
+        // Pre-tag designs may learn a reference from the original pick, but a
+        // junction/tie must not silently choose whichever edge is enumerated first.
+        let mut hits:Vec<_>=table.iter().map(|t|(dist(t.1,&pick.points),t)).filter(|h|h.0<=NEAR).collect();
+        hits.sort_by(|a,b|a.0.total_cmp(&b.0));
+        let Some((d,h))=hits.first() else {return Err("an edge it used is no longer there; the body changed shape under it".into())};
+        if hits.get(1).is_some_and(|other|(other.0-d).abs()<1e-7) {return Err("the edge pick is ambiguous; select a point away from a vertex".into());}
+        Ok((h.0,h.1,Level::Position,h.2.clone()))
     }).collect()
 }
 
 fn find_faces<'a>(lumps: &'a [Solid], tags: &Tags, picks: &[FacePick]) -> R<Vec<(usize, &'a Face, Level, Option<Tag>)>> {
-    let table: Vec<(usize, &Face, Option<&Tag>)> = lumps.iter().enumerate().flat_map(|(i, s)| s.iter_face().enumerate().map(move |(fi, f)| (i, f, fi))).map(|(i, f, fi)| (i, f, tags.get(i).and_then(|t| t.get(fi)).and_then(|t| t.as_ref()))).collect();
-    let dist = |f: &Face, tries: &[DVec3; 2]| tries.iter().map(|p| g(f.project(c(*p)).0).distance(*p)).fold(f64::MAX, f64::min);
+    let table:Vec<_>=lumps.iter().enumerate().flat_map(|(i,s)|s.iter_face().enumerate().map(move |(fi,f)|(i,f,fi))).map(|(i,f,fi)|(i,f,tags.get(i).and_then(|t|t.get(fi)).and_then(|t|t.as_ref()))).collect();
+    let dist=|f:&Face,points:&[DVec3]|points.iter().map(|p|g(f.project(c(*p)).0).distance(*p)).fold(f64::MAX,f64::min);
     picks.iter().map(|pick| {
-        if let Some(tag) = &pick.tag {
-            if let Some(hit) = table.iter().filter(|t| t.2 == Some(tag)).min_by(|a, b| dist(a.1, &pick.points).total_cmp(&dist(b.1, &pick.points))) {
-                return Ok((hit.0, hit.1, Level::Tag, hit.2.cloned()));
+        if let Some(tag)=&pick.tag {
+            if tag.legacy() {
+                let hits:Vec<_>=table.iter().filter(|t|t.2.is_some_and(|new|tag.legacy_compatible(new)) && dist(t.1,&pick.points[..1])<=1e-5).collect();
+                if hits.len()==1 {let h=hits[0];return Ok((h.0,h.1,Level::Position,h.2.cloned()));}
+                return Err("this legacy face reference is missing or ambiguous; select the intended face again".into());
             }
-            if let Some(hit) = table.iter().filter(|t| t.2.is_some_and(|t| t.family() == tag.family())).min_by(|a, b| dist(a.1, &pick.points).total_cmp(&dist(b.1, &pick.points))) {
-                return Ok((hit.0, hit.1, Level::Origin, hit.2.cloned()));
-            }
-            if table.iter().any(|t| t.2.is_some()) {
-                return Err("a face it used is no longer there; the body changed shape under it".to_owned());
-            }
+            let hits:Vec<_>=table.iter().filter(|t|t.2==Some(tag)).collect();
+            if !hits.is_empty() {let h=choose_pick(hits,|t|dist(t.1,&pick.points))?.unwrap();return Ok((h.0,h.1,Level::Tag,h.2.cloned()));}
+            let hits:Vec<_>=table.iter().filter(|t|t.2.is_some_and(|new|new.descends_from(tag))).collect();
+            if !hits.is_empty() {let h=choose_pick(hits,|t|dist(t.1,&pick.points))?.unwrap();return Ok((h.0,h.1,Level::Origin,h.2.cloned()));}
+            return Err("a face it used is no longer there; the body changed shape under it".into());
         }
-        table.iter().map(|t| (dist(t.1, &pick.points), t)).min_by(|a, b| a.0.total_cmp(&b.0)).filter(|h| h.0 <= NEAR).map(|h| (h.1.0, h.1.1, Level::Position, h.1.2.cloned()))
-            .ok_or_else(|| "a face it used is no longer there; the body changed shape under it".to_owned())
+        let mut hits:Vec<_>=table.iter().map(|t|(dist(t.1,&pick.points),t)).filter(|h|h.0<=NEAR).collect();
+        hits.sort_by(|a,b|a.0.total_cmp(&b.0));
+        let Some((d,h))=hits.first() else {return Err("a face it used is no longer there; the body changed shape under it".into())};
+        if hits.get(1).is_some_and(|other|(other.0-d).abs()<1e-7) {return Err("the face pick is ambiguous; select a point inside the face".into());}
+        Ok((h.0,h.1,Level::Position,h.2.cloned()))
     }).collect()
+}
+
+/// Shared reference resolution for exact operations, text and construction
+/// planes. Keeping one resolver prevents a UI feature from quietly falling back
+/// to a different nearest face when strict provenance resolution failed.
+pub fn resolve_face(lumps:&[Solid],tags:&Tags,pick:&FacePick)->R<(FaceInfo,Level)> {
+    let picked=find_faces(lumps,tags,std::slice::from_ref(pick))?;
+    let (_,f,level,tag)=&picked[0]; let (at,normal)=f.project(f.center());
+    Ok((FaceInfo {at:g(at),normal:g(normal),area:f.area(),kind:match kind_of(f) {Kind::Plane=>"plane",Kind::Cylinder=>"cylinder",Kind::Cone=>"cone",Kind::Sphere=>"sphere",Kind::Torus=>"torus",Kind::Freeform=>"freeform"},tag:tag.clone()},*level))
 }
 
 /// What resolving picks produced: the new lumps and tags, the weakest level any pick needed,
@@ -546,9 +777,28 @@ pub struct Blended<T> {
 
 /// A boolean whose result carries the tags of both inputs.
 pub fn boolean_tagged(a: (&[Solid], &Tags), b: (&[Solid], &Tags), op: Bool, feature: Id) -> R<(Lumps, Tags)> {
-    let out = boolean(a.0, b.0, op)?;
-    let tags = carry(&[a, b], &out, feature);
-    Ok((out, tags))
+    let out = boolean_impl(a.0,b.0,op,false)?;
+    let tags = carry(&[a,b],&out,feature);
+    // clean() only reports history against its immediate input. Compose tags
+    // before cleaning so boolean provenance is not discarded by unification.
+    let mut cleaned=Vec::with_capacity(out.len());
+    let mut cleaned_tags=Vec::with_capacity(out.len());
+    for (original,original_tags) in out.into_iter().zip(tags) {
+        // Keep the independent original as the safe fallback. A BRep copy has
+        // identical face traversal but fresh IDs, so associate its tags before
+        // cleaning and compose history against that immediate input.
+        let working=original.clone();
+        let before=original.volume();
+        match working.clean() {
+            Ok(result) if result.volume().is_finite() && (result.volume()-before).abs()<=1e-7*before.abs().max(1.) => {
+                let input_tags=vec![original_tags];
+                let mut result_tags=carry(&[(std::slice::from_ref(&working),&input_tags)],std::slice::from_ref(&result),feature);
+                cleaned.push(result);cleaned_tags.push(result_tags.remove(0));
+            }
+            _ => {cleaned.push(original);cleaned_tags.push(original_tags);}
+        }
+    }
+    Ok((cleaned,cleaned_tags))
 }
 
 /// Rounds (or, with `chamfer`, bevels) the picked edges by `size`. Returns the
@@ -582,7 +832,10 @@ pub fn blend(lumps: &[Solid], tags: &Tags, picks: &[EdgePick], size: f64, chamfe
         }
         out.push(made);
     }
-    let out_tags = carry(&[(lumps, tags)], &out, feature);
+    let mut out_tags = carry(&[(lumps, tags)], &out, feature);
+    // Unselected lumps are exact deep copies, whose kernel history is empty.
+    // Their traversal is unchanged, so preserve their existing identities.
+    for i in 0..out.len() {if !picks.iter().any(|p|p.0==i) {out_tags[i]=tags[i].clone();}}
     Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect() })
 }
 
@@ -612,7 +865,24 @@ pub fn shell(lumps: &[Solid], tags: &Tags, picks: &[FacePick], thickness: f64, f
         }
         out.push(made);
     }
-    let out_tags = carry(&[(lumps, tags)], &out, feature);
+    let mut out_tags = carry(&[(lumps, tags)], &out, feature);
+    for i in 0..out.len() {if !picks.iter().any(|p|p.0==i) {out_tags[i]=tags[i].clone();}}
+    // Cadrum's thick-solid bridge does not expose every offset Generated face.
+    // Recover the operation's exact normal-offset relation, not a nearest face:
+    // the inner face must lie one wall thickness inward, with opposite normals,
+    // and have exactly one qualifying source. This survives wall/size edits.
+    let sources:Vec<_>=lumps.iter().zip(tags).flat_map(|(s,t)|s.iter_face().zip(t).filter_map(|(f,t)|Some((f,t.as_ref()?)))).collect();
+    for (li,lump) in out.iter().enumerate() {for (fi,face) in lump.iter_face().enumerate() {
+        if !matches!(out_tags[li][fi].as_ref().map(|t|&t.origin),Some(Origin::Surface {..})) {continue;}
+        let (point,normal)=face.project(face.center());let point=g(point);let normal=g(normal);
+        let mut found:Vec<_>=sources.iter().filter(|(old,_)| {
+            if kind_of(old)!=kind_of(face) {return false;}
+            let (on,outward)=old.project(c(point));let on=g(on);let outward=g(outward);
+            normal.dot(outward) < -1.+1e-7 && (on-point-outward*thickness).length()<1e-5
+        }).map(|(_,tag)|(*tag).clone()).collect();
+        found.sort();found.dedup();
+        if found.len()==1 {out_tags[li][fi]=Some(Tag::new(Origin::Derived {feature,sources:found},kind_of(face)));}
+    }}
     Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect() })
 }
 
@@ -681,6 +951,31 @@ pub fn drill(at: DVec3, dir: DVec3, d: &Drill) -> R<Lumps> {
         return Err("the kernel could not build the hole's shape".into());
     }
     Ok(tool)
+}
+
+/// Each drill location has explicit barrel/head/tip roles. Point coordinates
+/// scope repeated holes without relying on their order in the feature's list;
+/// changing diameter/depth keeps the role, removing/replacing a point does not.
+pub fn drill_tags(lumps:&[Solid],feature:Id,at:DVec3,dir:DVec3,drill:&Drill)->Tags {
+    lumps.iter().map(|s|s.iter_face().map(|f| {
+        let z=(g(f.center())-at).dot(dir);
+        let role=match f.surface().map(|s|s.kind) {
+            Some(SurfaceKind::Cylinder {radius})=>if (radius-drill.diameter/2.).abs()<1e-6 {"barrel"} else {"counterbore"},
+            Some(SurfaceKind::Cone {..})=>if z>=drill.depth-1e-6 {"tip"} else {"countersink"},
+            Some(SurfaceKind::Plane)=>if z>=drill.depth-1e-6 {"bottom"} else if z<0. {"entry"} else {"shoulder"},
+            _=>return Some(surface_tag(f,feature)),
+        };
+        Some(Tag::new(Origin::Semantic {feature,role:format!("drill:{:?}:{:?}:{role}",at.to_array(),dir.to_array())},kind_of(f)))
+    }).collect()).collect()
+}
+
+/// Named portions of a cylinder used internally by a thread feature.
+pub fn cylinder_tags(lumps:&[Solid],feature:Id,from:DVec3,to:DVec3,scope:&str)->Tags {
+    let axis=(to-from).normalize();let length=from.distance(to);
+    lumps.iter().map(|s|s.iter_face().map(|f| {
+        let role=if kind_of(f)==Kind::Plane {if (g(f.center())-from).dot(axis)>length/2. {"end"} else {"start"}} else {"barrel"};
+        Some(Tag::new(Origin::Semantic {feature,role:format!("{scope}:{role}")},kind_of(f)))
+    }).collect()).collect()
 }
 
 /// A plain cylinder from `from` to `to`.

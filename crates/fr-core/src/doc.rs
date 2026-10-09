@@ -465,19 +465,13 @@ impl Text {
             let mut candidates = vec![mapped, original];
             // A tagged face is tried first: the anchor dropped onto wherever that face is now.
             let mut by_tag = 0;
+            let mut resolved_tag=None;
             if let Some(tag) = &self.tag {
-                let faces = exact::faces_tagged(&body.solids, &body.tags);
-                let exact_hit = faces.iter().find(|f| f.tag.as_ref() == Some(tag));
-                let family = exact_hit.or_else(|| faces.iter().filter(|f| f.tag.as_ref().is_some_and(|t| t.family() == tag.family())).min_by(|a, b| a.at.distance(mapped).total_cmp(&b.at.distance(mapped))));
-                if let Some(f) = family {
-                    level = if exact_hit.is_some() { Level::Tag } else { Level::Origin };
-                    let drop = |p: DVec3| p - f.normal * (p - f.at).dot(f.normal);
-                    candidates.insert(0, drop(mapped));
-                    candidates.insert(1, drop(original));
-                    by_tag = 2;
-                } else if faces.iter().any(|f| f.tag.is_some()) {
-                    return Err("the text's flat face is no longer there; select the face again".into());
-                }
+                let (f,found_level)=exact::resolve_face(&body.solids,&body.tags,&exact::FacePick {points:[original,mapped],tag:Some(tag.clone())})?;
+                level=found_level;
+                let drop=|p:DVec3|p-f.normal*(p-f.at).dot(f.normal);
+                candidates=vec![drop(mapped),drop(original),f.at];
+                by_tag=3; resolved_tag=f.tag;
             }
             // An earlier emboss can extend the bounds beyond this face. When
             // the base grows, proportional mapping need not land on the face;
@@ -495,8 +489,8 @@ impl Text {
                 let local = surface.to_local(point);
                 if face.loops.iter().filter(|ring| profile::inside(ring, local)).count() % 2 == 0 { continue; }
                 let found_tag = exact::face_tag_at(&body.solids, &body.tags, point);
-                if let (Some(wanted), Some(found)) = (&self.tag, &found_tag) {
-                    if wanted.family() != found.family() { continue; }
+                if let (Some(wanted), Some(found)) = (&resolved_tag, &found_tag) {
+                    if wanted != found { continue; }
                 }
                 // Keep the user-chosen baseline and orientation on the resolved face.
                 plane.origin += point - anchor;
@@ -666,6 +660,9 @@ pub struct Feature {
     /// The script run that made this feature, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub made_by: Option<Id>,
+    /// Stable identity of an output within its script run; never inferred from order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_key: Option<String>,
     pub kind: FeatureKind,
 }
 
@@ -713,7 +710,13 @@ pub struct Document {
     pub next_id: Id,
     /// Temporary allocation hints while rerunning a script. Never persisted.
     #[serde(skip)]
-    reuse_feature_ids: std::collections::VecDeque<(Id, std::mem::Discriminant<FeatureKind>)>,
+    reuse_feature_ids: Vec<(Id, String, std::mem::Discriminant<FeatureKind>)>,
+    #[serde(skip)]
+    script_command: Option<(String, u32)>,
+    #[serde(skip)]
+    script_keys: std::collections::BTreeSet<String>,
+    #[serde(skip)]
+    script_identity_error: Option<String>,
     /// The timeline's roll-back marker: only this many features are built, and
     /// new ones go in at this point. `None` is the end of the timeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -807,9 +810,9 @@ impl Body {
     }
 
     /// Takes an exact shape out of the body, which stays exact if it was. The tool's new faces are `feature`'s.
-    fn cut(&mut self, tool: &Lumps, feature: Id) -> Result<(), String> {
+    fn cut_tagged(&mut self, tool: &Lumps, tool_tags: &exact::Tags, feature: Id) -> Result<(), String> {
         if self.is_exact() {
-            let (made, tags) = exact::boolean_tagged((&self.solids, &self.tags), (tool, &exact::fresh_tags(tool, feature)), Bool::Subtract, feature)?;
+            let (made, tags) = exact::boolean_tagged((&self.solids, &self.tags), (tool, tool_tags), Bool::Subtract, feature)?;
             return self.set_exact(made, tags);
         }
         let tool = exact::tessellate(tool)?.0;
@@ -966,14 +969,33 @@ impl Document {
         })
     }
 
-    /// Reuse a rerun's former IDs, in command order, when the feature kind still
-    /// matches. Fresh additions keep using the document's high-water mark, so
-    /// references in later timeline features cannot collide with extra outputs.
+    /// Reuse only an output's recorded identity and kind, never its timeline position.
+    /// Legacy outputs without an identity get fresh IDs, so old references fail
+    /// explicitly instead of attaching to a different same-kind output.
     pub fn reuse_feature_ids(&mut self, previous: &[Feature]) {
-        self.reuse_feature_ids = previous.iter().map(|f| (f.id, std::mem::discriminant(&f.kind))).collect();
+        self.reuse_feature_ids = previous.iter().filter_map(|f| f.script_key.as_ref().map(|key|
+            (f.id, key.clone(), std::mem::discriminant(&f.kind)))).collect();
     }
 
-    pub fn finish_feature_id_reuse(&mut self) { self.reuse_feature_ids.clear(); }
+    pub fn begin_script_run(&mut self) {
+        self.script_command = None;
+        self.script_keys.clear();
+        self.script_identity_error = None;
+    }
+
+    pub fn begin_script_command(&mut self, key: String) {
+        self.script_command = Some((key, 0));
+    }
+
+    pub fn end_script_command(&mut self) -> Result<(), String> {
+        self.script_command = None;
+        self.script_identity_error.take().map_or(Ok(()), Err)
+    }
+
+    pub fn finish_feature_id_reuse(&mut self) {
+        self.reuse_feature_ids.clear();
+        self.begin_script_run();
+    }
 
     /// Appends a feature, naming it after its type (`Sketch2`, `Extrude1`).
     pub fn add_feature(&mut self, kind: FeatureKind) -> Id {
@@ -982,9 +1004,23 @@ impl Document {
             .map(|f|f.id.saturating_mul(1000)).find(|start|self.next_id>*start && self.next_id<start.saturating_add(1000)) {
             self.next_id=end.saturating_add(1000);
         }
-        let reused = self.reuse_feature_ids.pop_front().filter(|(id, previous)|
-            *previous == std::mem::discriminant(&kind) && self.feature(*id).is_none());
-        let id = if let Some((id, _)) = reused { id } else { let id = self.next_id; self.next_id += 1; id };
+        let script_key = self.script_command.as_mut().map(|(key, n)| {
+            let value = format!("{key}/{n}");
+            *n += 1;
+            value
+        });
+        if let Some(key) = &script_key && !self.script_keys.insert(key.clone()) {
+            self.script_identity_error = Some("a modeling command produced the same output identity more than once; give each repeated output a unique output_key (for example, the source sketch point ID)".into());
+        }
+        let reused = script_key.as_ref().and_then(|key| {
+            let matches: Vec<usize> = self.reuse_feature_ids.iter().enumerate().filter_map(|(at, (id, previous_key, previous_kind))|
+                (key == previous_key && *previous_kind == std::mem::discriminant(&kind) && self.feature(*id).is_none()).then_some(at)).collect();
+            if matches.len() > 1 {
+                self.script_identity_error = Some("the previous script run contains ambiguous output identities; its dependent references cannot be reassigned safely".into());
+                None
+            } else { matches.first().copied() }
+        });
+        let id = if let Some(at) = reused { self.reuse_feature_ids.remove(at).0 } else { let id = self.next_id; self.next_id += 1; id };
         let target=match &kind {
             FeatureKind::Transform(t)=>Some(t.body), FeatureKind::Combine(c)=>Some(c.target),
             FeatureKind::Blend(b)=>Some(b.body), FeatureKind::Shell(s)=>Some(s.body),
@@ -997,7 +1033,7 @@ impl Document {
             FeatureKind::Pattern(p)=>self.feature(p.source).map(|f|f.owner),
             _=>target.and_then(|id|self.body_owner(id)),
         }.unwrap_or(self.active_component);
-        let mut f = Feature { id, name: String::new(), suppressed: false, owner, made_by: None, kind };
+        let mut f = Feature { id, name: String::new(), suppressed: false, owner, made_by: None, script_key, kind };
         let n = self.features.iter().filter(|o| o.type_name() == f.type_name()).count() + 1;
         let t = f.type_name();
         f.name = format!("{}{}{n}", t[..1].to_uppercase(), &t[1..]);
@@ -1144,7 +1180,7 @@ impl Document {
             self.sketch(id).ok_or("its sketch was deleted".to_owned())
         };
         match &f.kind {
-            FeatureKind::Primitive(p) => { let l = p.solids()?; let t = exact::fresh_tags(&l, f.id); Ok(Some((Shape::Exact(l, t), p.op))) }
+            FeatureKind::Primitive(p) => { let l = p.solids()?; let t = exact::primitive_tags(&l, p, f.id); Ok(Some((Shape::Exact(l, t), p.op))) }
             FeatureKind::Extrude(e) => {
                 let s = sk(e.sketch)?;
                 let source=self.feature(e.sketch).unwrap().owner;
@@ -1192,7 +1228,7 @@ impl Document {
                 let profiles = t.outlines()?;
                 let plane = t.placement(None)?;
                 let l = exact::extrude(&profiles.iter().collect::<Vec<_>>(), &plane, 0.0, t.depth.v)?;
-                let tags = exact::fresh_tags(&l, f.id);
+                let tags = exact::tag_text(&l, &profiles, &plane, 0.0, t.depth.v, &t.text, f.id);
                 Ok(Some((Shape::Exact(l, tags), Op::New)))
             }
             FeatureKind::Import(m) => Ok(Some((Shape::Mesh(m.clone()), Op::New))),
@@ -1400,7 +1436,7 @@ impl Document {
                 if component!=f.owner {return Err("the split must belong to its target body's component".into());}
                 let (plane,_,level)=self.plane_reference_mut(&mut split.plane,context,component)?;
                 let pieces=crate::body_ops::pieces(&bodies[index],plane)?;
-                let tags=exact::carry(&[(&bodies[index].solids,&bodies[index].tags)],&pieces,id);
+                let tags=exact::split_tags(&bodies[index].solids,&bodies[index].tags,&pieces,plane,id);
                 let mut pieces=pieces.into_iter().zip(tags);
                 let (first,first_tags)=pieces.next().ok_or("the split produced no pieces")?;
                 bodies[index].set_exact(vec![first],vec![first_tags])?;
@@ -1414,7 +1450,7 @@ impl Document {
                 let profiles = t.outlines()?;
                 let i = find(bodies, t.body.ok_or("select a body and flat face for the text")?)?;
                 let (plane, learned, level) = t.placement_tagged(Some(&bodies[i]))?;
-                if t.tag.is_none() { t.tag = learned; }
+                if t.tag.as_ref().is_none_or(Tag::legacy) { t.tag = learned; }
                 let refs: Vec<_> = profiles.iter().collect();
                 // All lettering must sit on material. This also catches overhangs,
                 // holes through letters, and disconnected punctuation over an edge.
@@ -1432,7 +1468,8 @@ impl Document {
                     _ => return Err("text supports New Body, Raise, or Engrave".into()),
                 };
                 let tool = exact::extrude(&refs, &plane, z0, z1)?;
-                let (made, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&tool, &exact::fresh_tags(&tool, id)), operation, id)?;
+                let tool_tags=exact::tag_text(&tool,&profiles,&plane,z0,z1,&t.text,id);
+                let (made, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&tool, &tool_tags), operation, id)?;
                 bodies[i].set_exact(made, tags)?;
                 bodies.retain(|b| !b.mesh.is_empty());
                 Ok(Some(level))
@@ -1534,7 +1571,7 @@ impl Document {
                 }
                 let picks: Vec<exact::EdgePick> = exact::candidates(&bodies[i].solids, &b.edges, b.frame).into_iter().enumerate().map(|(k, points)| exact::EdgePick { points, tag: b.tags.get(k).cloned().flatten() }).collect();
                 let made = exact::blend(&bodies[i].solids, &bodies[i].tags, &picks, b.size.v, b.chamfer, id)?;
-                if b.tags.len() != b.edges.len() { b.tags = made.picked; }
+                if b.tags.len() != b.edges.len() || b.tags.iter().any(|t|t.as_ref().is_none_or(crate::tag::EdgeTag::legacy)) { b.tags = made.picked; }
                 bodies[i].set_exact(made.lumps, made.tags)?;
                 Ok(Some(made.level))
             }
@@ -1545,7 +1582,7 @@ impl Document {
                 }
                 let picks: Vec<exact::FacePick> = exact::candidates(&bodies[i].solids, &sh.faces, sh.frame).into_iter().enumerate().map(|(k, points)| exact::FacePick { points, tag: sh.tags.get(k).cloned().flatten() }).collect();
                 let made = exact::shell(&bodies[i].solids, &bodies[i].tags, &picks, sh.thickness.v, id)?;
-                if sh.tags.len() != sh.faces.len() { sh.tags = made.picked; }
+                if sh.tags.len() != sh.faces.len() || sh.tags.iter().any(|t|t.as_ref().is_none_or(Tag::legacy)) { sh.tags = made.picked; }
                 bodies[i].set_exact(made.lumps, made.tags)?;
                 Ok(Some(made.level))
             }
@@ -1583,8 +1620,10 @@ impl Document {
                         sleeve.map(|v| *at + turn * (v + DVec3::Z * sunk));
                         sleeves.push(sleeve);
                     }
-                    let tool = exact::drill(*at, dir, &exact::Drill { diameter: drilled, depth: depth(*at), tip_angle: h.tip_angle.as_ref().map(|v| v.v), head: sizes.head })?;
-                    bodies[i].cut(&tool, id)?;
+                    let drill=exact::Drill { diameter: drilled, depth: depth(*at), tip_angle: h.tip_angle.as_ref().map(|v| v.v), head: sizes.head };
+                    let tool=exact::drill(*at,dir,&drill)?;
+                    let tags=exact::drill_tags(&tool,id,*at,dir,&drill);
+                    bodies[i].cut_tagged(&tool,&tags,id)?;
                 }
                 if before - bodies[i].bare().volume() < 1e-9 {
                     return Err("the hole does not touch the body; check its position and direction".into());
@@ -1602,7 +1641,7 @@ impl Document {
                 let spec = threads::find(&t.thread)?;
                 let pick = exact::FacePick { points: exact::candidates(&bodies[i].solids, &[t.face], t.frame)[0], tag: t.tag.clone() };
                 let (mut barrel, level, learned) = exact::barrel_tagged(&bodies[i].solids, &bodies[i].tags, &pick)?;
-                if t.tag.is_none() { t.tag = learned; }
+                if t.tag.as_ref().is_none_or(Tag::legacy) { t.tag = learned; }
                 // Offsets are measured from the cylinder's outer end: a rod's tip, a hole's mouth.
                 if let Some((lo, hi)) = bodies[i].mesh.bbox() {
                     let (middle, far) = ((lo + hi) / 2.0, barrel.start + barrel.axis * barrel.length);
@@ -1638,11 +1677,14 @@ impl Document {
                     let wide = across > major + threads::BED + 1e-9;
                     if wide {
                         let plug = exact::cylinder(start, end, barrel.radius)?;
-                        let (filled, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&plug, &exact::fresh_tags(&plug, id)), Bool::Union, id)?;
+                        let plug_tags=exact::cylinder_tags(&plug,id,start,end,"thread:plug");
+                        let (filled, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&plug, &plug_tags), Bool::Union, id)?;
                         bodies[i].set_exact(filled, tags)?;
                     }
                     if wide || across < major + threads::BED {
-                        bodies[i].cut(&exact::cylinder(start, end, (major + threads::BED) / 2.0)?, id)?;
+                        let clearance=exact::cylinder(start,end,(major+threads::BED)/2.)?;
+                        let tags=exact::cylinder_tags(&clearance,id,start,end,"thread:clearance");
+                        bodies[i].cut_tagged(&clearance,&tags,id)?;
                     }
                     // The crests stand where the hole's wall was if that is near the tap drill size, and at that size otherwise.
                     let crests = if across >= spec.minor() * 0.9 && across <= spec.major - 0.2 * spec.pitch { across.max(spec.tap_drill + room) } else { spec.tap_drill + room };
@@ -1668,7 +1710,10 @@ impl Document {
                     let inset = |is_free: bool| if is_free { threads::BED.min(length / 4.0) } else { 0.0 };
                     let core = exact::cylinder(stock_start + barrel.axis * inset(ends[0]), stock_end - barrel.axis * inset(ends[1]), (spec.minor() - room) / 2.0 - threads::BED)?;
                     let stock = exact::cylinder(stock_start, stock_end, barrel.radius.max(spec.major / 2.0) + 0.01)?;
-                    bodies[i].cut(&exact::boolean(&stock, &core, Bool::Subtract)?, id)?;
+                    let stock_tags=exact::cylinder_tags(&stock,id,stock_start,stock_end,"thread:stock");
+                    let core_tags=exact::cylinder_tags(&core,id,stock_start,stock_end,"thread:core");
+                    let (tool,tags)=exact::boolean_tagged((&stock,&stock_tags),(&core,&core_tags),Bool::Subtract,id)?;
+                    bodies[i].cut_tagged(&tool,&tags,id)?;
                     threads::rod_with_lead(spec.major - room, spec.pitch, length, t.left, [ends[0] || caps[0] > 0.0, ends[1] || caps[1] > 0.0])?
                 };
                 thread.map(|v| start + turn * v);
@@ -2026,6 +2071,14 @@ impl Session {
         s.path = Some(path.to_owned());
         s.container = opened.container;
         Ok(s)
+    }
+
+    /// How displayed geometry was obtained. A future timeline is never verified
+    /// by this build, even when its saved preview has a local authentication MAC.
+    pub fn geometry_trust(&self) -> &'static str {
+        if self.read_only { "unverified_preview" }
+        else if self.from_cache { "local_authenticated_cache" }
+        else { "rebuilt" }
     }
 
     /// Bodies that are not hidden.

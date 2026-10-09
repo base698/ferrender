@@ -47,7 +47,7 @@ fn a_sweep_names_its_faces_by_sketch_entity_and_caps() {
     let body_tags = s.built.bodies[0].tags.clone();
     let tags: Vec<_> = body_tags.iter().flatten().flatten().collect();
     assert_eq!(tags.len(), 6, "a box has six tagged faces: {tags:?}");
-    assert_eq!(tags.iter().filter(|t| matches!(t.origin, Origin::Cap { .. })).count(), 2);
+    assert_eq!(tags.iter().filter(|t| matches!(t.origin, Origin::ProfileCap { .. })).count(), 2);
     assert_eq!(tags.iter().filter(|t| matches!(t.origin, Origin::Swept { .. })).count(), 4);
     let swept: std::collections::BTreeSet<u32> = tags.iter().filter_map(|t| if let Origin::Swept { entity, .. } = t.origin { Some(entity) } else { None }).collect();
     assert_eq!(swept.len(), 4, "each side comes from a different sketch line");
@@ -64,7 +64,7 @@ fn a_fillet_follows_its_edge_when_the_block_grows() {
     let FeatureKind::Blend(b) = &s.doc.feature(fillet).unwrap().kind else { panic!() };
     assert_eq!(b.tags.len(), 1, "the first build learns the edge's tag");
     let tag = b.tags[0].clone().expect("the edge between a swept side and the end cap has a tag");
-    assert!(tag.faces.iter().any(|t| matches!(t.origin, Origin::Cap { end: true, .. })), "one face is the top cap: {tag:?}");
+    assert!(tag.faces.iter().any(|t| matches!(t.origin, Origin::ProfileCap { end: true, .. })), "one face is the top cap: {tag:?}");
     assert!(tag.faces.iter().any(|t| matches!(t.origin, Origin::Swept { .. })), "the other is a swept side: {tag:?}");
     assert_eq!(s.built.resolutions.get(&fillet), Some(&Level::Tag), "the command learned the edge's tag when it was picked");
 
@@ -111,7 +111,7 @@ fn a_shell_keeps_its_open_face_after_a_cut_splits_it() {
     run(&mut s, json!({"op": "primitive", "type": "box", "width": 40, "depth": 20, "height": 10}));
     let body = last(&s);
     // Open the top face.
-    run(&mut s, json!({"op": "shell", "body": body, "open_faces": [[20, 10, 10]], "thickness": 1}));
+    run(&mut s, json!({"op": "shell", "body": body, "open_faces": [[10, 10, 10]], "thickness": 1}));
     let shell = last(&s);
     assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
     let FeatureKind::Shell(sh) = &s.doc.feature(shell).unwrap().kind else { panic!() };
@@ -125,8 +125,8 @@ fn a_shell_keeps_its_open_face_after_a_cut_splits_it() {
     run(&mut s, json!({"op": "extrude", "distance": -4, "operation": "cut"}));
     run(&mut s, json!({"op": "rollback", "to": "end"}));
     assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
-    // The picked point (20,10,10) is now in the slot; by position the shell would open the slot's floor or fail.
-    // By tag family it opens a piece of the original top face.
+    // The pick remains within one unique piece of the original top face.
+    // A pick in the removed slot is separately tested to fail as ambiguous.
     let level = s.built.resolutions.get(&shell).copied();
     assert!(matches!(level, Some(Level::Origin) | Some(Level::Tag)), "resolved by the face's origin, got {level:?}");
     let b = s.built.body(body).unwrap();
@@ -179,7 +179,7 @@ fn tags_survive_save_and_load_and_old_files_learn_them() {
     let path = dir.join("tagged.ferr");
     let text = fr_core::io::to_json(&s.doc);
     assert!(text.contains("\"tags\""), "tags are written");
-    assert_eq!(fr_core::io::design_version(&s.doc), 10);
+    assert_eq!(fr_core::io::design_version(&s.doc), 13);
     std::fs::write(&path, &text).unwrap();
     let again = Session::open(&path).unwrap();
     assert_eq!(again.doc, s.doc);
