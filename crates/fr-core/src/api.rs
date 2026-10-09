@@ -166,10 +166,10 @@ QUERIES
    The view is fitted to the bodies. For a custom camera add "azimuth" and "elevation" in degrees (the eye's bearing around Z and height above the XY plane), "target":[x,y,z] to centre on a point, and "zoom" to magnify (2 = twice as close).
 {"op":"get_reference"}                             this text
 
-Scripts. A Rhai script with a META map (name, description, inputs) and fn run(inputs) drives these same commands as functions: extrude(#{sketch: s, distance: 10}) returns what the command returns; new is new_design and thread is add_thread (Rhai keywords); command(#{op: ...}) dispatches a command (nested scripts and batches are excluded). Also scene(), info(id), params(), errors(), selection(), measure(a, b), screenshot(path, #{view: "iso"}); files read_text, write_text, read_csv, write_csv, list_files(dir, ".ferr"), exists, mkdir, join, basename, document_dir(), script_dir(), all inside the allowed folders; log, progress(0..1, msg), confirm, ask, fail, name_template("{a}-{b}", #{a: 1, b: 2}). Inputs arrive as numbers in mm and degrees with the typed text in inputs.expr.NAME, so passing inputs.expr.width to a command keeps the parameter live. Declared input kinds: length, angle, number, integer, bool, choice (with choices), text, folder, file, body, face, sketch; each has an initial value.
+Scripts. A Rhai script with a META map (name, description, inputs) and fn run(inputs) drives these same commands as functions: extrude(#{sketch: s, distance: 10}) returns what the command returns; new is new_design and thread is add_thread (Rhai keywords); command(#{op: ...}) dispatches a command (nested scripts and batches are excluded). Also scene(), info(id), params(), errors(), selection(), measure(a, b), screenshot(path, #{view: "iso"}); files read_text, write_text, read_csv, write_csv, list_files(dir, ".ferr"), exists, mkdir, join, basename, document_dir(), script_dir(), all inside the allowed folders; log, progress(0..1, msg), confirm, ask, fail, name_template("{a}-{b}", #{a: 1, b: 2}). Files a script writes (save, exports, screenshots, write_text, write_csv) are staged beside their targets and moved into place only when the run succeeds; a cancelled or failed run leaves none of them. Links inside the allowed folders are not followed. Inputs arrive as numbers in mm and degrees with the typed text in inputs.expr.NAME, so passing inputs.expr.width to a command keeps the parameter live. Declared input kinds: length, angle, number, integer, bool, choice (with choices), text, folder, file, body, face, sketch; each has an initial value.
 {"op":"script_meta","source":"..."} or {"path":"/abs/x.rhai"}   the META of a script without running it
-{"op":"run_script","path":"/abs/x.rhai","inputs":{"width":"30 mm"},"allow":["/abs/out"],"yes":true}   runs the script as one undo step (source may be given instead of path); returns log, result, exports, features, errors
-{"op":"add_feature","feature":{...}}                 appends a feature exactly as the file format writes it (used by exported timeline scripts)
+{"op":"run_script","path":"/abs/x.rhai","inputs":{"width":"30 mm"},"allow":["/abs/out"],"yes":true,"timeout":600}   runs the script as one undo step (source may be given instead of path); timeout is seconds, after which the run fails at its next operation; returns log, result, exports, features, errors
+{"op":"add_feature","feature":{...},"mesh_path":"/abs/scan.stl","image_path":"/abs/depth.png"}   appends a feature exactly as the file format writes it (used by exported timeline scripts); mesh_path fills an import's mesh from a file (with "units"), image_path a relief's or sketch's image
 
 Bodies are named by the id of the feature that created them. Check get_scene_info for feature errors after changes, and look at a screenshot to confirm the shape."#;
 
@@ -1793,6 +1793,10 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             req.script_dir = dir.clone();
             req.inputs = if c["inputs"].is_object() { c["inputs"].clone() } else { json!({}) };
             req.sandbox.yes = c["yes"].as_bool().unwrap_or(true);
+            req.time_limit = match &c["timeout"] {
+                J::Null => None,
+                v => Some(std::time::Duration::from_secs_f64(v.as_f64().filter(|t| t.is_finite() && *t > 0.0).ok_or("\"timeout\" is a positive number of seconds")?)),
+            };
             req.sandbox.allowed = c["allow"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(std::path::PathBuf::from).collect()).unwrap_or_default();
             if let Some(d) = dir { req.sandbox.allowed.push(d); }
             if let Some(d) = s.path.as_ref().and_then(|p| p.parent()) { req.sandbox.allowed.push(d.to_path_buf()); }
@@ -1812,7 +1816,23 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         }
         "add_feature" => {
             // A feature as the file stores it, for scripts that replay an exported timeline.
-            let mut feature: crate::Feature = serde_json::from_value(c["feature"].clone()).map_err(|e| format!("add_feature needs a \"feature\" as the file format writes one: {e}"))?;
+            // Large embedded data may come from a file beside the script instead:
+            // "mesh_path" for an import's mesh, "image_path" for a relief's or sketch's image.
+            let mut value = c["feature"].clone();
+            if let Some(p) = c["image_path"].as_str() {
+                let inner = value.get_mut("kind").and_then(J::as_object_mut).and_then(|k| k.values_mut().next()).and_then(J::as_object_mut)
+                    .ok_or("\"image_path\" applies to a relief or a sketch with a reference image")?;
+                let key = if inner.contains_key("image") { "image" } else { "reference" };
+                let slot = inner.get_mut(key).ok_or("\"image_path\" applies to a relief or a sketch with a reference image")?;
+                let placement: crate::reference::ReferenceImage = serde_json::from_value(slot.clone()).map_err(|e| format!("add_feature: the image placement is malformed: {e}"))?;
+                let image = placement.with_pixels_from(std::path::Path::new(p))?;
+                *slot = serde_json::to_value(&image).map_err(|e| e.to_string())?;
+            }
+            let mut feature: crate::Feature = serde_json::from_value(value).map_err(|e| format!("add_feature needs a \"feature\" as the file format writes one: {e}"))?;
+            if let Some(p) = c["mesh_path"].as_str() {
+                let FeatureKind::Import(mesh) = &mut feature.kind else { return Err("\"mesh_path\" applies to an import feature".into()) };
+                *mesh = io::import_mesh(std::path::Path::new(p), unit_of(c, Unit::Mm)?)?.0;
+            }
             let id = s.edit_feature(|d| {
                 if feature.id == 0 || d.feature(feature.id).is_some() { feature.id = d.next_id; }
                 d.next_id = d.next_id.max(feature.id + 1);

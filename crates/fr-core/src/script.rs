@@ -21,17 +21,23 @@
 //! Every command in [`crate::api::OPS`] is a host function taking a map of
 //! arguments (the same JSON as the API) and returning the command's result.
 //! Files are reachable only inside the script's folder, the document's folder
-//! and any folders the caller allows.
+//! and any folders the caller allows. Files a script writes are staged beside
+//! their target and moved into place only when the run succeeds, so a
+//! cancelled or failed run leaves nothing behind.
 
-use std::io::Read;
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope};
 use serde_json::{Value, json};
 
 use crate::doc::Session;
+use crate::sandboxfs::{Dir, Entry};
 use crate::sketch::Id;
 
 type R<T> = Result<T, String>;
@@ -43,6 +49,8 @@ pub const MAX_CALL_LEVELS: usize = 64;
 pub const MAX_STRING: usize = 1024 * 1024;
 pub const MAX_ARRAY: usize = 1_000_000;
 pub const MAX_MAP: usize = 100_000;
+/// Embedded data above this size leaves an exported script as a file beside it.
+pub const SIDECAR_BYTES: usize = 64 * 1024;
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EVENTS: usize = 10_000;
@@ -119,18 +127,22 @@ pub struct Request {
     pub events: Option<std::sync::mpsc::Sender<Event>>,
     /// Answers `confirm` (default `None`) and `ask` (default `Some(text)`); `None` declines.
     pub ask: Option<Arc<dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync>>,
+    /// The run fails at its next script operation or command once this much time has passed.
+    /// A modeling call already under way runs to its end first.
+    pub time_limit: Option<Duration>,
 }
 
 impl Request {
     pub fn new(source: impl Into<String>) -> Request {
-        Request { source: source.into(), script_dir: None, inputs: json!({}), sandbox: Sandbox::default(), selection: json!({}), cancel: Arc::new(AtomicBool::new(false)), events: None, ask: None }
+        Request { source: source.into(), script_dir: None, inputs: json!({}), sandbox: Sandbox::default(), selection: json!({}), cancel: Arc::new(AtomicBool::new(false)), events: None, ask: None, time_limit: None }
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct Outcome {
     pub log: Vec<String>,
-    /// Files the script wrote through save, export or screenshot.
+    /// Files the script wrote through save, export, screenshot or the write helpers,
+    /// moved into place when the run finished.
     pub exports: Vec<PathBuf>,
     /// What `run` returned, if anything JSON-like.
     pub result: Value,
@@ -179,8 +191,28 @@ pub fn meta(source: &str) -> R<Meta> {
     Ok(meta)
 }
 
+/// A path the sandbox has admitted: the file itself and the allowed root it is under.
+struct Resolved {
+    full: PathBuf,
+    root: PathBuf,
+}
+
+impl Resolved {
+    fn name(&self) -> &OsStr {
+        self.full.file_name().unwrap_or_default()
+    }
+
+    /// The file's folder, opened from the allowed root without following links,
+    /// so a link or a swapped folder planted after the check is refused.
+    fn dir(&self) -> R<Dir> {
+        let parent = self.full.parent().ok_or_else(|| format!("{} has no folder", self.full.display()))?;
+        let rel = parent.strip_prefix(&self.root).map_err(|_| format!("{} is outside {}", self.full.display(), self.root.display()))?;
+        crate::sandboxfs::open_beneath(&self.root, rel)
+    }
+}
+
 /// A path the script may touch: inside one of the allowed folders, after resolving `..` and links.
-fn allowed(sandbox: &Sandbox, path: &Path, for_write: bool) -> R<PathBuf> {
+fn allowed(sandbox: &Sandbox, path: &Path, for_write: bool) -> R<Resolved> {
     let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().map_err(|e| e.to_string())?.join(path) };
     // The file itself may not exist yet; its folder must.
     let (dir, name) = match (absolute.parent(), absolute.file_name()) {
@@ -194,28 +226,179 @@ fn allowed(sandbox: &Sandbox, path: &Path, for_write: bool) -> R<PathBuf> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => unresolved,
         Err(e) => return Err(format!("could not inspect {}: {e}", path.display())),
     };
-    let inside = sandbox.allowed.iter().filter_map(|a| a.canonicalize().ok()).any(|a| full.starts_with(&a));
-    if !inside {
-        return Err(format!("the script may not {} {}: it is outside the allowed folders ({})", if for_write { "write" } else { "read" }, full.display(), sandbox.allowed.iter().map(|a| a.display().to_string()).collect::<Vec<_>>().join(", ")));
+    let root = sandbox.allowed.iter().filter_map(|a| a.canonicalize().ok()).find(|a| full.starts_with(a));
+    match root {
+        Some(root) => Ok(Resolved { full, root }),
+        None => Err(format!("the script may not {} {}: it is outside the allowed folders ({})", if for_write { "write" } else { "read" }, full.display(), sandbox.allowed.iter().map(|a| a.display().to_string()).collect::<Vec<_>>().join(", "))),
     }
-    Ok(full)
 }
 
 /// Bounded source loading shared by the app, CLI and API. In particular, reject
 /// devices and pipes before opening them so inspecting script metadata cannot hang.
 pub fn read_source(path: &Path) -> R<String> {
-    read_text_bounded(path, MAX_SOURCE_BYTES)
+    let metadata = std::fs::metadata(path).map_err(|e| format!("could not inspect {}: {e}", path.display()))?;
+    if !metadata.is_file() { return Err(format!("{} is not a regular file", path.display())); }
+    let file = File::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    read_text_bounded(file, path, MAX_SOURCE_BYTES)
 }
 
-fn read_text_bounded(path: &Path, max: usize) -> R<String> {
-    let metadata = std::fs::metadata(path).map_err(|e| format!("could not inspect {}: {e}", path.display()))?;
+fn read_text_bounded(file: File, path: &Path, max: usize) -> R<String> {
+    let metadata = file.metadata().map_err(|e| format!("could not inspect {}: {e}", path.display()))?;
     if !metadata.is_file() { return Err(format!("{} is not a regular file", path.display())); }
     if metadata.len() > max as u64 { return Err(format!("{} exceeds the {} byte limit", path.display(), max)); }
     let mut text = String::new();
-    std::fs::File::open(path).and_then(|f| f.take(max as u64 + 1).read_to_string(&mut text))
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    file.take(max as u64 + 1).read_to_string(&mut text).map_err(|e| format!("could not read {}: {e}", path.display()))?;
     if text.len() > max { return Err(format!("{} exceeds the {} byte limit", path.display(), max)); }
     Ok(text)
+}
+
+/// A file the script is writing: a temporary beside its target, moved into
+/// place when the run succeeds and removed when it does not.
+struct Staged {
+    dir: Dir,
+    name: OsString,
+    tmp: OsString,
+    full: PathBuf,
+    /// Whether the write that was meant for it actually happened.
+    written: bool,
+}
+
+#[derive(Default)]
+struct Stage {
+    entries: Vec<Staged>,
+}
+
+impl Stage {
+    fn find(&self, full: &Path) -> Option<usize> {
+        self.entries.iter().position(|e| e.full == full)
+    }
+
+    /// Creates a fresh temporary for `r`'s target and hands it over.
+    fn prepare(&mut self, r: &Resolved) -> R<(usize, File)> {
+        if let Some(i) = self.find(&r.full) {
+            // Written twice in one run: the earlier temporary goes.
+            let old = self.entries.remove(i);
+            let _ = old.dir.unlink(&old.tmp);
+        }
+        let dir = r.dir()?;
+        let name = r.name().to_owned();
+        for _ in 0..16 {
+            let tmp = crate::sandboxfs::temp_name(&name);
+            match dir.create_new(&tmp) {
+                Ok(file) => {
+                    self.entries.push(Staged { dir, name, tmp, full: r.full.clone(), written: false });
+                    return Ok((self.entries.len() - 1, file));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("could not create a file beside {}: {e}", r.full.display())),
+            }
+        }
+        Err(format!("could not find a free temporary name beside {}", r.full.display()))
+    }
+
+    fn tmp_path(&self, i: usize) -> PathBuf {
+        self.entries[i].dir.path().join(&self.entries[i].tmp)
+    }
+
+    fn mark_written(&mut self, i: usize) {
+        self.entries[i].written = true;
+    }
+
+    /// Forgets a staged file whose write failed.
+    fn drop_entry(&mut self, i: usize) {
+        let e = self.entries.remove(i);
+        let _ = e.dir.unlink(&e.tmp);
+    }
+
+    /// Where a file the run already wrote lives right now.
+    fn written(&self, full: &Path) -> Option<usize> {
+        self.find(full).filter(|i| self.entries[*i].written)
+    }
+
+    fn open_written(&self, i: usize) -> R<File> {
+        self.entries[i].dir.open_read(&self.entries[i].tmp)
+    }
+
+    /// Moves every written file onto its target; returns the targets.
+    fn commit(&mut self) -> R<Vec<PathBuf>> {
+        let mut done = Vec::new();
+        let mut failed = Vec::new();
+        for e in self.entries.drain(..) {
+            if !e.written { let _ = e.dir.unlink(&e.tmp); continue; }
+            let result = (|| -> R<()> {
+                // A design saved over a plain 0.3 file keeps the same backup a save from the app would.
+                if e.full.extension().is_some_and(|x| x == "ferr") {
+                    let tmp = e.dir.path().join(&e.tmp);
+                    crate::io::keep_backup(&e.full, crate::io::is_container(&tmp))?;
+                }
+                e.dir.rename(&e.tmp, &e.name)
+            })();
+            match result {
+                Ok(()) => done.push(e.full),
+                Err(err) => { let _ = e.dir.unlink(&e.tmp); failed.push(err); }
+            }
+        }
+        if failed.is_empty() { Ok(done) } else { Err(format!("{} of its files could not be put in place: {}", failed.len(), failed.join("; "))) }
+    }
+
+    fn discard(&mut self) {
+        for e in self.entries.drain(..) { let _ = e.dir.unlink(&e.tmp); }
+    }
+}
+
+impl Drop for Stage {
+    fn drop(&mut self) { self.discard(); }
+}
+
+/// Everything the host functions share.
+struct Host {
+    shared: Mutex<Session>,
+    outcome: Mutex<Outcome>,
+    sandbox: Sandbox,
+    stage: Mutex<Stage>,
+    cancel: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+    timed_out: AtomicBool,
+}
+
+impl Host {
+    fn session(&self) -> std::sync::MutexGuard<'_, Session> {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Fails once the time limit has passed; checked before every command and helper.
+    fn check_time(&self) -> Result<(), Box<EvalAltResult>> {
+        if self.deadline.is_some_and(|d| Instant::now() >= d) {
+            self.timed_out.store(true, Ordering::Relaxed);
+            return Err(runtime("time limit"));
+        }
+        Ok(())
+    }
+
+    /// Opens a file for reading: the run's own staged copy if it wrote it, else the file itself.
+    fn read(&self, path: &str) -> R<File> {
+        let r = allowed(&self.sandbox, Path::new(path), false)?;
+        let stage = self.stage.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = stage.written(&r.full) { return stage.open_written(i); }
+        r.dir()?.open_read(r.name())
+    }
+
+    /// Writes a file through the stage; it appears at `path` when the run succeeds.
+    fn write(&self, path: &str, bytes: &[u8]) -> R<PathBuf> {
+        let r = allowed(&self.sandbox, Path::new(path), true)?;
+        let mut stage = self.stage.lock().unwrap_or_else(|e| e.into_inner());
+        let (i, mut file) = stage.prepare(&r)?;
+        match file.write_all(bytes).and_then(|_| file.sync_all()) {
+            Ok(()) => { stage.mark_written(i); Ok(r.full) }
+            Err(e) => { stage.drop_entry(i); Err(format!("could not write {}: {e}", r.full.display())) }
+        }
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        let Ok(r) = allowed(&self.sandbox, Path::new(path), false) else { return false };
+        if self.stage.lock().unwrap_or_else(|e| e.into_inner()).written(&r.full).is_some() { return true; }
+        r.dir().is_ok_and(|d| d.entry(r.name()) != Entry::Missing)
+    }
 }
 
 fn to_value(d: &Dynamic) -> Fallible {
@@ -244,67 +427,73 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     let mut engine = engine_with_limits();
     let ast = engine.compile(&req.source).map_err(|e| format!("the script does not parse: {e}"))?;
 
-    let shared = Arc::new(Mutex::new(std::mem::take(session)));
-    let outcome = Arc::new(Mutex::new(Outcome::default()));
-    let sandbox = Arc::new(req.sandbox.clone());
+    let started = Instant::now();
+    let host = Arc::new(Host {
+        shared: Mutex::new(std::mem::take(session)),
+        outcome: Mutex::new(Outcome::default()),
+        sandbox: req.sandbox.clone(),
+        stage: Mutex::new(Stage::default()),
+        cancel: req.cancel.clone(),
+        deadline: req.time_limit.map(|t| started + t),
+        timed_out: AtomicBool::new(false),
+    });
     let script_dir = req.script_dir.clone();
-    let document_dir = shared.lock().unwrap().path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
+    let document_dir = host.session().path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
     let events = req.events.clone();
     let event_budget = Arc::new(Mutex::new((0usize, 0usize)));
     let cancel = req.cancel.clone();
     let asker = req.ask.clone();
     let selection = req.selection.clone();
 
-    // Progress: check the cancel flag every so often.
+    // Progress: check the cancel flag and the clock every so often.
     {
-        let cancel = cancel.clone();
-        engine.on_progress(move |ops| if ops % 10_000 == 0 && cancel.load(Ordering::Relaxed) { Some(Dynamic::from("cancelled")) } else { None });
+        let host = host.clone();
+        engine.on_progress(move |ops| {
+            if ops % 10_000 != 0 { return None; }
+            if host.cancel.load(Ordering::Relaxed) { return Some(Dynamic::from("cancelled")); }
+            if host.check_time().is_err() { return Some(Dynamic::from("time limit")); }
+            None
+        });
     }
 
     // One host function per command, taking the command's arguments as a map, plus a no-argument form.
     // Two commands are Rhai keywords and get other names: `new` is `new_design`, `thread` is `add_thread`.
     for op in crate::api::OPS.iter().copied().filter(|o| !matches!(*o, "run_script" | "script_meta" | "batch")) {
         let name = script_name(op);
-        let with_args = {
-            let (shared, outcome, sandbox) = (shared.clone(), outcome.clone(), sandbox.clone());
-            move |args: Map| -> Fallible { command(&shared, &outcome, &sandbox, op, args) }
-        };
-        let bare = {
-            let (shared, outcome, sandbox) = (shared.clone(), outcome.clone(), sandbox.clone());
-            move || -> Fallible { command(&shared, &outcome, &sandbox, op, Map::new()) }
-        };
+        let with_args = { let host = host.clone(); move |args: Map| -> Fallible { command(&host, op, args) } };
+        let bare = { let host = host.clone(); move || -> Fallible { command(&host, op, Map::new()) } };
         engine.register_fn(name, with_args);
         engine.register_fn(name, bare);
     }
     {
-        let (shared, outcome, sandbox) = (shared.clone(), outcome.clone(), sandbox.clone());
+        let host = host.clone();
         engine.register_fn("command", move |cmd: Map| -> Fallible {
             let op = cmd.get("op").and_then(|o| o.clone().into_string().ok()).ok_or_else(|| runtime("command(map) needs an \"op\""))?;
             if op == "batch" { return Err(runtime("run a script's commands one at a time, not as a batch")); }
-            command(&shared, &outcome, &sandbox, &op, cmd)
+            command(&host, &op, cmd)
         });
     }
     // Reading helpers.
     {
-        let shared = shared.clone();
-        engine.register_fn("scene", move || -> Fallible { let mut s = shared.lock().unwrap(); json_to_dynamic(&crate::api::execute(&mut s, &json!({"op": "get_scene_info"}), None).map_err(runtime)?) });
+        let host = host.clone();
+        engine.register_fn("scene", move || -> Fallible { let mut s = host.session(); json_to_dynamic(&crate::api::execute(&mut s, &json!({"op": "get_scene_info"}), None).map_err(runtime)?) });
     }
     {
-        let shared = shared.clone();
-        engine.register_fn("info", move |id: i64| -> Fallible { let mut s = shared.lock().unwrap(); json_to_dynamic(&crate::api::execute(&mut s, &json!({"op": "get_object_info", "id": id}), None).map_err(runtime)?) });
+        let host = host.clone();
+        engine.register_fn("info", move |id: i64| -> Fallible { let mut s = host.session(); json_to_dynamic(&crate::api::execute(&mut s, &json!({"op": "get_object_info", "id": id}), None).map_err(runtime)?) });
     }
     {
-        let shared = shared.clone();
+        let host = host.clone();
         engine.register_fn("params", move || -> Fallible {
-            let s = shared.lock().unwrap();
+            let s = host.session();
             let m: serde_json::Map<String, Value> = s.doc.params.iter().map(|p| (p.name.clone(), json!({"expr": p.expr, "value": s.doc.show_param(&p.name)}))).collect();
             json_to_dynamic(&Value::Object(m))
         });
     }
     {
-        let shared = shared.clone();
+        let host = host.clone();
         engine.register_fn("errors", move || -> Fallible {
-            let s = shared.lock().unwrap();
+            let s = host.session();
             let list: Vec<Value> = s.built.errors.iter().map(|(id, e)| json!({"feature": id, "name": s.doc.feature(*id).map(|f| f.name.clone()), "error": e})).collect();
             json_to_dynamic(&Value::Array(list))
         });
@@ -314,15 +503,14 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
         engine.register_fn("selection", move || -> Fallible { json_to_dynamic(&selection) });
     }
     {
-        let (shared, outcome, sandbox) = (shared.clone(), outcome.clone(), sandbox.clone());
+        let host = host.clone();
         let shot = move |path: String, opts: Map| -> Fallible {
-            let full = allowed(&sandbox, Path::new(&path), true).map_err(runtime)?;
+            host.check_time()?;
             let mut cmd = Value::Object(dynamic_to_json(&Dynamic::from(opts))?.as_object().cloned().unwrap_or_default());
             cmd["op"] = json!("get_viewport_screenshot");
-            let png = { let mut s = shared.lock().unwrap(); crate::api::execute(&mut s, &cmd, None).map_err(runtime)? };
+            let png = { let mut s = host.session(); crate::api::execute(&mut s, &cmd, None).map_err(runtime)? };
             let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, png["png_base64"].as_str().unwrap_or("")).map_err(|e| runtime(e.to_string()))?;
-            std::fs::write(&full, bytes).map_err(|e| runtime(format!("could not write {}: {e}", full.display())))?;
-            outcome.lock().unwrap().exports.push(full.clone());
+            let full = host.write(&path, &bytes).map_err(runtime)?;
             Ok(Dynamic::from(full.display().to_string()))
         };
         let shot2 = shot.clone();
@@ -330,43 +518,44 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
         engine.register_fn("screenshot", move |path: String| shot2(path, Map::new()));
     }
     {
-        let shared = shared.clone();
+        let host = host.clone();
         engine.register_fn("measure", move |from: Map, to: Map| -> Fallible {
-            let mut s = shared.lock().unwrap();
+            let mut s = host.session();
             let cmd = json!({"op": "measure", "from": dynamic_to_json(&Dynamic::from(from))?, "to": dynamic_to_json(&Dynamic::from(to))?});
             json_to_dynamic(&crate::api::execute(&mut s, &cmd, None).map_err(runtime)?)
         });
     }
     // Files.
     {
-        let sandbox = sandbox.clone();
+        let host = host.clone();
         engine.register_fn("read_text", move |path: String| -> Fallible {
-            let full = allowed(&sandbox, Path::new(&path), false).map_err(runtime)?;
-            read_text_bounded(&full, MAX_FILE_BYTES).map(Dynamic::from).map_err(runtime)
+            host.check_time()?;
+            let file = host.read(&path).map_err(runtime)?;
+            read_text_bounded(file, Path::new(&path), MAX_FILE_BYTES).map(Dynamic::from).map_err(runtime)
         });
     }
     {
-        let (sandbox, outcome) = (sandbox.clone(), outcome.clone());
+        let host = host.clone();
         engine.register_fn("write_text", move |path: String, text: String| -> Fallible {
-            let full = allowed(&sandbox, Path::new(&path), true).map_err(runtime)?;
-            std::fs::write(&full, text).map_err(|e| runtime(format!("could not write {}: {e}", full.display())))?;
-            outcome.lock().unwrap().exports.push(full);
+            host.check_time()?;
+            host.write(&path, text.as_bytes()).map_err(runtime)?;
             Ok(Dynamic::UNIT)
         });
     }
     {
-        let sandbox = sandbox.clone();
+        let host = host.clone();
         engine.register_fn("read_csv", move |path: String| -> Fallible {
-            let full = allowed(&sandbox, Path::new(&path), false).map_err(runtime)?;
-            let text = read_text_bounded(&full, MAX_FILE_BYTES).map_err(runtime)?;
+            host.check_time()?;
+            let file = host.read(&path).map_err(runtime)?;
+            let text = read_text_bounded(file, Path::new(&path), MAX_FILE_BYTES).map_err(runtime)?;
             let rows: Vec<Value> = text.lines().filter(|l| !l.trim().is_empty()).map(|l| Value::Array(csv_fields(l).into_iter().map(Value::String).collect())).collect();
             json_to_dynamic(&Value::Array(rows))
         });
     }
     {
-        let (sandbox, outcome) = (sandbox.clone(), outcome.clone());
+        let host = host.clone();
         engine.register_fn("write_csv", move |path: String, rows: rhai::Array| -> Fallible {
-            let full = allowed(&sandbox, Path::new(&path), true).map_err(runtime)?;
+            host.check_time()?;
             let mut text = String::new();
             for row in rows {
                 let cells: Vec<String> = row.into_array().map_err(|_| runtime("write_csv takes an array of rows, each an array of cells"))?.into_iter().map(|c| csv_quote(&c.to_string())).collect();
@@ -374,18 +563,17 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
                 text.push('\n');
                 if text.len() > MAX_FILE_BYTES { return Err(runtime("the CSV exceeds 16 MiB")); }
             }
-            std::fs::write(&full, text).map_err(|e| runtime(format!("could not write {}: {e}", full.display())))?;
-            outcome.lock().unwrap().exports.push(full);
+            host.write(&path, text.as_bytes()).map_err(runtime)?;
             Ok(Dynamic::UNIT)
         });
     }
     {
-        let sandbox = sandbox.clone();
+        let host = host.clone();
         let list = move |dir: String, suffix: String| -> Fallible {
             let probe = Path::new(&dir).join("x");
-            let full = allowed(&sandbox, &probe, false).map_err(runtime)?;
-            let dir = full.parent().unwrap().to_path_buf();
-            let mut names: Vec<String> = std::fs::read_dir(&dir).map_err(|e| runtime(format!("could not list {}: {e}", dir.display())))?
+            let r = allowed(&host.sandbox, &probe, false).map_err(runtime)?;
+            let dir = r.dir().map_err(runtime)?;
+            let mut names: Vec<String> = std::fs::read_dir(dir.path()).map_err(|e| runtime(format!("could not list {}: {e}", dir.path().display())))?
                 .filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file() && p.to_string_lossy().to_ascii_lowercase().ends_with(&suffix.to_ascii_lowercase())).map(|p| p.display().to_string()).collect();
             names.sort();
             Ok(Dynamic::from(names.into_iter().map(Dynamic::from).collect::<rhai::Array>()))
@@ -395,14 +583,14 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
         engine.register_fn("list_files", move |dir: String| list2(dir, String::new()));
     }
     {
-        let sandbox = sandbox.clone();
-        engine.register_fn("exists", move |path: String| -> bool { allowed(&sandbox, Path::new(&path), false).map(|p| p.exists()).unwrap_or(false) });
+        let host = host.clone();
+        engine.register_fn("exists", move |path: String| -> bool { host.exists(&path) });
     }
     {
-        let sandbox = sandbox.clone();
+        let host = host.clone();
         engine.register_fn("mkdir", move |path: String| -> Fallible {
-            let full = allowed(&sandbox, Path::new(&path), true).map_err(runtime)?;
-            std::fs::create_dir_all(&full).map_err(|e| runtime(format!("could not create {}: {e}", full.display())))?;
+            let r = allowed(&host.sandbox, Path::new(&path), true).map_err(runtime)?;
+            r.dir().map_err(runtime)?.mkdir(r.name()).map_err(runtime)?;
             Ok(Dynamic::UNIT)
         });
     }
@@ -418,8 +606,8 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     }
     // Flow.
     {
-        let (outcome, events, budget) = (outcome.clone(), events.clone(), event_budget.clone());
-        let log = move |text: String| report_event(&outcome, &events, &budget, Event::Log(text));
+        let (host, events, budget) = (host.clone(), events.clone(), event_budget.clone());
+        let log = move |text: String| report_event(&host.outcome, &events, &budget, Event::Log(text));
         let print = log.clone();
         engine.on_print(move |text| print(text.to_owned()));
         let debug = log.clone();
@@ -427,10 +615,11 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
         engine.register_fn("log", move |msg: Dynamic| log(msg.to_string()));
     }
     {
-        let (outcome, events, cancel, budget) = (outcome.clone(), events.clone(), cancel.clone(), event_budget.clone());
+        let (host, events, cancel, budget) = (host.clone(), events.clone(), cancel.clone(), event_budget.clone());
         let report = move |fraction: f64, msg: String| -> Fallible {
-            report_event(&outcome, &events, &budget, Event::Progress(fraction.clamp(0.0, 1.0), msg));
+            report_event(&host.outcome, &events, &budget, Event::Progress(fraction.clamp(0.0, 1.0), msg));
             if cancel.load(Ordering::Relaxed) { return Err(runtime("cancelled")); }
+            host.check_time()?;
             Ok(Dynamic::UNIT)
         };
         let (r1, r2) = (report.clone(), report.clone());
@@ -439,11 +628,11 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
         engine.register_fn("progress", move |fraction: f64| r2(fraction, String::new()));
     }
     {
-        let (asker, yes) = (asker.clone(), sandbox.yes);
+        let (asker, yes) = (asker.clone(), req.sandbox.yes);
         engine.register_fn("confirm", move |msg: String| -> bool { if yes { true } else { asker.as_ref().is_some_and(|a| a(&msg, None).is_some()) } });
     }
     {
-        let (asker, yes) = (asker.clone(), sandbox.yes);
+        let (asker, yes) = (asker.clone(), req.sandbox.yes);
         engine.register_fn("ask", move |msg: String, default: String| -> Fallible {
             if yes { return Ok(Dynamic::from(default)); }
             match asker.as_ref().and_then(|a| a(&msg, Some(&default))) { Some(answer) => Ok(Dynamic::from(answer)), None => Err(runtime("the question was declined")) }
@@ -463,20 +652,30 @@ pub fn run(session: &mut Session, req: &Request) -> R<Outcome> {
     let result = engine.run_ast_with_scope(&mut scope, &ast)
         .and_then(|_| engine.call_fn::<Dynamic>(&mut scope, &ast, "run", (inputs_dynamic,)));
     drop(engine);
-    let mut out = Arc::try_unwrap(outcome).map(|m| m.into_inner().unwrap()).unwrap_or_default();
-    *session = Arc::try_unwrap(shared).map(|m| m.into_inner().unwrap()).map_err(|_| "the script engine kept a handle on the session")?;
+    let host = Arc::try_unwrap(host).map_err(|_| "the script engine kept a handle on the session".to_string())?;
+    let Host { shared, outcome, mut stage, timed_out, .. } = host;
+    let mut stage = std::mem::take(stage.get_mut().unwrap_or_else(|e| e.into_inner()));
+    let mut out = outcome.into_inner().unwrap_or_else(|e| e.into_inner());
+    *session = shared.into_inner().unwrap_or_else(|e| e.into_inner());
     out.features = session.doc.features.iter().map(|f| f.id).filter(|id| !before.contains(id)).collect();
     match result {
-        Ok(v) => { out.result = rhai::serde::from_dynamic(&v).unwrap_or(Value::Null); }
-        Err(e) if e.to_string().contains("cancelled") || cancel.load(Ordering::Relaxed) => { out.cancelled = true; }
-        Err(e) => return Err(format!("{}: {e}", meta.name)),
+        Ok(v) => {
+            out.result = rhai::serde::from_dynamic(&v).unwrap_or(Value::Null);
+            out.exports = stage.commit().map_err(|e| format!("{} finished, but {e}", meta.name))?;
+        }
+        Err(_) if timed_out.load(Ordering::Relaxed) => {
+            stage.discard();
+            return Err(format!("{}: the run exceeded its time limit of {:.0} s", meta.name, req.time_limit.unwrap_or_default().as_secs_f64()));
+        }
+        Err(e) if e.to_string().contains("cancelled") || cancel.load(Ordering::Relaxed) => { stage.discard(); out.cancelled = true; }
+        Err(e) => { stage.discard(); return Err(format!("{}: {e}", meta.name)); }
     }
     Ok(out)
 }
 
 /// Both the retained log and an unconsumed UI event queue have a shared budget.
 /// Exceeding it drops further reporting, without preventing cancellation or work.
-fn report_event(outcome: &Arc<Mutex<Outcome>>, events: &Option<std::sync::mpsc::Sender<Event>>, budget: &Arc<Mutex<(usize, usize)>>, event: Event) {
+fn report_event(outcome: &Mutex<Outcome>, events: &Option<std::sync::mpsc::Sender<Event>>, budget: &Arc<Mutex<(usize, usize)>>, event: Event) {
     let bytes = match &event { Event::Log(s) | Event::Progress(_, s) => s.len() };
     let mut budget = budget.lock().unwrap();
     if budget.0 >= MAX_EVENTS || bytes > MAX_EVENT_BYTES.saturating_sub(budget.1) { return; }
@@ -495,30 +694,66 @@ pub fn script_name(op: &str) -> &str {
     }
 }
 
-/// Runs one command for a script, checking paths against the sandbox and noting exports.
-fn command(shared: &Arc<Mutex<Session>>, outcome: &Arc<Mutex<Outcome>>, sandbox: &Sandbox, op: &str, args: Map) -> Fallible {
+/// Commands whose `path` argument names a file to read.
+const READS_PATH: &[&str] = &["import_stl", "import_mesh", "mesh_from_image", "open"];
+/// Commands whose `path` argument names a file to write; those writes are staged.
+const WRITES_PATH: &[&str] = &["save", "export_stl", "export_step", "get_viewport_screenshot"];
+
+/// Runs one command for a script, checking paths against the sandbox, staging
+/// files it writes and noting where a `save` really went.
+fn command(host: &Host, op: &str, args: Map) -> Fallible {
     // The generic command(map) entry point must have exactly the same privileges as
     // named host functions; nested scripts could otherwise supply a wider allow list.
     if matches!(op, "run_script" | "script_meta" | "batch") {
         return Err(runtime(format!("{op} cannot be called from a script")));
     }
+    host.check_time()?;
     let mut cmd = dynamic_to_json(&Dynamic::from(args))?;
     if !cmd.is_object() { cmd = json!({}); }
     cmd["op"] = json!(op);
     if op == "save" && cmd.get("path").and_then(Value::as_str).is_none() {
-        if let Some(path) = shared.lock().unwrap().path.as_ref() {
+        if let Some(path) = host.session().path.as_ref() {
             cmd["path"] = json!(path.display().to_string());
         }
     }
-    let path = cmd.get("path").and_then(Value::as_str).map(str::to_owned);
-    let writes = matches!(op, "save" | "export_stl" | "export_step" | "get_viewport_screenshot");
-    if let Some(p) = &path && matches!(op, "save" | "export_stl" | "export_step" | "import_stl" | "import_mesh" | "mesh_from_image" | "open") {
-        let full = allowed(sandbox, Path::new(p), writes).map_err(runtime)?;
-        cmd["path"] = json!(full.display().to_string());
-        if writes { outcome.lock().unwrap().exports.push(full); }
+    let mut stage = host.stage.lock().unwrap_or_else(|e| e.into_inner());
+    let mut staged = None;
+    let mut saved_to = None;
+    // `path` on the file commands; `mesh_path` and `image_path` on add_feature.
+    let keys: &[&str] = if op == "add_feature" { &["mesh_path", "image_path"] } else if READS_PATH.contains(&op) || WRITES_PATH.contains(&op) { &["path"] } else { &[] };
+    for key in keys {
+        let Some(p) = cmd.get(*key).and_then(Value::as_str).map(str::to_owned) else { continue };
+        let writes = WRITES_PATH.contains(&op);
+        let r = allowed(&host.sandbox, Path::new(&p), writes).map_err(runtime)?;
+        if writes {
+            let (i, _file) = stage.prepare(&r).map_err(runtime)?;
+            cmd[*key] = json!(stage.tmp_path(i).display().to_string());
+            staged = Some(i);
+            if op == "save" { saved_to = Some(r.full.clone()); }
+        } else if let Some(i) = stage.written(&r.full) {
+            // A file this run wrote: read the staged copy.
+            cmd[*key] = json!(stage.tmp_path(i).display().to_string());
+        } else {
+            // Look at the entry from the opened folder right before the command reads it by path.
+            match r.dir().map_err(runtime)?.entry(r.name()) {
+                Entry::File => {}
+                Entry::Missing => return Err(runtime(format!("{op}: there is no file {}", r.full.display()))),
+                _ => return Err(runtime(format!("{op}: {} is not a regular file", r.full.display()))),
+            }
+            cmd[*key] = json!(r.full.display().to_string());
+        }
     }
-    let mut s = shared.lock().unwrap();
-    let out = crate::api::execute(&mut s, &cmd, None).map_err(|e| runtime(format!("{op}: {e}")))?;
+    let mut s = host.session();
+    let out = crate::api::execute(&mut s, &cmd, None);
+    match (&out, staged) {
+        (Ok(_), Some(i)) => {
+            stage.mark_written(i);
+            if let Some(full) = saved_to { s.path = Some(full); }
+        }
+        (Err(_), Some(i)) => stage.drop_entry(i),
+        _ => {}
+    }
+    let out = out.map_err(|e| runtime(format!("{op}: {e}")))?;
     json_to_dynamic(&out)
 }
 
@@ -580,21 +815,39 @@ fn csv_quote(s: &str) -> String {
     if s.contains([',', '"', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_owned() }
 }
 
+/// An exported timeline: the script, the files it reads from its own folder,
+/// and what the export had to adjust to make a runnable script.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Export {
+    pub source: String,
+    /// Sidecar files by name, to be written beside the script: large imported
+    /// meshes as STL and large embedded images as PNG.
+    pub files: Vec<(String, Vec<u8>)>,
+    pub notes: Vec<String>,
+}
+
 /// A script that rebuilds the document: every parameter becomes an expression
-/// input and every feature a command. Unsupported replay states are refused
-/// before the caller writes a script that cannot reproduce the saved design.
-pub fn export_timeline(session: &Session) -> R<String> {
+/// input and every feature a command. Sidecar files are named after `design`.
+pub fn export_timeline(session: &Session) -> R<Export> {
+    export_timeline_named(session, "design")
+}
+
+/// Like [`export_timeline`], naming sidecar files `<stem>-<feature id>.<ext>`.
+///
+/// Failed features are exported suppressed with a note, a timeline marker that
+/// is not at the end is restored at the end of the script, hidden bodies that no
+/// longer exist are dropped, and embedded data above [`SIDECAR_BYTES`] goes into
+/// a file beside the script, which the script reads through `script_dir()`.
+pub fn export_timeline_named(session: &Session, stem: &str) -> R<Export> {
     let doc = &session.doc;
     if session.read_only { return Err("a read-only cached design has no editable timeline to export".into()); }
-    if doc.rollback.is_some() { return Err("move the timeline marker to the end before exporting it as a script".into()); }
-    if !session.built.errors.is_empty() { return Err("fix or suppress failed timeline features before exporting a script".into()); }
-    if doc.hidden_bodies.iter().any(|id| session.built.body(*id).is_none()) {
-        return Err("the timeline has hidden bodies that are currently suppressed or removed; show those bodies before exporting a script".into());
-    }
     crate::validation::document(doc)?;
-    let mut out = String::new();
-    source_push(&mut out, "// Exported by Ferrender: rebuilds the complete document.\n// Parameter inputs are expressions, evaluated in this design's units.\n")?;
-    source_push(&mut out, "const META = #{\n    name: \"Exported design\",\n    description: \"Rebuilds the exported timeline; parameters accept expressions.\",\n    inputs: [\n")?;
+    let stem: String = stem.chars().filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')).collect::<String>().trim().to_owned();
+    let stem = if stem.is_empty() { "design".to_owned() } else { stem };
+    let mut export = Export::default();
+    let out = &mut export.source;
+    source_push(out, "// Exported by Ferrender: rebuilds the complete document.\n// Parameter inputs are expressions, evaluated in this design's units.\n")?;
+    source_push(out, "const META = #{\n    name: \"Exported design\",\n    description: \"Rebuilds the exported timeline; parameters accept expressions.\",\n    inputs: [\n")?;
     // Text inputs retain dependencies, scalar values and radians. Typed script
     // inputs would be evaluated before new_design, against the caller's document.
     // `expr` is reserved by resolve_inputs for its per-input expression map.
@@ -607,45 +860,97 @@ pub fn export_timeline(session: &Session) -> R<String> {
         name
     }).collect();
     for (p, name) in doc.params.iter().zip(&names) {
-        source_push(&mut out, &format!("        #{{ name: {name:?}, label: {:?}, kind: \"text\", initial: {:?}, help: \"A parameter expression in the exported design's units.\" }},\n", p.name, p.expr))?;
+        source_push(out, &format!("        #{{ name: {name:?}, label: {:?}, kind: \"text\", initial: {:?}, help: \"A parameter expression in the exported design's units.\" }},\n", p.name, p.expr))?;
     }
-    source_push(&mut out, "    ],\n};\n\nfn run(inputs) {\n")?;
-    source_push(&mut out, &format!("    new_design(#{{ units: {:?} }});\n", doc.units.name()))?;
+    source_push(out, "    ],\n};\n\nfn run(inputs) {\n")?;
+    source_push(out, &format!("    new_design(#{{ units: {:?} }});\n", doc.units.name()))?;
     // Seed every name before installing its expression: valid saved parameter
     // tables may contain forward references. Seeds preserve each original unit.
     for p in &doc.params {
         let q = doc.quantity(&format!("${}", p.name))?;
         let suffix = match q.dim { crate::expr::Dim::None => "", crate::expr::Dim::Length => " mm", crate::expr::Dim::Angle => " deg" };
-        source_push(&mut out, &format!("    set_parameter(#{{ name: {:?}, expr: {:?} }});\n", p.name, format!("{}{suffix}", q.v)))?;
+        source_push(out, &format!("    set_parameter(#{{ name: {:?}, expr: {:?} }});\n", p.name, format!("{}{suffix}", q.v)))?;
     }
     for (p, name) in doc.params.iter().zip(&names) {
-        source_push(&mut out, &format!("    set_parameter(#{{ name: {:?}, expr: inputs[{name:?}] }});\n", p.name))?;
+        source_push(out, &format!("    set_parameter(#{{ name: {:?}, expr: inputs[{name:?}] }});\n", p.name))?;
     }
     for f in &doc.features {
-        // Inline mesh serialization expands to 48 bytes per triangle and itself
-        // allocates a temporary buffer. Reject large meshes before invoking it.
-        if let crate::FeatureKind::Import(mesh) = &f.kind
-            && mesh.len() > MAX_SOURCE_BYTES.saturating_sub(out.len()) / 48 {
-            return Err("the embedded mesh exceeds the script's 1 MB limit; save a .ferr design or write a script that imports the mesh file instead".into());
+        // Large embedded data goes beside the script: inline mesh serialization
+        // expands to 48 bytes per triangle, and an image is its PNG in base64.
+        let mut sidecar: Option<(&str, String)> = None;
+        let mut value = match &f.kind {
+            crate::FeatureKind::Import(mesh) if mesh.len() * 48 > SIDECAR_BYTES => {
+                let file = format!("{stem}-{}.stl", f.id);
+                export.files.push((file.clone(), crate::io::mesh_stl_bytes(mesh, crate::units::Unit::Mm)));
+                export.notes.push(format!("the mesh of \"{}\" ({} triangles) is written as {file} beside the script", f.name, mesh.len()));
+                sidecar = Some(("mesh_path", file));
+                let head = crate::Feature { id: f.id, name: f.name.clone(), suppressed: f.suppressed, owner: f.owner, made_by: f.made_by, kind: crate::FeatureKind::Import(crate::mesh::Mesh::default()) };
+                serde_json::to_value(&head).map_err(|e| format!("cannot export feature {}: {e}", f.name))?
+            }
+            crate::FeatureKind::Relief(r) if r.image.embedded_len() > SIDECAR_BYTES => {
+                let file = format!("{stem}-{}.png", f.id);
+                export.files.push((file.clone(), r.image.png_bytes()?));
+                export.notes.push(format!("the image of \"{}\" is written as {file} beside the script", f.name));
+                sidecar = Some(("image_path", file));
+                let mut v = serde_json::to_value(f).map_err(|e| format!("cannot export feature {}: {e}", f.name))?;
+                v["kind"]["relief"]["image"]["png"] = json!("");
+                v
+            }
+            crate::FeatureKind::Sketch(sk) if sk.reference.as_ref().is_some_and(|i| i.embedded_len() > SIDECAR_BYTES) => {
+                let file = format!("{stem}-{}.png", f.id);
+                export.files.push((file.clone(), sk.reference.as_ref().unwrap().png_bytes()?));
+                export.notes.push(format!("the reference image of \"{}\" is written as {file} beside the script", f.name));
+                sidecar = Some(("image_path", file));
+                let mut v = serde_json::to_value(f).map_err(|e| format!("cannot export feature {}: {e}", f.name))?;
+                v["kind"]["sketch"]["reference"]["png"] = json!("");
+                v
+            }
+            _ => {
+                let mut bytes = LimitedJson { bytes: Vec::new(), limit: MAX_SOURCE_BYTES.saturating_sub(out.len()) };
+                serde_json::to_writer(&mut bytes, f).map_err(|e| format!("cannot export feature {}: {e}", f.name))?;
+                serde_json::from_slice(&bytes.bytes).map_err(|e| e.to_string())?
+            }
+        };
+        if let Some(error) = session.built.errors.get(&f.id).filter(|_| !f.suppressed) {
+            // A failing feature would stop the replay; it goes in suppressed, so the
+            // rest builds and the user can fix it and unsuppress it afterwards.
+            value["suppressed"] = json!(true);
+            source_push(out, &format!("    // {:?} failed in the exported design ({}) and is suppressed here.\n", f.name, error.replace('\n', " ")))?;
+            export.notes.push(format!("\"{}\" failed in the design ({error}); it is exported suppressed", f.name));
         }
-        let mut bytes = LimitedJson { bytes: Vec::new(), limit: MAX_SOURCE_BYTES.saturating_sub(out.len()) };
-        serde_json::to_writer(&mut bytes, f).map_err(|e| format!("cannot export feature {}: {e}", f.name))?;
-        let value: Value = serde_json::from_slice(&bytes.bytes).map_err(|e| e.to_string())?;
-        source_push(&mut out, "    add_feature(#{ feature: ")?;
-        rhai_literal(&value, &mut out)?;
-        source_push(&mut out, " });\n")?;
+        source_push(out, "    add_feature(#{ feature: ")?;
+        rhai_literal(&value, out)?;
+        if let Some((key, file)) = sidecar {
+            source_push(out, &format!(", {key}: join(script_dir(), {file:?})"))?;
+            if key == "mesh_path" { source_push(out, ", units: \"mm\"")?; }
+        }
+        source_push(out, " });\n")?;
     }
+    let mut dropped = 0;
     for id in &doc.hidden_bodies {
-        source_push(&mut out, &format!("    set_visible(#{{ id: {id}, visible: false }});\n"))?;
+        if doc.feature(*id).is_none() && session.built.body(*id).is_none() { dropped += 1; continue; }
+        // Hidden only if the replay has that body: a suppressed or consumed one is not an error.
+        source_push(out, &format!("    for b in scene().bodies {{ if b.id == {id} {{ set_visible(#{{ id: {id}, visible: false }}); }} }}\n"))?;
+    }
+    if dropped > 0 {
+        export.notes.push(format!("{dropped} hidden body id{} no longer exist{} in the design and {} dropped", if dropped == 1 { "" } else { "s" }, if dropped == 1 { "s" } else { "" }, if dropped == 1 { "was" } else { "were" }));
     }
     if doc.active_component != 0 {
-        source_push(&mut out, &format!("    activate_component(#{{ id: {} }});\n", doc.active_component))?;
+        source_push(out, &format!("    activate_component(#{{ id: {} }});\n", doc.active_component))?;
     }
-    source_push(&mut out, "}\n")?;
+    if let Some(at) = doc.rollback.filter(|at| *at < doc.features.len()) {
+        // The whole timeline is exported; the marker goes back where it was at the end.
+        match at.checked_sub(1).map(|i| doc.features[i].id) {
+            Some(id) => source_push(out, &format!("    rollback(#{{ to: {id} }});\n"))?,
+            None => source_push(out, "    rollback(#{ to: \"start\" });\n")?,
+        }
+        export.notes.push(format!("the timeline marker was after feature {at} of {}; the script restores it there", doc.features.len()));
+    }
+    source_push(out, "}\n")?;
     // Rhai has narrower literal/depth limits than JSON (for example u64 inputs).
     // Refuse those cases here, rather than saving a script the user cannot run.
-    meta(&out).map_err(|e| format!("this timeline cannot be represented as a runnable script: {e}"))?;
-    Ok(out)
+    meta(&export.source).map_err(|e| format!("this timeline cannot be represented as a runnable script: {e}"))?;
+    Ok(export)
 }
 
 fn source_push(out: &mut String, text: &str) -> R<()> {
@@ -707,10 +1012,12 @@ mod sandbox_tests {
 
     #[test]
     fn dynamic_commands_cannot_expand_script_authority() {
-        let shared = Arc::new(Mutex::new(Session::default()));
-        let outcome = Arc::new(Mutex::new(Outcome::default()));
+        let host = Host {
+            shared: Mutex::new(Session::default()), outcome: Mutex::new(Outcome::default()), sandbox: Sandbox::default(),
+            stage: Mutex::new(Stage::default()), cancel: Arc::new(AtomicBool::new(false)), deadline: None, timed_out: AtomicBool::new(false),
+        };
         for op in ["run_script", "script_meta", "batch"] {
-            let err = command(&shared, &outcome, &Sandbox::default(), op, Map::new()).unwrap_err();
+            let err = command(&host, op, Map::new()).unwrap_err();
             assert!(err.to_string().contains("cannot be called from a script"));
         }
     }

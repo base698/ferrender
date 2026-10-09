@@ -22,6 +22,7 @@ pub mod primitives;
 pub mod planes;
 pub mod reference;
 pub mod render;
+pub mod sandboxfs;
 pub mod script;
 pub mod sketch;
 pub mod solver;

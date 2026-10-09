@@ -1389,6 +1389,7 @@ dependencies = [
  "earcutr",
  "glam",
  "image",
+ "libc",
  "png",
  "rhai",
  "serde",

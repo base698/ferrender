@@ -1327,7 +1327,75 @@ fn wait_for_script(h: &mut H) {
         if !h.state().scripts.busy() { return; }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    panic!("the script did not finish in time");
+    let app = h.state();
+    let run = app.scripts.running.as_ref().unwrap();
+    panic!("the script did not finish in time: at {:?}, pending question {:?}, cancelled {:?}, log {:?}", run.message, run.pending.as_ref().map(|q| (&q.text, &q.answer)), run.cancel_at, run.log);
+}
+
+/// Pumps frames until the running script has asked a question.
+fn wait_for_question(h: &mut H) {
+    for _ in 0..600 {
+        h.state_mut().poll_script();
+        h.run_steps(1);
+        if h.state().scripts.running.as_ref().is_some_and(|r| r.pending.is_some()) { return; }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the script did not ask in time");
+}
+
+#[test]
+fn a_script_question_is_answered_in_the_progress_window() {
+    let source = "const META = #{ name: \"Asker\", description: \"asks\" };\nfn run(inputs) {\n    let size = ask(\"How big?\", \"5\");\n    if confirm(\"Make the box of \" + size + \" mm?\") { primitive(#{ type: \"box\", width: size.parse_float(), depth: 2, height: 2 }); }\n    size\n}\n";
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        app.scripts.reload(None);
+        app.scripts.entries.insert(0, crate::scripts_ui::Entry { path: None, file_name: "asker.rhai".into(), source: source.into(), meta: fr_core::script::meta(source), sample: false });
+        app.open_script(0);
+    }
+    assert!(matches!(h.state().dialog, Dialog::Script(_)));
+    h.run_steps(2);
+    h.get_by_label("Run").click();
+    h.run_steps(1);
+    // ask: type an answer and OK.
+    wait_for_question(&mut h);
+    {
+        let run = h.state_mut().scripts.running.as_mut().unwrap();
+        let q = run.pending.as_mut().unwrap();
+        assert_eq!(q.text, "How big?");
+        assert_eq!(q.default.as_deref(), Some("5"));
+        assert_eq!(q.answer, "5", "the offered answer is filled in");
+        q.answer = "7".into();
+    }
+    h.run_steps(1);
+    h.get_by_label("OK").click();
+    h.run_steps(1);
+    // confirm: Yes.
+    wait_for_question(&mut h);
+    {
+        let run = h.state().scripts.running.as_ref().unwrap();
+        let q = run.pending.as_ref().unwrap();
+        assert_eq!(q.text, "Make the box of 7 mm?");
+        assert!(q.default.is_none(), "confirm has yes and no, not a text field");
+    }
+    h.run_steps(1);
+    h.get_by_label("Yes").click();
+    h.run_steps(1);
+    wait_for_script(&mut h);
+    let app = h.state();
+    assert_eq!(app.doc().features.len(), 2, "chip and box; log {:?} err {:?}", app.scripts.log, app.scripts.last_error);
+    let (lo, hi) = app.session.built.bodies[0].mesh.bbox().unwrap();
+    assert!(((hi.x - lo.x) - 7.0).abs() < 1e-6, "the typed answer sized the box: {}", hi.x - lo.x);
+    // Cancel while a question is pending declines it and ends the run with nothing applied.
+    h.state_mut().open_script(0);
+    h.run_steps(2);
+    h.get_by_label("Run").click();
+    h.run_steps(1);
+    wait_for_question(&mut h);
+    h.state_mut().cancel_script();
+    h.run_steps(1);
+    wait_for_script(&mut h);
+    assert_eq!(h.state().doc().features.len(), 2, "the cancelled run added nothing");
 }
 
 #[test]
@@ -1414,7 +1482,7 @@ fn scripts_run_from_the_menu_as_chips_that_rerun_detach_and_delete() {
     // The log window and export.
     h.state_mut().run(&ctx, Action::ScriptLog);
     assert!(h.state().scripts.show_log);
-    let script = fr_core::script::export_timeline(&h.state().session).unwrap();
+    let script = fr_core::script::export_timeline(&h.state().session).unwrap().source;
     assert!(script.contains("add_feature"));
     save(&mut h, "scripts-menu.png");
 }
