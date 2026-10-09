@@ -130,7 +130,7 @@ pub fn interact(app: &mut App, painter: &Painter, hover: Option<Pos2>, clicked: 
                     d.pick_to = false;
                 }
             } else if let Some(body) = app.plane_source().body(face.body) {
-                let reference = PlaneRef::Face { body: body.id, at: body.to_local(face.at), frame: body.local_frame() };
+                let reference = PlaneRef::Face { body: body.id, at: body.to_local(face.at), frame: body.local_frame(), tag: None };
                 if d.kind == 0 { d.base = Some(reference); }
                 else {
                     if d.faces.len() == 2 { d.faces.clear(); }

@@ -487,7 +487,317 @@
           "size": {
             "expr": "0.5 mm",
             "v": 0.5
-          }
+          },
+          "tags": [
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 4,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 10,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 4,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 6,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 4,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": false,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 4,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": true,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 8,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 10,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 10,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": false,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 10,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": true,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 6,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 8,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 6,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": false,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 6,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": true,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 8,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": false,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "swept": {
+                      "entity": 8,
+                      "feature": 3
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": true,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "cylinder",
+                  "origin": {
+                    "swept": {
+                      "entity": 2,
+                      "feature": 7
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": true,
+                      "feature": 3
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "faces": [
+                {
+                  "kind": "cylinder",
+                  "origin": {
+                    "swept": {
+                      "entity": 2,
+                      "feature": 7
+                    }
+                  }
+                },
+                {
+                  "kind": "plane",
+                  "origin": {
+                    "cap": {
+                      "end": true,
+                      "feature": 7
+                    }
+                  }
+                }
+              ]
+            }
+          ]
         }
       },
       "name": "Fillet1",
@@ -783,6 +1093,15 @@
           "left": false,
           "length": null,
           "offset": null,
+          "tag": {
+            "kind": "cylinder",
+            "origin": {
+              "made": {
+                "feature": 13,
+                "n": 0
+              }
+            }
+          },
           "thread": "M6x1"
         }
       },
@@ -812,6 +1131,17 @@
               5.0,
               10.0
             ]
+          ],
+          "tags": [
+            {
+              "kind": "plane",
+              "origin": {
+                "made": {
+                  "feature": 12,
+                  "n": 5
+                }
+              }
+            }
           ],
           "thickness": {
             "expr": "1 mm",
@@ -1174,5 +1504,5 @@
     }
   ],
   "units": "mm",
-  "version": 8
+  "version": 10
 }

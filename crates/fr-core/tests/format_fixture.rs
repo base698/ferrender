@@ -103,7 +103,8 @@ fn every_feature_kind_serializes_as_the_fixture_says() {
     let errors: Vec<_> = s.built.errors.iter().collect();
     assert!(errors.is_empty(), "the fixture document must build cleanly: {errors:?}");
     assert!(io::needs_container(&s.doc), "the import makes this a container design");
-    assert_eq!(io::design_version(&s.doc), 8);
+    // The fillet, shell, thread and text learned face tags on their first build, which is format 10.
+    assert_eq!(io::design_version(&s.doc), 10);
     let _ = s.doc.features.iter().filter(|f| matches!(f.kind, FeatureKind::Import(_))).count();
 
     let text = io::to_json(&s.doc);

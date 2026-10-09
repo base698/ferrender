@@ -96,7 +96,19 @@ A sketch's `reference` image is `{"png": <base64 or blob marker>, "name", "pixel
 
 ### References to faces, edges and vertices
 
-Features that act on existing geometry (`blend`, `shell`, `hole`, `thread`, `text`, `plane`, `split`) name a face or edge by **a point on it in world coordinates** and the **bounding box of the body at the time of the pick** (`frame`: `[[xmin,ymin,zmin],[xmax,ymax,zmax]]`). On rebuild the feature looks for the face or edge nearest that point, both where it was and at the same relative position inside the body's current bounds, so the reference survives the body changing size. It can be lost when an earlier feature reshapes that area; the feature then reports an error rather than guessing. 0.4 adds construction-derived tags beside the point (see `docs/0.4-release.md`, feature 3); files without tags keep working by position.
+Features that act on existing geometry (`blend`, `shell`, `hole`, `thread`, `text`, `plane`, `split`) name a face or edge by **a point on it in world coordinates** and the **bounding box of the body at the time of the pick** (`frame`: `[[xmin,ymin,zmin],[xmax,ymax,zmax]]`). On rebuild the feature looks for the face or edge nearest that point, both where it was and at the same relative position inside the body's current bounds, so the reference survives the body changing size.
+
+Since format 10 a reference also carries a **tag** saying how the face was made, and resolves by tag first. A face tag is `{"origin": ORIGIN, "kind": KIND}` with `kind` one of `plane`, `cylinder`, `cone`, `sphere`, `torus`, `freeform` and `origin` one of:
+
+| Origin | Meaning |
+|---|---|
+| `{"swept": {"feature": F, "entity": E}}` | The side face an extrude or revolve `F` swept from sketch entity `E`. |
+| `{"cap": {"feature": F, "end": false\|true}}` | The start or end cap of `F`. |
+| `{"made": {"feature": F, "n": N}}` | The `N`th face made by a fillet, chamfer, shell, hole, thread, primitive, split or text `F`, in kernel order. |
+| `{"split": {"of": TAG, "n": N}}` | Piece `N` of an earlier face that a later operation cut up. |
+| `{"copy": {"of": TAG, "n": N}}` | The same face on copy `N` of a pattern. |
+
+An edge tag is `{"faces": [TAG, TAG]}`, the two faces it separates, in sorted order. Tags are stored in `blend.tags` (one per entry of `edges`, `null` where the edge had none), `shell.tags` (one per `faces`), `thread.tag`, `text.tag` and the `tag` of a `{"face": ...}` plane reference. On rebuild a pick is resolved at one of three levels, which `get_object_info` reports as `resolved`: `tag` (a face or edge with the very tag; among equals, the nearest to the point), `origin` (one with the same tag ignoring split and copy ordinals, nearest to the point), `position` (the pre-0.4 search). A reference with no tag learns the tag of what it found on its first successful build, so files from before format 10 gain tags as they are opened, and are stamped 10 when next saved. A pick whose tagged face has been removed altogether fails with the usual "no longer there" error rather than relocating.
 
 ## Version table
 
@@ -111,6 +123,7 @@ Features that act on existing geometry (`blend`, `shell`, `hole`, `thread`, `tex
 | 7 | 0.3.0 | `primitive`. |
 | 8 | 0.3.0 | `split` and `remove`. |
 | 9 | 0.4.0 | The ZIP container. A plain JSON file is never stamped 9; only `manifest.json`'s `min_reader` carries it. |
+| 10 | 0.4.0 | Face and edge tags on references (`blend.tags`, `shell.tags`, `thread.tag`, `text.tag`, plane `face.tag`). |
 
 The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". There is no migration code: every version's documents deserialize directly, with absent fields taking their defaults. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 

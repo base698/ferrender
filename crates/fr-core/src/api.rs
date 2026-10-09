@@ -125,7 +125,7 @@ FEATURES
 {"op":"rollback","to":ID}                          shows the model as it was just after that feature ("start" = before any, "end" = everything); features added while rolled back are inserted at that point
 {"op":"transform","body":ID,"translate":[x,y,z],"rotate":[rx,ry,rz],"scale":1}   scale about the origin, rotate about X then Y then Z, then translate
 {"op":"combine","target":BODY,"tools":[BODY],"operation":"join","keep_tools":false}   join | cut | intersect between bodies, including imported meshes
-{"op":"fillet_edges","body":BODY,"edges":[[x,y,z],...],"radius":V}   rounds the edges nearest those points; "edges":"all" takes every edge
+{"op":"fillet_edges","body":BODY,"edges":[[x,y,z],...],"radius":V}   rounds the edges nearest those points; "edges":"all" takes every edge. An entry can also be {"tag":EDGE_TAG} copied from get_object_info on the body: faces and edges carry tags saying how they were made (swept from a sketch entity, a cap, made by a feature), and a fillet, chamfer, shell, thread, text or face plane finds its faces by tag first when the body changes shape, by position only as a last resort. get_object_info on such a feature reports "resolved": "tag" | "origin" | "position".
 {"op":"chamfer_edges","body":BODY,"edges":[[x,y,z],...],"distance":V}
 {"op":"shell","body":BODY,"open_faces":[[x,y,z],...],"thickness":V}   hollows the body, leaving the faces nearest those points open
    get_object_info on an exact body lists its edges and faces under "topology", each with a "point" to use here. Edges and faces are found again by position on every rebuild (where they were, or the same place within the body's bounds), so they survive a body changing size but can be lost if an earlier feature reshapes that area; put fillets, chamfers and shells last.
@@ -305,8 +305,8 @@ fn topology(s: &Session, id: Id) -> Option<J> {
     let u = s.doc.units.mm();
     let r = |v: f64| trim_num(v, 4).parse::<f64>().unwrap_or(0.0);
     let p = |v: DVec3| (v / u).to_array().map(r);
-    let edges: Vec<J> = exact::edges(&b.solids).iter().take(400).map(|e| json!({"point": p(e.mid), "length": r(e.length / u), "shape": if e.straight { "line" } else { "curve" }})).collect();
-    let faces: Vec<J> = exact::faces(&b.solids).iter().take(400).map(|f| json!({"point": p(f.at), "normal": f.normal.to_array().map(r), "area": r(f.area / u.powi(2)), "shape": f.kind})).collect();
+    let edges: Vec<J> = exact::edges_tagged(&b.solids, &b.tags).iter().take(400).map(|e| json!({"point": p(e.mid), "length": r(e.length / u), "shape": if e.straight { "line" } else { "curve" }, "tag": e.tag, "made": e.tag.as_ref().map(|t| t.describe())})).collect();
+    let faces: Vec<J> = exact::faces_tagged(&b.solids, &b.tags).iter().take(400).map(|f| json!({"point": p(f.at), "normal": f.normal.to_array().map(r), "area": r(f.area / u.powi(2)), "shape": f.kind, "tag": f.tag, "made": f.tag.as_ref().map(|t| t.describe())})).collect();
     Some(json!({"edges": edges, "faces": faces}))
 }
 
@@ -383,6 +383,54 @@ fn resolve(s: &Session, v: &mut J) {
 }
 
 /// Points in space given as [[x, y, z], ...] in document units.
+/// Edge picks for a command: each item is a point `[x,y,z]` in document units, or
+/// `{"tag": EDGE_TAG}` naming an edge of the body by how it was made (as `get_object_info` lists them).
+/// Returns world points and the tags of the edges they name.
+fn edge_picks(s: &Session, body: Id, v: &J, key: &str) -> R<(Vec<DVec3>, Vec<Option<crate::tag::EdgeTag>>)> {
+    let items = v.as_array().ok_or_else(|| format!("\"{key}\" must be a list of points or tags"))?;
+    let b = s.built.body(body).ok_or(format!("there is no body {body}"))?;
+    let (mut points, mut tags) = (Vec::new(), Vec::new());
+    for item in items {
+        if item.is_object() && !item["tag"].is_null() {
+            let tag: crate::tag::EdgeTag = serde_json::from_value(item["tag"].clone()).map_err(|e| format!("\"{key}\" has an edge tag that is not valid: {e}"))?;
+            let all = exact::edges_tagged(&b.solids, &b.tags);
+            let hit = all.into_iter().find(|e| e.tag.as_ref() == Some(&tag)).ok_or("no edge of the body has that tag; list them with get_object_info")?;
+            points.push(b.placement.transform_point3(hit.mid));
+            tags.push(Some(tag));
+        } else {
+            let a = item.as_array().filter(|a| a.len() == 3).ok_or_else(|| format!("\"{key}\" entries must be [x,y,z] or {{\"tag\":...}}"))?;
+            let u = s.doc.units.mm();
+            let p = DVec3::new(a[0].as_f64().ok_or("bad coordinate")? * u, a[1].as_f64().ok_or("bad coordinate")? * u, a[2].as_f64().ok_or("bad coordinate")? * u);
+            tags.push(exact::edge_tag_at(&b.solids, &b.tags, b.to_local(p)));
+            points.push(p);
+        }
+    }
+    Ok((points, tags))
+}
+
+/// Face picks for a command: points or `{"tag": TAG}` objects, as [`edge_picks`].
+fn face_picks(s: &Session, body: Id, v: &J, key: &str) -> R<(Vec<DVec3>, Vec<Option<crate::tag::Tag>>)> {
+    let items = v.as_array().ok_or_else(|| format!("\"{key}\" must be a list of points or tags"))?;
+    let b = s.built.body(body).ok_or(format!("there is no body {body}"))?;
+    let (mut points, mut tags) = (Vec::new(), Vec::new());
+    for item in items {
+        if item.is_object() && !item["tag"].is_null() {
+            let tag: crate::tag::Tag = serde_json::from_value(item["tag"].clone()).map_err(|e| format!("\"{key}\" has a face tag that is not valid: {e}"))?;
+            let all = exact::faces_tagged(&b.solids, &b.tags);
+            let hit = all.into_iter().find(|f| f.tag.as_ref() == Some(&tag)).ok_or("no face of the body has that tag; list them with get_object_info")?;
+            points.push(b.placement.transform_point3(hit.at));
+            tags.push(Some(tag));
+        } else {
+            let a = item.as_array().filter(|a| a.len() == 3).ok_or_else(|| format!("\"{key}\" entries must be [x,y,z] or {{\"tag\":...}}"))?;
+            let u = s.doc.units.mm();
+            let p = DVec3::new(a[0].as_f64().ok_or("bad coordinate")? * u, a[1].as_f64().ok_or("bad coordinate")? * u, a[2].as_f64().ok_or("bad coordinate")? * u);
+            tags.push(exact::face_tag_at(&b.solids, &b.tags, b.to_local(p)));
+            points.push(p);
+        }
+    }
+    Ok((points, tags))
+}
+
 fn points_of(s: &Session, v: &J, key: &str) -> R<Vec<DVec3>> {
     v[key].as_array().ok_or(format!("\"{key}\" should be a list of [x, y, z] points"))?.iter().map(|p| xyz(p).map(|p| p * s.doc.units.mm())).collect()
 }
@@ -391,6 +439,7 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
     let doc = &s.doc;
     let f = doc.feature(id).ok_or(format!("nothing has id {id}"))?;
     let mut o = json!({"id": f.id, "name": f.name, "type": f.type_name(), "component": f.owner});
+    if let Some(level) = s.built.resolutions.get(&id) { o["resolved"] = json!(level.name()); }
     if f.suppressed {
         o["suppressed"] = json!(true);
     }
@@ -466,11 +515,13 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["body"] = json!(b.body);
             o["edges"] = json!(b.edges.len());
             o[if b.chamfer { "distance" } else { "radius" }] = json!({"expr": b.size.expr, "value": len_out(doc, b.size.v)});
+            o["tags"] = json!(b.tags);
         }
         FeatureKind::Shell(sh) => {
             o["body"] = json!(sh.body);
             o["open_faces"] = json!(sh.faces.len());
             o["thickness"] = json!({"expr": sh.thickness.expr, "value": len_out(doc, sh.thickness.v)});
+            o["tags"] = json!(sh.tags);
         }
         FeatureKind::Hole(h) => {
             let u = doc.units.mm();
@@ -497,6 +548,7 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["body"] = json!(t.body);
             o["thread"] = json!(t.thread);
             o["left_hand"] = json!(t.left);
+            o["tag"] = json!(t.tag);
             if let Some(e) = &t.extra {
                 o["allowance"] = json!(e.v / doc.units.mm());
             }
@@ -924,7 +976,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 // Threads are shells of their own and go along as they are.
                 mesh.extend(picked.iter().flat_map(|b| b.threads.iter().flat_map(|t| t.tris())));
                 mesh.face_ids.clear();
-                let merged = crate::doc::Body { id: 0, name: "union".into(), component:0, placement:glam::DAffine3::IDENTITY, local_bounds:None, mesh, solids: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
+                let merged = crate::doc::Body { id: 0, name: "union".into(), component:0, placement:glam::DAffine3::IDENTITY, local_bounds:None, mesh, solids: Vec::new(), tags: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
                 let n = io::write_stl([&merged], unit, path.as_ref())?;
                 return Ok(json!({"path": path, "triangles": n, "units": unit.name(), "shells": all.len(), "open_edges": merged.mesh.open_edges()}));
             }
@@ -955,7 +1007,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 text: content, plane: Plane::XY,
                 height: s.doc.value("6 mm", Kind::Length)?, depth: s.doc.value("1 mm", Kind::Length)?,
                 spacing: zero(&s.doc, Kind::Length), angle: zero(&s.doc, Kind::Angle), x: zero(&s.doc, Kind::Length), y: zero(&s.doc, Kind::Length),
-                align: crate::text::Align::Left, op: Op::New, body: None, face: None, frame: None,
+                align: crate::text::Align::Left, op: Op::New, body: None, face: None, frame: None, tag: None,
             };
             text_fields(s, c, &mut text)?;
             let id = s.edit_feature(|doc| {
@@ -992,15 +1044,18 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let chamfer = op == "chamfer_edges";
             let key = if chamfer { "distance" } else { "radius" };
             let size = s.doc.value(&text_of(&c[key]).map_err(|_| format!("{op} needs a \"{key}\""))?, Kind::Length)?;
-            let edges = match &c["edges"] {
-                J::String(all) if all == "all" => s.built.body(body).map(|b| exact::edges(&b.solids).iter().map(|e| e.mid).collect()).ok_or(format!("there is no body {body}"))?,
-                _ => points_of(s, c, "edges")?,
+            let b=s.built.body(body).ok_or(format!("there is no body {body}"))?;
+            let (edges, tags) = match &c["edges"] {
+                J::String(all) if all == "all" => {
+                    let all = exact::edges_tagged(&b.solids, &b.tags);
+                    (all.iter().map(|e| e.mid).collect::<Vec<_>>(), all.into_iter().map(|e| e.tag).collect::<Vec<_>>())
+                }
+                _ => edge_picks(s, body, &c["edges"], "edges")?,
             };
-            let b=s.built.body(body).ok_or("the body does not exist")?;
             let edges=edges.into_iter().map(|p|b.to_local(p)).collect();
             let frame = s.built.frame(body);
             let id = s.edit_feature(|d| {
-                let id = d.add_feature(FeatureKind::Blend(Blend { body, edges, size, chamfer, frame }));
+                let id = d.add_feature(FeatureKind::Blend(Blend { body, edges, size, chamfer, frame, tags }));
                 Ok((id, id))
             })?;
             let mut out = changed(s, &before);
@@ -1011,10 +1066,11 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let body = id_of(c, "body")?;
             let thickness = s.doc.value(&text_of(&c["thickness"]).map_err(|_| "shell needs a \"thickness\"")?, Kind::Length)?;
             let b=s.built.body(body).ok_or("the body does not exist")?;
-            let faces = points_of(s, c, "open_faces")?.into_iter().map(|p|b.to_local(p)).collect();
+            let (faces, tags) = face_picks(s, body, &c["open_faces"], "open_faces")?;
+            let faces = faces.into_iter().map(|p|b.to_local(p)).collect();
             let frame = s.built.frame(body);
             let id = s.edit_feature(|d| {
-                let id = d.add_feature(FeatureKind::Shell(Shell { body, faces, thickness, frame }));
+                let id = d.add_feature(FeatureKind::Shell(Shell { body, faces, thickness, frame, tags }));
                 Ok((id, id))
             })?;
             let mut out = changed(s, &before);
@@ -1155,7 +1211,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                     v => Ok(Some(s.doc.value(&text_of(v).map_err(|e| format!("\"{key}\": {e}"))?, Kind::Length)?)),
                 }
             };
-            let t = Thread { body, face:b.to_local(face), frame: s.built.frame(body), thread: thread.clone(), offset: opt("offset")?, length: opt("length")?, left: c["left_hand"].as_bool().unwrap_or(false), extra: opt("allowance")? };
+            let t = Thread { body, face:b.to_local(face), frame: s.built.frame(body), tag: None, thread: thread.clone(), offset: opt("offset")?, length: opt("length")?, left: c["left_hand"].as_bool().unwrap_or(false), extra: opt("allowance")? };
             let id = s.edit_feature(|d| {
                 let id = d.add_feature(FeatureKind::Thread(t));
                 Ok((id, id))

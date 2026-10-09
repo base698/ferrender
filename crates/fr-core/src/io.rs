@@ -24,7 +24,7 @@ use crate::units::Unit;
 pub const FORMAT: &str = "ferrender";
 /// The newest version this build reads. 9 is the ZIP container; the JSON inside
 /// a container keeps its own, lower version, computed as for a plain file.
-pub const FORMAT_VERSION: u32 = 9;
+pub const FORMAT_VERSION: u32 = 10;
 pub const CONTAINER_VERSION: u32 = 9;
 pub const CONTAINER_FORMAT: &str = "ferrender-container";
 
@@ -65,7 +65,8 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Remove(_) | FeatureKind::Split(_))) { 8 }
+    if doc.features.iter().any(|f| has_tags(&f.kind)) { 10 }
+    else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Remove(_) | FeatureKind::Split(_))) { 8 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Primitive(_))) { 7 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Pattern(crate::doc::Pattern { kind: crate::doc::PatternKind::Linear { second: Some(_), .. }, .. }))) { 6 }
     else if doc.active_component != 0 || doc.features.iter().any(|f| f.owner != 0 || matches!(&f.kind, FeatureKind::Plane(_) | FeatureKind::Component(_)) || matches!(&f.kind, FeatureKind::Sketch(s) if s.on.is_some())) { 5 }
@@ -81,6 +82,25 @@ pub fn design_version(doc: &Document) -> u32 {
     }) { 3 }
     else if doc.features.iter().any(|f| matches!(f.kind, FeatureKind::Text(_))) { 2 }
     else { 1 }
+}
+
+/// Whether a feature stores face or edge tags (format 10).
+fn has_tags(kind: &FeatureKind) -> bool {
+    use crate::planes::{PlaneKind, PlaneRef};
+    let tagged_ref = |r: &PlaneRef| matches!(r, PlaneRef::Face { tag: Some(_), .. });
+    match kind {
+        FeatureKind::Blend(b) => !b.tags.is_empty(),
+        FeatureKind::Shell(s) => !s.tags.is_empty(),
+        FeatureKind::Thread(t) => t.tag.is_some(),
+        FeatureKind::Text(t) => t.tag.is_some(),
+        FeatureKind::Split(s) => tagged_ref(&s.plane),
+        FeatureKind::Plane(p) => match &p.kind {
+            PlaneKind::Offset { base, .. } => tagged_ref(base),
+            PlaneKind::Midplane { a, b, .. } => tagged_ref(a) || tagged_ref(b),
+            PlaneKind::ThreePoint { .. } => false,
+        },
+        _ => false,
+    }
 }
 
 /// The document as the JSON object a plain file holds, payloads inline.

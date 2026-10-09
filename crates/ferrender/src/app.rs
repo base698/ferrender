@@ -257,6 +257,7 @@ impl TextDlg {
             return Err("Click a flat face to raise or engrave text.".into());
         }
         Ok(Text {
+            tag: None,
             text: self.text.clone(), plane: self.plane,
             height: d.enter(&self.height, Kind::Length)?, depth: d.enter(&self.depth, Kind::Length)?,
             spacing: d.enter(&self.spacing, Kind::Length)?, angle: d.enter(&self.angle, Kind::Angle)?,
@@ -475,12 +476,12 @@ impl Dialog {
             Dialog::Blend(b) => {
                 let body = b.body.filter(|_| !b.edges.is_empty()).ok_or("Click the edges to blend.")?;
                 let size = d.enter(&b.text, Kind::Length)?;
-                Ok(d.add_feature(FeatureKind::Blend(Blend { body, edges: b.edges.clone(), size, chamfer: b.chamfer, frame: b.frame })))
+                Ok(d.add_feature(FeatureKind::Blend(Blend { body, edges: b.edges.clone(), size, chamfer: b.chamfer, frame: b.frame, tags: Vec::new() })))
             }
             Dialog::Shell(sh) => {
                 let body = sh.body.filter(|_| !sh.faces.is_empty()).ok_or("Click the faces to leave open.")?;
                 let thickness = d.enter(&sh.text, Kind::Length)?;
-                Ok(d.add_feature(FeatureKind::Shell(Shell { body, faces: sh.faces.iter().map(|f| f.0).collect(), thickness, frame: sh.frame })))
+                Ok(d.add_feature(FeatureKind::Shell(Shell { body, faces: sh.faces.iter().map(|f| f.0).collect(), thickness, frame: sh.frame, tags: Vec::new() })))
             }
             Dialog::Hole(h) => {
                 let hole = h.hole(d)?;
@@ -503,7 +504,7 @@ impl Dialog {
                 let (body, face) = t.body.zip(t.face).ok_or("Click the rod or the hole to thread.")?;
                 let (offset, length) = if t.full { (None, None) } else { (Some(d.enter(&t.offset, Kind::Length)?), Some(d.enter(&t.length, Kind::Length)?)) };
                 let extra = if t.extra.trim().is_empty() { None } else { Some(d.enter(&t.extra, Kind::Length)?) };
-                Ok(d.add_feature(FeatureKind::Thread(Thread { body, face, frame: t.frame, thread: t.thread.clone(), offset, length, left: t.left, extra })))
+                Ok(d.add_feature(FeatureKind::Thread(Thread { body, face, frame: t.frame, tag: None, thread: t.thread.clone(), offset, length, left: t.left, extra })))
             }
             _ => Err("Nothing to apply.".into()),
         }

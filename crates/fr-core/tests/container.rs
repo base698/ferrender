@@ -95,7 +95,7 @@ fn a_reference_image_makes_a_container_that_round_trips() {
     assert!(entry(&path, "thumbnail.png").starts_with(b"\x89PNG"));
     let manifest: J = serde_json::from_slice(&entry(&path, "manifest.json")).unwrap();
     assert_eq!(manifest["format"], "ferrender-container");
-    assert_eq!(manifest["min_reader"], io::FORMAT_VERSION);
+    assert_eq!(manifest["min_reader"], io::CONTAINER_VERSION);
     assert_eq!(manifest["design_version"], 3, "the JSON inside keeps the version a plain file would have");
     assert!(manifest["saved"].as_str().unwrap().ends_with('Z'));
 

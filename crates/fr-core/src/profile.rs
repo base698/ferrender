@@ -24,6 +24,10 @@ pub struct Profile {
     pub path: Vec<Seg>,
     /// The hole boundaries likewise.
     pub hole_paths: Vec<Vec<Seg>>,
+    /// The sketch entity each segment of `path` came from, aligned with it.
+    pub path_ids: Vec<Id>,
+    /// Likewise for each hole path.
+    pub hole_path_ids: Vec<Vec<Id>>,
 }
 
 /// One exact piece of a profile's boundary, in sketch coordinates.
@@ -114,6 +118,7 @@ struct Face {
     edges: Vec<Id>,
     comp: usize,
     path: Vec<Seg>,
+    path_ids: Vec<Id>,
 }
 
 pub(crate) fn point_nodes(sk: &Sketch) -> BTreeMap<Id, Id> {
@@ -155,7 +160,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
     let mut edges = Vec::new();
     let mut faces: Vec<Face> = Vec::new();
     // Each closed curve is a face and a component of its own.
-    let mut hulls: Vec<(usize, Vec<DVec2>, Vec<Seg>)> = Vec::new();
+    let mut hulls: Vec<(usize, Vec<DVec2>, Vec<Seg>, Vec<Id>)> = Vec::new();
     let mut next_comp = ids.len();
     for (id, e) in sk.entities.iter().filter(|(_, e)| !e.construction) {
         let (a, b) = match e.geom {
@@ -182,8 +187,8 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                     _ => { let Some((c,r)) = sk.curve(*id) else { continue }; Seg::Circle(c,r) },
                 };
                 let path = vec![if signed_area(&pts) < 0.0 { pts.reverse(); seg.reversed() } else { seg }];
-                faces.push(Face { poly: pts.clone(), edges: vec![*id], comp: next_comp, path: path.clone() });
-                hulls.push((next_comp, pts, path));
+                faces.push(Face { poly: pts.clone(), edges: vec![*id], comp: next_comp, path: path.clone(), path_ids: vec![*id] });
+                hulls.push((next_comp, pts, path, vec![*id]));
                 next_comp += 1;
             }
         }
@@ -227,7 +232,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
         if seen[start] {
             continue;
         }
-        let (mut h, mut poly, mut used, mut path) = (start, Vec::new(), Vec::new(), Vec::new());
+        let (mut h, mut poly, mut used, mut path, mut path_ids) = (start, Vec::new(), Vec::new(), Vec::new(), Vec::new());
         while !seen[h] {
             seen[h] = true;
             let e = &edges[h / 2];
@@ -238,6 +243,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                 poly.extend(e.pts[1..].iter().rev());
             }
             used.push(e.id);
+            path_ids.push(e.id);
             path.push(if h % 2 == 0 { e.seg } else { e.seg.reversed() });
             // Turn as far left as possible at the far end, keeping the face on the left.
             let twin = h ^ 1;
@@ -250,17 +256,18 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
         if area > 1e-9 {
             used.sort();
             used.dedup();
-            faces.push(Face { poly, edges: used, comp, path });
+            faces.push(Face { poly, edges: used, comp, path, path_ids });
         } else if area < -1e-9 {
             poly.reverse();
-            hulls.push((comp, poly, path));
+            hulls.push((comp, poly, path, path_ids));
         }
     }
     // A component sitting inside a face of another component is a hole in it.
     let mut holes: Vec<Vec<Vec<DVec2>>> = vec![Vec::new(); faces.len()];
     let mut parent: Vec<Option<usize>> = vec![None; faces.len()];
     let mut hole_paths: Vec<Vec<Vec<Seg>>> = vec![Vec::new(); faces.len()];
-    for (comp, hull, path) in &hulls {
+    let mut hole_path_ids: Vec<Vec<Vec<Id>>> = vec![Vec::new(); faces.len()];
+    for (comp, hull, path, ids) in &hulls {
         let host = (0..faces.len())
             .filter(|i| faces[*i].comp != *comp && hull.iter().all(|p| inside(&faces[*i].poly, *p) || faces[*i].poly.contains(p)))
             .filter(|i| hull.iter().any(|p| inside(&faces[*i].poly, *p)))
@@ -270,6 +277,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
             h.reverse();
             holes[host].push(h);
             hole_paths[host].push(path.clone());
+            hole_path_ids[host].push(ids.clone());
             for (i, f) in faces.iter().enumerate() {
                 if f.comp == *comp {
                     parent[i] = Some(host);
@@ -288,7 +296,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                     break;
                 }
             }
-            Profile { outer: faces[i].poly.clone(), holes: holes[i].clone(), edges: faces[i].edges.clone(), depth, path: faces[i].path.clone(), hole_paths: hole_paths[i].clone() }
+            Profile { outer: faces[i].poly.clone(), holes: holes[i].clone(), edges: faces[i].edges.clone(), depth, path: faces[i].path.clone(), hole_paths: hole_paths[i].clone(), path_ids: faces[i].path_ids.clone(), hole_path_ids: hole_path_ids[i].clone() }
         })
         .collect()
 }

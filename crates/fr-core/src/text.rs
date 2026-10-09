@@ -181,6 +181,8 @@ fn regions(mut rings: Vec<Vec<DVec2>>) -> Result<Vec<Profile>, String> {
             depth: 0,
             path: Vec::new(),
             hole_paths: Vec::new(),
+            path_ids: Vec::new(),
+            hole_path_ids: Vec::new(),
         })
         .collect())
 }

@@ -22,6 +22,7 @@ pub mod reference;
 pub mod render;
 pub mod sketch;
 pub mod solver;
+pub mod tag;
 pub mod threads;
 pub mod text;
 pub mod units;

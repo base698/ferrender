@@ -6,7 +6,7 @@ fn face_ref(s: &Session, v: &J) -> R<PlaneRef> {
     let at=xyz(&v["point"])?*s.doc.units.mm();
     let b=s.built.body(body).ok_or("the selected body does not exist")?;
     let face=crate::planes::face(b,at,None)?;
-    Ok(PlaneRef::Face { body, at: b.to_local(face.at), frame: s.built.frame(body) })
+    Ok(PlaneRef::Face { body, at: b.to_local(face.at), frame: s.built.frame(body), tag: None })
 }
 
 pub(super) fn base(s: &Session, v: &J) -> R<PlaneRef> {

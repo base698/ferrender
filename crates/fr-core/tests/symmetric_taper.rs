@@ -8,7 +8,7 @@ fn rectangle(width: f64, depth: f64, center: DVec2) -> Vec<DVec2> {
 }
 
 fn profile(width: f64, depth: f64) -> Profile {
-    Profile { outer: rectangle(width, depth, DVec2::ZERO), holes: Vec::new(), edges: Vec::new(), depth: 0, path: Vec::new(), hole_paths: Vec::new() }
+    Profile { outer: rectangle(width, depth, DVec2::ZERO), holes: Vec::new(), edges: Vec::new(), depth: 0, path: Vec::new(), hole_paths: Vec::new(), path_ids: Vec::new(), hole_path_ids: Vec::new() }
 }
 
 fn close(actual: f64, expected: f64) {

@@ -12,6 +12,7 @@ use crate::csg::{self, Bool};
 use crate::exact::{self, Lumps, Place};
 use crate::expr::{self, Kind, Quantity, Value};
 use crate::mesh::{self, Mesh};
+use crate::tag::{EdgeTag, Level, Tag};
 use crate::profile::{self, Profile};
 use crate::sketch::{Geom, Id, Plane, Sketch};
 use crate::solver;
@@ -232,6 +233,9 @@ pub struct Blend {
     /// The body's bounds when the edges were picked, so they can be found again if it changes size.
     #[serde(default)]
     pub frame: Option<[DVec3; 2]>,
+    /// What each edge was made of, one per entry of `edges`; empty until the first build learns them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Option<EdgeTag>>,
 }
 
 /// Hollows a body, leaving the named faces open. Faces are named by a point on them.
@@ -242,6 +246,8 @@ pub struct Shell {
     pub thickness: Value,
     #[serde(default)]
     pub frame: Option<[DVec3; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Option<Tag>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,6 +407,8 @@ pub struct Thread {
     pub face: DVec3,
     #[serde(default)]
     pub frame: Option<[DVec3; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Tag>,
     /// A name from the thread catalog.
     pub thread: String,
     /// How far from the start of the cylinder the thread begins; with `length`, `None` is the whole face.
@@ -432,6 +440,8 @@ pub struct Text {
     pub body: Option<Id>,
     pub face: Option<DVec3>,
     pub frame: Option<[DVec3; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Tag>,
 }
 
 impl Text {
@@ -439,13 +449,34 @@ impl Text {
     /// other face features, this uses the original and bounds-mapped anchor; reject
     /// candidates off a flat face or facing a different direction.
     pub fn placement(&self, body: Option<&Body>) -> Result<Plane, String> {
+        self.placement_tagged(body).map(|p| p.0)
+    }
+
+    /// [`placement`](Self::placement), plus the tag of the face the text landed on and how it was found.
+    pub fn placement_tagged(&self, body: Option<&Body>) -> Result<(Plane, Option<Tag>, Level), String> {
         let mut plane = self.plane;
+        let mut learned = None;
+        let mut level = Level::Position;
         if let Some(body) = body {
             if !body.is_exact() { return Err("text on a surface needs an exact body with a flat face".into()); }
             let anchor = self.face.ok_or("select a flat face for the text")?;
             let mut found = None;
             let [original, mapped] = exact::candidates(&body.solids, &[anchor], self.frame)[0];
             let mut candidates = vec![mapped, original];
+            // A tagged face is tried first: the anchor dropped onto wherever that face is now.
+            let mut by_tag = 0;
+            if let Some(tag) = &self.tag {
+                let faces = exact::faces_tagged(&body.solids, &body.tags);
+                let exact_hit = faces.iter().find(|f| f.tag.as_ref() == Some(tag));
+                let family = exact_hit.or_else(|| faces.iter().filter(|f| f.tag.as_ref().is_some_and(|t| t.family() == tag.family())).min_by(|a, b| a.at.distance(mapped).total_cmp(&b.at.distance(mapped))));
+                if let Some(f) = family {
+                    level = if exact_hit.is_some() { Level::Tag } else { Level::Origin };
+                    let drop = |p: DVec3| p - f.normal * (p - f.at).dot(f.normal);
+                    candidates.insert(0, drop(mapped));
+                    candidates.insert(1, drop(original));
+                    by_tag = 2;
+                }
+            }
             // An earlier emboss can extend the bounds beyond this face. When
             // the base grows, proportional mapping need not land on the face;
             // also try the change in the outward extent along its normal.
@@ -454,7 +485,7 @@ impl Text {
                 let extent = |lo: DVec3, hi: DVec3| n.dot(DVec3::new(if n.x >= 0.0 { hi.x } else { lo.x }, if n.y >= 0.0 { hi.y } else { lo.y }, if n.z >= 0.0 { hi.z } else { lo.z }));
                 candidates.push(anchor + n * (extent(now_lo, now_hi) - extent(lo, hi)));
             }
-            for point in candidates {
+            for (k, point) in candidates.into_iter().enumerate() {
                 let Some(face) = crate::face::Face::near(body, point) else { continue };
                 let Some(surface) = face.plane else { continue };
                 let normal = surface.normal();
@@ -465,14 +496,17 @@ impl Text {
                 plane.origin += point - anchor;
                 plane.origin -= normal * (plane.origin - surface.origin).dot(normal);
                 found = Some(plane);
+                if k >= by_tag { level = Level::Position; }
+                learned = exact::face_tag_at(&body.solids, &body.tags, point);
                 break;
             }
             plane = found.ok_or("the text's flat face is no longer there; select the face again")?;
+            let _ = &mut learned;
         }
         plane.origin += plane.x * self.x.v + plane.y * self.y.v;
         let (sin, cos) = self.angle.v.to_radians().sin_cos();
         (plane.x, plane.y) = (plane.x * cos + plane.y * sin, plane.y * cos - plane.x * sin);
-        Ok(plane)
+        Ok((plane, learned, level))
     }
 
     fn outlines(&self) -> Result<Vec<Profile>, String> {
@@ -583,6 +617,8 @@ pub struct Body {
     /// The exact shape, for bodies made from sketches. Empty for imported
     /// meshes and for anything that has been combined with one.
     pub solids: Lumps,
+    /// What each face of `solids` was made of, in the kernel's face order (see `tag`).
+    pub tags: exact::Tags,
     /// The exact shape's edges as polylines, for picking and drawing.
     pub edges: Vec<Vec<DVec3>>,
     /// Modeled threads. Each is a closed shell of its own that overlaps the
@@ -609,9 +645,11 @@ impl Body {
         !self.solids.is_empty()
     }
 
-    fn set_exact(&mut self, solids: Lumps) -> Result<(), String> {
+    fn set_exact(&mut self, solids: Lumps, tags: exact::Tags) -> Result<(), String> {
         (self.mesh, self.edges) = exact::tessellate(&solids)?;
+        debug_assert_eq!(solids.len(), tags.len(), "one tag list per lump");
         self.solids = solids;
+        self.tags = tags;
         self.dress();
         Ok(())
     }
@@ -619,6 +657,7 @@ impl Body {
     fn set_mesh(&mut self, mesh: Mesh) {
         self.mesh = mesh;
         self.solids.clear();
+        self.tags.clear();
         self.edges.clear();
         self.dress();
     }
@@ -651,11 +690,11 @@ impl Body {
         self.dress();
     }
 
-    /// Takes an exact shape out of the body, which stays exact if it was.
-    fn cut(&mut self, tool: &Lumps) -> Result<(), String> {
+    /// Takes an exact shape out of the body, which stays exact if it was. The tool's new faces are `feature`'s.
+    fn cut(&mut self, tool: &Lumps, feature: Id) -> Result<(), String> {
         if self.is_exact() {
-            let made = exact::boolean(&self.solids, tool, Bool::Subtract)?;
-            return self.set_exact(made);
+            let (made, tags) = exact::boolean_tagged((&self.solids, &self.tags), (tool, &exact::fresh_tags(tool, feature)), Bool::Subtract, feature)?;
+            return self.set_exact(made, tags);
         }
         let tool = exact::tessellate(tool)?.0;
         let mut tool = tool; tool.face_ids.clear();
@@ -676,8 +715,10 @@ impl Body {
             }
         }
         if self.is_exact() && !steps.iter().any(|p| matches!(p, Place::Scale { factor, .. } if *factor < 0.0)) {
+            // Moves keep the kernel's face order, so the tags stay as they are.
             let moved = steps.iter().fold(std::mem::take(&mut self.solids), |s, p| exact::place(s, p));
-            return self.set_exact(moved);
+            let tags = std::mem::take(&mut self.tags);
+            return self.set_exact(moved, tags);
         }
         let mut mesh = self.bare();
         for p in steps {
@@ -693,28 +734,36 @@ impl Body {
 
 /// What a feature adds or removes, before it meets the bodies.
 enum Shape {
-    Exact(Lumps),
+    Exact(Lumps, exact::Tags),
     Mesh(Mesh),
 }
 
 impl Shape {
     fn bbox(&self) -> Option<(DVec3, DVec3)> {
         match self {
-            Shape::Exact(l) => exact::bounds(l),
+            Shape::Exact(l, _) => exact::bounds(l),
             Shape::Mesh(m) => m.bbox(),
         }
     }
 
     fn mesh(&self) -> Result<Mesh, String> {
         match self {
-            Shape::Exact(l) => exact::tessellate(l).map(|t| { let mut m = t.0; m.face_ids.clear(); m }),
+            Shape::Exact(l, _) => exact::tessellate(l).map(|t| { let mut m = t.0; m.face_ids.clear(); m }),
             Shape::Mesh(m) => Ok(m.clone()),
+        }
+    }
+
+    /// Copy `n` of a pattern: the same shape moved, its faces tagged as copies.
+    fn copied(&self, p: &Place, n: u32) -> Shape {
+        match self.placed(p) {
+            Shape::Exact(l, t) if n > 0 => Shape::Exact(l, t.into_iter().map(|lump| lump.into_iter().map(|tag| tag.map(|t| t.copy(n))).collect()).collect()),
+            other => other,
         }
     }
 
     fn placed(&self, p: &Place) -> Shape {
         match self {
-            Shape::Exact(l) => Shape::Exact(exact::place(l.clone(), p)),
+            Shape::Exact(l, t) => Shape::Exact(exact::place(l.clone(), p), t.clone()),
             Shape::Mesh(m) => {
                 let mut m = m.clone();
                 m.map(|v| p.point(v));
@@ -727,9 +776,9 @@ impl Shape {
     }
 
     fn body(self, id: Id, name: String, component: Id) -> Result<Body, String> {
-        let mut b = Body { id, name, component, placement: DAffine3::IDENTITY, local_bounds: None, mesh: Mesh::default(), solids: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
+        let mut b = Body { id, name, component, placement: DAffine3::IDENTITY, local_bounds: None, mesh: Mesh::default(), solids: Vec::new(), tags: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
         match self {
-            Shape::Exact(l) => b.set_exact(l)?,
+            Shape::Exact(l, t) => b.set_exact(l, t)?,
             Shape::Mesh(m) => b.set_mesh(m),
         }
         Ok(b)
@@ -745,6 +794,8 @@ pub struct Built {
     pub bodies: Vec<Body>,
     /// Features that failed, with the reason.
     pub errors: BTreeMap<Id, String>,
+    /// How each feature that picks faces or edges found them again (the weakest of its picks).
+    pub resolutions: BTreeMap<Id, Level>,
 }
 
 impl Built {
@@ -953,7 +1004,7 @@ impl Document {
             self.sketch(id).ok_or("its sketch was deleted".to_owned())
         };
         match &f.kind {
-            FeatureKind::Primitive(p) => Ok(Some((Shape::Exact(p.solids()?),p.op))),
+            FeatureKind::Primitive(p) => { let l = p.solids()?; let t = exact::fresh_tags(&l, f.id); Ok(Some((Shape::Exact(l, t), p.op))) }
             FeatureKind::Extrude(e) => {
                 let s = sk(e.sketch)?;
                 let source=self.feature(e.sketch).unwrap().owner;
@@ -975,7 +1026,11 @@ impl Document {
                 // The kernel has no tapered sweep here, so a taper is built as a mesh.
                 let shape = match e.taper.as_ref().filter(|t| t.v.abs() > 1e-9) {
                     Some(t) => Shape::Mesh(mesh::extrude_tapered(&picked, &plane, z0, z1, t.v)?),
-                    None => Shape::Exact(exact::extrude(&picked, &plane, z0, z1)?),
+                    None => {
+                        let l = exact::extrude(&picked, &plane, z0, z1)?;
+                        let t = exact::tag_extrude(&l, &picked, &plane, z0, z1, f.id);
+                        Shape::Exact(l, t)
+                    }
                 };
                 Ok(Some((shape, e.op)))
             }
@@ -988,12 +1043,17 @@ impl Document {
                     Axis::Y => (DVec2::ZERO, DVec2::Y),
                     Axis::Line(l) => s.line(l).ok_or("its axis line was deleted")?,
                 };
-                Ok(Some((Shape::Exact(exact::revolve(&Self::pick(&all, &r.profiles)?, &plane, a, b, r.angle.v)?), r.op)))
+                let picked = Self::pick(&all, &r.profiles)?;
+                let l = exact::revolve(&picked, &plane, a, b, r.angle.v)?;
+                let t = exact::tag_revolve(&l, &picked, &plane, a, b, r.angle.v, f.id);
+                Ok(Some((Shape::Exact(l, t), r.op)))
             }
             FeatureKind::Text(t) if t.op == Op::New => {
                 let profiles = t.outlines()?;
                 let plane = t.placement(None)?;
-                Ok(Some((Shape::Exact(exact::extrude(&profiles.iter().collect::<Vec<_>>(), &plane, 0.0, t.depth.v)?), Op::New)))
+                let l = exact::extrude(&profiles.iter().collect::<Vec<_>>(), &plane, 0.0, t.depth.v)?;
+                let tags = exact::fresh_tags(&l, f.id);
+                Ok(Some((Shape::Exact(l, tags), Op::New)))
             }
             FeatureKind::Import(m) => Ok(Some((Shape::Mesh(m.clone()), Op::New))),
             _ => Ok(None),
@@ -1105,21 +1165,26 @@ impl Document {
                 continue;
             }
             if matches!(f.kind, FeatureKind::Sketch(_)) { continue; }
+            let mut f = f;
             if matches!(f.kind, FeatureKind::Plane(_)) {
-                match self.resolve_plane(&f,&built) {
-                    Ok(p) => { built.planes.insert(f.id,p); }
+                match self.resolve_plane(&mut f,&built) {
+                    Ok((p, level)) => { built.planes.insert(f.id,p); if let Some(level) = level { built.resolutions.insert(f.id, level); } }
                     Err(e) => { built.errors.insert(f.id,e); }
                 }
+                if f != self.features[index] { self.features[index] = f; }
                 continue;
             }
             // A feature can touch several bodies or drill several holes. Publish
             // its result only after all of those operations have succeeded.
             let mut bodies = built.bodies.clone();
             let mut next_count = counts.get(&f.owner).copied().unwrap_or(0);
-            match self.apply(&f, &mut bodies, &mut next_count, &built) {
-                Ok(()) => {
+            match self.apply(&mut f, &mut bodies, &mut next_count, &built) {
+                Ok(level) => {
                     built.bodies = bodies;
                     counts.insert(f.owner,next_count);
+                    if let Some(level) = level { built.resolutions.insert(f.id, level); }
+                    // References learn the tags of what they found, so later rebuilds can find it by name.
+                    if f != self.features[index] { self.features[index] = f; }
                 }
                 Err(e) => {
                     built.errors.insert(f.id, e);
@@ -1145,34 +1210,41 @@ impl Document {
         built
     }
 
-    fn apply(&self, f: &Feature, bodies: &mut Vec<Body>, count: &mut usize, context: &Built) -> Result<(), String> {
+    /// Applies a feature to the bodies. `f` is the feature's own copy: references that
+    /// resolved by position write the tags they found into it. Returns how its picks resolved.
+    fn apply(&self, f: &mut Feature, bodies: &mut Vec<Body>, count: &mut usize, context: &Built) -> Result<Option<Level>, String> {
         let find = |bodies: &[Body], id: Id| bodies.iter().position(|b| b.id == id).ok_or("a body it used no longer exists".to_owned());
         const MESH_ONLY: &str = "this body is a mesh (imported, tapered, or combined with one); this operation needs an exact body made from a sketch, primitive or text";
-        match &f.kind {
+        let id = f.id;
+        match &mut f.kind {
             FeatureKind::Remove(remove) => {
                 remove.validate()?;
                 for id in &remove.bodies {find(bodies,*id)?;}
                 bodies.retain(|body|!remove.bodies.contains(&body.id));
-                Ok(())
+                Ok(None)
             }
             FeatureKind::Split(split) => {
                 split.validate()?;
                 let index=find(bodies,split.body)?;
                 let component=bodies[index].component;
                 if component!=f.owner {return Err("the split must belong to its target body's component".into());}
-                let (plane,_)=self.plane_reference(&split.plane,context,component)?;
-                let mut pieces=crate::body_ops::pieces(&bodies[index],plane)?.into_iter();
-                bodies[index].set_exact(vec![pieces.next().ok_or("the split produced no pieces")?])?;
-                for (offset,solid) in pieces.enumerate() {
+                let (plane,_,level)=self.plane_reference_mut(&mut split.plane,context,component)?;
+                let pieces=crate::body_ops::pieces(&bodies[index],plane)?;
+                let tags=exact::carry(&[(&bodies[index].solids,&bodies[index].tags)],&pieces,id);
+                let mut pieces=pieces.into_iter().zip(tags);
+                let (first,first_tags)=pieces.next().ok_or("the split produced no pieces")?;
+                bodies[index].set_exact(vec![first],vec![first_tags])?;
+                for (offset,(solid,tags)) in pieces.enumerate() {
                     *count+=1;
-                    bodies.push(Shape::Exact(vec![solid]).body(f.id*1000+offset as Id+1,format!("Body{count}"),component)?);
+                    bodies.push(Shape::Exact(vec![solid],vec![tags]).body(id*1000+offset as Id+1,format!("Body{count}"),component)?);
                 }
-                Ok(())
+                Ok(level)
             }
             FeatureKind::Text(t) if t.op != Op::New => {
                 let profiles = t.outlines()?;
                 let i = find(bodies, t.body.ok_or("select a body and flat face for the text")?)?;
-                let plane = t.placement(Some(&bodies[i]))?;
+                let (plane, learned, level) = t.placement_tagged(Some(&bodies[i]))?;
+                if t.tag.is_none() { t.tag = learned; }
                 let refs: Vec<_> = profiles.iter().collect();
                 // All lettering must sit on material. This also catches overhangs,
                 // holes through letters, and disconnected punctuation over an edge.
@@ -1190,10 +1262,10 @@ impl Document {
                     _ => return Err("text supports New Body, Raise, or Engrave".into()),
                 };
                 let tool = exact::extrude(&refs, &plane, z0, z1)?;
-                let made = exact::boolean(&bodies[i].solids, &tool, operation)?;
-                bodies[i].set_exact(made)?;
+                let (made, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&tool, &exact::fresh_tags(&tool, id)), operation, id)?;
+                bodies[i].set_exact(made, tags)?;
                 bodies.retain(|b| !b.mesh.is_empty());
-                Ok(())
+                Ok(Some(level))
             }
             FeatureKind::Transform(t) => {
                 let i = find(bodies, t.body)?;
@@ -1207,7 +1279,8 @@ impl Document {
                     turn(DVec3::Y, &t.rotate[1]),
                     turn(DVec3::Z, &t.rotate[2]),
                     Place::Shift(DVec3::new(t.translate[0].v, t.translate[1].v, t.translate[2].v)),
-                ])
+                ])?;
+                Ok(None)
             }
             FeatureKind::Combine(c) => {
                 let op = match c.op {
@@ -1226,11 +1299,11 @@ impl Document {
                     Ok(tool)
                 }).collect::<Result<Vec<_>,String>>()?;
                 if bodies[ti].is_exact() && placed_tools.iter().all(Body::is_exact) {
-                    let mut result = bodies[ti].solids.clone();
+                    let (mut result, mut tags) = (bodies[ti].solids.clone(), bodies[ti].tags.clone());
                     for t in &placed_tools {
-                        result = exact::boolean(&result, &t.solids, op)?;
+                        (result, tags) = exact::boolean_tagged((&result, &tags), (&t.solids, &t.tags), op, id)?;
                     }
-                    bodies[ti].set_exact(result)?;
+                    bodies[ti].set_exact(result, tags)?;
                 } else {
                     let mut result = bodies[ti].bare();
                     for t in &placed_tools {
@@ -1249,23 +1322,29 @@ impl Document {
                     bodies.retain(|b| !c.tools.contains(&b.id));
                 }
                 bodies.retain(|b| !b.mesh.is_empty());
-                Ok(())
+                Ok(None)
             }
             FeatureKind::Blend(b) => {
                 let i = find(bodies, b.body)?;
                 if !bodies[i].is_exact() {
                     return Err(MESH_ONLY.into());
                 }
-                let made = exact::blend(&bodies[i].solids, &exact::candidates(&bodies[i].solids, &b.edges, b.frame), b.size.v, b.chamfer)?;
-                bodies[i].set_exact(made)
+                let picks: Vec<exact::EdgePick> = exact::candidates(&bodies[i].solids, &b.edges, b.frame).into_iter().enumerate().map(|(k, points)| exact::EdgePick { points, tag: b.tags.get(k).cloned().flatten() }).collect();
+                let made = exact::blend(&bodies[i].solids, &bodies[i].tags, &picks, b.size.v, b.chamfer, id)?;
+                if b.tags.len() != b.edges.len() { b.tags = made.picked; }
+                bodies[i].set_exact(made.lumps, made.tags)?;
+                Ok(Some(made.level))
             }
             FeatureKind::Shell(sh) => {
                 let i = find(bodies, sh.body)?;
                 if !bodies[i].is_exact() {
                     return Err(MESH_ONLY.into());
                 }
-                let made = exact::shell(&bodies[i].solids, &exact::candidates(&bodies[i].solids, &sh.faces, sh.frame), sh.thickness.v)?;
-                bodies[i].set_exact(made)
+                let picks: Vec<exact::FacePick> = exact::candidates(&bodies[i].solids, &sh.faces, sh.frame).into_iter().enumerate().map(|(k, points)| exact::FacePick { points, tag: sh.tags.get(k).cloned().flatten() }).collect();
+                let made = exact::shell(&bodies[i].solids, &bodies[i].tags, &picks, sh.thickness.v, id)?;
+                if sh.tags.len() != sh.faces.len() { sh.tags = made.picked; }
+                bodies[i].set_exact(made.lumps, made.tags)?;
+                Ok(Some(made.level))
             }
             FeatureKind::Hole(h) => {
                 let i = find(bodies, h.body)?;
@@ -1302,7 +1381,7 @@ impl Document {
                         sleeves.push(sleeve);
                     }
                     let tool = exact::drill(*at, dir, &exact::Drill { diameter: drilled, depth: depth(*at), tip_angle: h.tip_angle.as_ref().map(|v| v.v), head: sizes.head })?;
-                    bodies[i].cut(&tool)?;
+                    bodies[i].cut(&tool, id)?;
                 }
                 if before - bodies[i].bare().volume() < 1e-9 {
                     return Err("the hole does not touch the body; check its position and direction".into());
@@ -1310,7 +1389,7 @@ impl Document {
                 for sleeve in sleeves {
                     bodies[i].add_thread(sleeve);
                 }
-                Ok(())
+                Ok(None)
             }
             FeatureKind::Thread(t) => {
                 let i = find(bodies, t.body)?;
@@ -1318,7 +1397,9 @@ impl Document {
                     return Err(MESH_ONLY.into());
                 }
                 let spec = threads::find(&t.thread)?;
-                let mut barrel = exact::barrel(&bodies[i].solids, &exact::candidates(&bodies[i].solids, &[t.face], t.frame)[0])?;
+                let pick = exact::FacePick { points: exact::candidates(&bodies[i].solids, &[t.face], t.frame)[0], tag: t.tag.clone() };
+                let (mut barrel, level, learned) = exact::barrel_tagged(&bodies[i].solids, &bodies[i].tags, &pick)?;
+                if t.tag.is_none() { t.tag = learned; }
                 // Offsets are measured from the cylinder's outer end: a rod's tip, a hole's mouth.
                 if let Some((lo, hi)) = bodies[i].mesh.bbox() {
                     let (middle, far) = ((lo + hi) / 2.0, barrel.start + barrel.axis * barrel.length);
@@ -1353,11 +1434,12 @@ impl Document {
                     let major = spec.major + room;
                     let wide = across > major + threads::BED + 1e-9;
                     if wide {
-                        let filled = exact::boolean(&bodies[i].solids, &exact::cylinder(start, end, barrel.radius)?, Bool::Union)?;
-                        bodies[i].set_exact(filled)?;
+                        let plug = exact::cylinder(start, end, barrel.radius)?;
+                        let (filled, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&plug, &exact::fresh_tags(&plug, id)), Bool::Union, id)?;
+                        bodies[i].set_exact(filled, tags)?;
                     }
                     if wide || across < major + threads::BED {
-                        bodies[i].cut(&exact::cylinder(start, end, (major + threads::BED) / 2.0)?)?;
+                        bodies[i].cut(&exact::cylinder(start, end, (major + threads::BED) / 2.0)?, id)?;
                     }
                     // The crests stand where the hole's wall was if that is near the tap drill size, and at that size otherwise.
                     let crests = if across >= spec.minor() * 0.9 && across <= spec.major - 0.2 * spec.pitch { across.max(spec.tap_drill + room) } else { spec.tap_drill + room };
@@ -1383,12 +1465,12 @@ impl Document {
                     let inset = |is_free: bool| if is_free { threads::BED.min(length / 4.0) } else { 0.0 };
                     let core = exact::cylinder(stock_start + barrel.axis * inset(ends[0]), stock_end - barrel.axis * inset(ends[1]), (spec.minor() - room) / 2.0 - threads::BED)?;
                     let stock = exact::cylinder(stock_start, stock_end, barrel.radius.max(spec.major / 2.0) + 0.01)?;
-                    bodies[i].cut(&exact::boolean(&stock, &core, Bool::Subtract)?)?;
+                    bodies[i].cut(&exact::boolean(&stock, &core, Bool::Subtract)?, id)?;
                     threads::rod_with_lead(spec.major - room, spec.pitch, length, t.left, [ends[0] || caps[0] > 0.0, ends[1] || caps[1] > 0.0])?
                 };
                 thread.map(|v| start + turn * v);
                 bodies[i].add_thread(thread);
-                Ok(())
+                Ok(Some(level))
             }
             FeatureKind::Pattern(p) => {
                 let source = self.features.iter().take_while(|source| source.id != f.id).find(|source|source.id == p.source && !source.suppressed).ok_or("the feature it repeats is missing or suppressed")?;
@@ -1398,23 +1480,23 @@ impl Document {
                 let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, primitives, imports and standalone text can be patterned")?;
                 let mut landed = 0;
                 for (k, place) in p.placements()?.iter().enumerate() {
-                    let copy = tool.placed(place);
+                    let copy = tool.copied(place, k as u32);
                     // A cut that lands clear of every body has nothing to do; the others still apply.
                     if matches!(op, Op::Cut | Op::Intersect) && !bodies.iter().any(|b| b.component==f.owner && overlap(b.mesh.bbox(), copy.bbox())) {
                         continue;
                     }
                     landed += 1;
                     // Bodies are named by the feature that made them; copies get ids of their own beside it.
-                    Self::merge(copy, op, f.id * 1000 + k as Id + 1, f.owner, bodies, count)?;
+                    Self::merge(copy, op, id * 1000 + k as Id + 1, f.owner, bodies, count)?;
                 }
                 if landed == 0 {
                     return Err("none of the copies reach a body; try another axis, or a negative spacing or angle".into());
                 }
-                Ok(())
+                Ok(None)
             }
             _ => match self.tool(f, bodies, context)? {
-                Some((tool, op)) => Self::merge(tool, op, f.id, f.owner, bodies, count),
-                None => Ok(()),
+                Some((tool, op)) => Self::merge(tool, op, id, f.owner, bodies, count).map(|_| None),
+                None => Ok(None),
             },
         }
     }
@@ -1425,17 +1507,17 @@ impl Document {
         let hits: Vec<usize> = (0..bodies.len()).filter(|i| bodies[*i].component==component && overlap(bodies[*i].mesh.bbox(), reach)).collect();
         // Exact against exact stays exact; a mesh on either side makes the result a mesh.
         let exact_tool = |bodies: &[Body]| match &tool {
-            Shape::Exact(l) if hits.iter().all(|i| bodies[*i].is_exact()) => Some(l.clone()),
+            Shape::Exact(l, t) if hits.iter().all(|i| bodies[*i].is_exact()) => Some((l.clone(), t.clone())),
             _ => None,
         };
         match op {
             Op::Join if !hits.is_empty() => {
                 match exact_tool(bodies) {
-                    Some(mut all) => {
+                    Some((mut all, mut tags)) => {
                         for i in &hits {
-                            all = exact::boolean(&bodies[*i].solids, &all, Bool::Union)?;
+                            (all, tags) = exact::boolean_tagged((&bodies[*i].solids, &bodies[*i].tags), (&all, &tags), Bool::Union, id)?;
                         }
-                        bodies[hits[0]].set_exact(all)?;
+                        bodies[hits[0]].set_exact(all, tags)?;
                     }
                     None => {
                         let mut m = tool.mesh()?;
@@ -1461,10 +1543,10 @@ impl Document {
                 }
                 let how = if op == Op::Cut { Bool::Subtract } else { Bool::Intersect };
                 match exact_tool(bodies) {
-                    Some(solids) => {
+                    Some((solids, tool_tags)) => {
                         for i in hits {
-                            let made = exact::boolean(&bodies[i].solids, &solids, how)?;
-                            bodies[i].set_exact(made)?;
+                            let (made, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&solids, &tool_tags), how, id)?;
+                            bodies[i].set_exact(made, tags)?;
                         }
                     }
                     None => {

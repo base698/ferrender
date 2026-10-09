@@ -1157,7 +1157,7 @@ pub fn extrude_tapered(profiles: &[&Profile], plane: &Plane, z0: f64, z1: f64, t
     for p in profiles {
         let grown = |z: f64| -> Profile {
             let by = z.abs() * taper.to_radians().tan();
-            Profile { outer: crate::profile::offset_path(&p.outer, by, true), holes: p.holes.iter().map(|h| crate::profile::offset_path(h, by, true)).collect(), edges: Vec::new(), depth: 0, path: Vec::new(), hole_paths: Vec::new() }
+            Profile { outer: crate::profile::offset_path(&p.outer, by, true), holes: p.holes.iter().map(|h| crate::profile::offset_path(h, by, true)).collect(), edges: Vec::new(), depth: 0, path: Vec::new(), hole_paths: Vec::new(), path_ids: Vec::new(), hole_path_ids: Vec::new() }
         };
         let (lo, hi) = (grown(z0), grown(z1));
         if signed_area(&lo.outer) <= 1e-9 || signed_area(&hi.outer) <= 1e-9 || lo.area() <= 1e-9 || hi.area() <= 1e-9 {

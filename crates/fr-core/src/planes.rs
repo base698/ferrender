@@ -13,7 +13,7 @@ impl OriginPlane {
 #[serde(rename_all = "snake_case")]
 pub enum PlaneRef {
     Origin(OriginPlane),
-    Face { body: Id, at: DVec3, frame: Option<[DVec3; 2]> },
+    Face { body: Id, at: DVec3, frame: Option<[DVec3; 2]>, #[serde(default, skip_serializing_if = "Option::is_none")] tag: Option<crate::tag::Tag> },
     Plane(Id),
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -99,18 +99,46 @@ fn candidates(body: &Body, at: DVec3, frame: Option<[DVec3;2]>) -> [DVec3;2] {
 }
 
 pub fn face(body: &Body, at: DVec3, frame: Option<[DVec3;2]>) -> Result<crate::face::Face,String> {
-    for p in candidates(body,at,frame) {
+    face_tagged(body,at,frame,None).map(|f|f.0)
+}
+
+/// [`face`] for a reference that may carry a tag: the tagged face is tried first, wherever it is
+/// now. Returns the face, the tag of the face found, and how it was found.
+pub fn face_tagged(body: &Body, at: DVec3, frame: Option<[DVec3;2]>, tag: Option<&crate::tag::Tag>) -> Result<(crate::face::Face,Option<crate::tag::Tag>,crate::tag::Level),String> {
+    use crate::tag::Level;
+    let mut tries: Vec<(DVec3,Level)> = Vec::new();
+    if let Some(tag)=tag {
+        let faces=crate::exact::faces_tagged(&body.solids,&body.tags);
+        let exact_hit=faces.iter().find(|f|f.tag.as_ref()==Some(tag));
+        let family=exact_hit.or_else(||faces.iter().filter(|f|f.tag.as_ref().is_some_and(|t|t.family()==tag.family())).min_by(|a,b|a.at.distance(at).total_cmp(&b.at.distance(at))));
+        if let Some(f)=family {
+            let level=if exact_hit.is_some() {Level::Tag} else {Level::Origin};
+            for p in candidates(body,at,frame) { tries.push((p-f.normal*(p-f.at).dot(f.normal),level)); }
+            tries.push((f.at,level));
+        }
+    }
+    tries.extend(candidates(body,at,frame).into_iter().map(|p|(p,Level::Position)));
+    for (p,level) in tries {
         let Some(f)=crate::face::Face::near(body,p) else { continue };
         let Some(plane)=f.plane else { continue };
         if (p-plane.origin).dot(plane.normal()).abs() > 1e-5 { continue; }
         let q=plane.to_local(p);
-        if f.loops.iter().filter(|ring| crate::profile::inside(ring,q)).count()%2==1 { return Ok(f); }
+        if f.loops.iter().filter(|ring| crate::profile::inside(ring,q)).count()%2==1 {
+            let found=crate::exact::face_tag_at(&body.solids,&body.tags,p);
+            return Ok((f,found,level));
+        }
     }
     Err("the face is no longer flat, or is gone; edit the plane and pick it again".into())
 }
 
 impl Document {
     pub fn plane_reference(&self, reference: &PlaneRef, built: &Built, owner:Id) -> Result<(Plane,Vec<DVec3>),String> {
+        let mut copy=reference.clone();
+        self.plane_reference_mut(&mut copy,built,owner).map(|r|(r.0,r.1))
+    }
+
+    /// [`plane_reference`](Self::plane_reference) that lets a face reference learn the tag of the face it found.
+    pub fn plane_reference_mut(&self, reference: &mut PlaneRef, built: &Built, owner:Id) -> Result<(Plane,Vec<DVec3>,Option<crate::tag::Level>),String> {
         match reference {
             PlaneRef::Origin(origin) => {
                 let mut points=Vec::new();
@@ -118,19 +146,20 @@ impl Document {
                     let t=built.component_placement(owner).inverse()*if built.placements_applied {glam::DAffine3::IDENTITY} else {built.component_placement(body.component)};
                     points.extend(bounds_points(body).into_iter().map(|p|t.transform_point3(p)));
                 }
-                Ok((origin.plane(),points))
+                Ok((origin.plane(),points,None))
             }
             PlaneRef::Plane(id) => built.planes.get(id).map(|p|{
                 let t=built.component_placement(owner).inverse()*if built.placements_applied {glam::DAffine3::IDENTITY} else {built.component_placement(p.component)};
-                (p.plane.transformed(t),p.corners.map(|p|t.transform_point3(p)).to_vec())
+                (p.plane.transformed(t),p.corners.map(|p|t.transform_point3(p)).to_vec(),None)
             })
                 .ok_or_else(||format!("plane {id} is missing, rolled back, suppressed, or comes later in the timeline")),
-            PlaneRef::Face {body,at,frame} => {
+            PlaneRef::Face {body,at,frame,tag} => {
                 let body=built.body(*body).ok_or("a body it used no longer exists")?;
                 let local=if built.placements_applied {std::borrow::Cow::Owned(body.local_copy()?)} else {std::borrow::Cow::Borrowed(body)};
-                let f=face(&local,*at,*frame)?;
+                let (f,found,level)=face_tagged(&local,*at,*frame,tag.as_ref())?;
+                if tag.is_none() { *tag=found; }
                 let t=built.component_placement(owner).inverse()*built.component_placement(body.component);
-                Ok((f.plane.unwrap().transformed(t),f.outline.into_iter().flatten().map(|p|t.transform_point3(p)).collect()))
+                Ok((f.plane.unwrap().transformed(t),f.outline.into_iter().flatten().map(|p|t.transform_point3(p)).collect(),Some(level)))
             }
         }
     }
@@ -160,24 +189,29 @@ impl Document {
         }
     }
 
-    pub fn resolve_plane(&self, f: &Feature, built: &Built) -> Result<ResolvedPlane,String> {
-        let FeatureKind::Plane(p)=&f.kind else { return Err("not a construction plane".into()) };
-        let (plane,points)=match &p.kind {
-            PlaneKind::Offset {base,distance} => { let (base,points)=self.plane_reference(base,built,f.owner)?; (base.offset(distance.v),points) }
+    /// Resolves a construction plane. `f` is the feature's own copy: face references learn
+    /// the tags of the faces they found. Also returns how its face picks resolved, if it has any.
+    pub fn resolve_plane(&self, f: &mut Feature, built: &Built) -> Result<(ResolvedPlane,Option<crate::tag::Level>),String> {
+        let (id,owner)=(f.id,f.owner);
+        let FeatureKind::Plane(p)=&mut f.kind else { return Err("not a construction plane".into()) };
+        let mut levels=Vec::new();
+        let (plane,points)=match &mut p.kind {
+            PlaneKind::Offset {base,distance} => { let (base,points,level)=self.plane_reference_mut(base,built,owner)?; levels.extend(level); (base.offset(distance.v),points) }
             PlaneKind::Midplane {a,b,flip} => {
                 if a==b { return Err("choose two different faces".into()); }
-                let (a,mut points)=self.plane_reference(a,built,f.owner)?;
-                let (b,other)=self.plane_reference(b,built,f.owner)?;
+                let (a,mut points,la)=self.plane_reference_mut(a,built,owner)?;
+                let (b,other,lb)=self.plane_reference_mut(b,built,owner)?;
+                levels.extend(la); levels.extend(lb);
                 points.extend(other);
                 let centre=if points.is_empty() {(a.origin+b.origin)*0.5} else {points.iter().sum::<DVec3>()/points.len() as f64};
                 (midplane(a,b,centre,*flip)?,points)
             }
             PlaneKind::ThreePoint {points} => {
-                let points=points.iter().map(|p|self.point_reference(p,built,f.id,f.owner)).collect::<Result<Vec<_>,_>>()?;
+                let points=points.iter().map(|p|self.point_reference(p,built,id,owner)).collect::<Result<Vec<_>,_>>()?;
                 (three_points([points[0],points[1],points[2]])?,points)
             }
         };
         Sketch::new(plane).validate()?;
-        Ok(ResolvedPlane { component:f.owner, plane, corners: rectangle(plane,&points,50.0) })
+        Ok((ResolvedPlane { component:owner, plane, corners: rectangle(plane,&points,50.0) },crate::tag::weakest(levels)))
     }
 }

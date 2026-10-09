@@ -192,7 +192,7 @@ impl App {
         self.finish_sketch();
         let base = self.sel_face.as_ref().filter(|f| f.plane.is_some()).and_then(|f| {
             let body = self.session.built.body(f.body)?;
-            Some(PlaneRef::Face { body: body.id, at: body.to_local(f.at), frame: body.local_frame() })
+            Some(PlaneRef::Face { body: body.id, at: body.to_local(f.at), frame: body.local_frame(), tag: None })
         });
         self.dialog = Dialog::Plane(PlaneDlg { base, ..PlaneDlg::default() });
     }

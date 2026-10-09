@@ -12,7 +12,7 @@ fn block() -> Session {
 }
 fn lettering(s: &Session, p: DVec3, normal: DVec3, op: Op) -> Text {
     let value = |v, kind| s.doc.value(v, kind).unwrap();
-    Text { text: "BO".into(), plane: Plane::from_normal(p,normal), height:value("4 mm",Kind::Length),depth:value("1 mm",Kind::Length),spacing:value("0",Kind::Length),angle:value("0",Kind::Angle),x:value("0",Kind::Length),y:value("0",Kind::Length),align:Align::Left,op,body:Some(2),face:Some(p),frame:s.built.frame(2) }
+    Text { tag: None, text: "BO".into(), plane: Plane::from_normal(p,normal), height:value("4 mm",Kind::Length),depth:value("1 mm",Kind::Length),spacing:value("0",Kind::Length),angle:value("0",Kind::Angle),x:value("0",Kind::Length),y:value("0",Kind::Length),align:Align::Left,op,body:Some(2),face:Some(p),frame:s.built.frame(2) }
 }
 fn add(s: &mut Session, t: Text) -> Result<fr_core::Id,String> {
     s.edit_feature(|d| { let id=d.add_feature(FeatureKind::Text(t)); Ok((id,id)) })
@@ -63,7 +63,8 @@ fn text_follows_face_when_upstream_thickness_changes() {
     let (_,hi)=exact::bounds(&s.built.body(2).unwrap().solids).unwrap();
     assert!((hi.z-16.).abs()<1e-5);
     let encoded=io::to_json(&s.doc);
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["version"],2);
+    // Text attached to a face learns the face's tag on its first build, which is format 10 (plain lettering stays 2).
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["version"],10);
     let mut loaded=io::from_json(&encoded).unwrap();
     assert!(loaded.rebuild().errors.is_empty());
     assert!(matches!(loaded.feature(id).unwrap().kind,FeatureKind::Text(_)));

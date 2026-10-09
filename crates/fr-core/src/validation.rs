@@ -193,7 +193,7 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
     let plane=|r:&PlaneRef| -> Result<(),String> {match r {
         PlaneRef::Origin(_)=>Ok(()),
         PlaneRef::Plane(id)=>earlier(*id,"construction plane",|k|matches!(k,FeatureKind::Plane(_))),
-        PlaneRef::Face {body:id,at,frame}=>{body(*id)?;anchor(*at,*frame)}
+        PlaneRef::Face {body:id,at,frame,..}=>{body(*id)?;anchor(*at,*frame)}
     }};
     match &f.kind {
         FeatureKind::Split(s)=>{
