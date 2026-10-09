@@ -93,6 +93,34 @@ fn everything() -> Session {
     s
 }
 
+/// Kernel-derived pick coordinates may differ by a few floating-point ulps on
+/// Intel and ARM. Keep schema, integers, strings and array order exact.
+fn fixture_difference(a: &J, b: &J, path: &str) -> Option<String> {
+    match (a, b) {
+        (J::Number(a), J::Number(b)) if a.is_f64() && b.is_f64() => {
+            let (a, b) = (a.as_f64().unwrap(), b.as_f64().unwrap());
+            if (a - b).abs() <= 32.0 * f64::EPSILON * (1.0 + a.abs().max(b.abs())) { return None; }
+        }
+        (J::Array(a), J::Array(b)) if a.len() == b.len() => {
+            return a.iter().zip(b).enumerate().find_map(|(i, (a, b))| fixture_difference(a, b, &format!("{path}[{i}]")));
+        }
+        (J::Object(a), J::Object(b)) if a.keys().eq(b.keys()) => {
+            return a.iter().find_map(|(key, a)| fixture_difference(a, &b[key], &format!("{path}.{key}")));
+        }
+        _ if a == b => return None,
+        _ => {}
+    }
+    Some(format!("{path}: fixture {a}, current {b}"))
+}
+
+#[test]
+fn fixture_comparison_keeps_schema_and_identity_strict() {
+    assert!(fixture_difference(&json!({"id":1,"point":[4.999999999999999]}), &json!({"id":1,"point":[5.0]}), "$ ").is_none());
+    for changed in [json!({"id":2,"point":[5.0]}), json!({"id":1,"point":[5.001]}), json!({"id":1,"point":[5]}), json!({"id":1,"points":[5.0]}), json!({"id":1,"point":[5.0,0.0]})] {
+        assert!(fixture_difference(&json!({"id":1,"point":[5.0]}), &changed, "$ ").is_some(), "accepted schema/identity change: {changed}");
+    }
+}
+
 #[test]
 fn every_feature_kind_serializes_as_the_fixture_says() {
     let s = everything();
@@ -114,11 +142,8 @@ fn every_feature_kind_serializes_as_the_fixture_says() {
         std::fs::write(&path, &text).unwrap();
     }
     let frozen = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("no fixture at {}; run with FERRENDER_UPDATE_FIXTURES=1", path.display()));
-    if frozen != text {
-        let (a, b): (Vec<&str>, Vec<&str>) = (frozen.lines().collect(), text.lines().collect());
-        let first = a.iter().zip(b.iter()).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
-        panic!("the serialized document differs from the fixture at line {}:\n  fixture: {:?}\n  now:     {:?}\nIf the change is intended, regenerate with FERRENDER_UPDATE_FIXTURES=1 and update docs/FILE_FORMAT.md.",
-            first + 1, a.get(first), b.get(first));
+    if let Some(difference) = fixture_difference(&serde_json::from_str(&frozen).unwrap(), &serde_json::from_str(&text).unwrap(), "$") {
+        panic!("the serialized document differs from the fixture: {difference}\nIf the change is intended, regenerate with FERRENDER_UPDATE_FIXTURES=1 and update docs/FILE_FORMAT.md.");
     }
     // The fixture must also round-trip through both encodings.
     let plain = io::from_json(&text).unwrap();
