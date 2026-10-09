@@ -212,6 +212,44 @@ pub struct Revolve {
     pub op: Op,
 }
 
+/// How a swept profile is turned as it travels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SweepOrient {
+    /// The profile turns with the path, staying as square to it as it was where they meet.
+    #[default]
+    Follow,
+    /// The profile keeps the orientation it was drawn in.
+    Fixed,
+}
+
+impl SweepOrient {
+    pub fn name(self) -> &'static str {
+        match self { SweepOrient::Follow => "follow", SweepOrient::Fixed => "fixed" }
+    }
+
+    pub fn parse(s: &str) -> Option<SweepOrient> {
+        match s { "follow" => Some(SweepOrient::Follow), "fixed" => Some(SweepOrient::Fixed), _ => None }
+    }
+}
+
+/// Carries profiles of one sketch along a path drawn in another.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Sweep {
+    pub sketch: Id,
+    pub profiles: Vec<Vec<Id>>,
+    /// The sketch holding the path.
+    pub path_sketch: Id,
+    /// The entities of that sketch that make up the path, joined end to end.
+    /// Empty means every entity of the sketch that is not construction geometry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<Id>,
+    #[serde(default)]
+    pub orient: SweepOrient,
+    #[serde(default)]
+    pub op: Op,
+}
+
 /// Moves a body: scale about the origin, then rotate about X, Y and Z, then translate.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
@@ -634,6 +672,7 @@ pub enum FeatureKind {
     Split(crate::body_ops::Split),
     Extrude(Extrude),
     Revolve(Revolve),
+    Sweep(Sweep),
     /// A mesh brought in from a file, already in millimetres.
     Import(Mesh),
     Transform(Transform),
@@ -679,6 +718,7 @@ impl Feature {
             FeatureKind::Split(_) => "split",
             FeatureKind::Extrude(_) => "extrude",
             FeatureKind::Revolve(_) => "revolve",
+            FeatureKind::Sweep(_) => "sweep",
             FeatureKind::Import(_) => "import",
             FeatureKind::Transform(_) => "transform",
             FeatureKind::Combine(_) => "combine",
@@ -1224,6 +1264,20 @@ impl Document {
                 let t = exact::tag_revolve(&l, &picked, &plane, a, b, r.angle.v, f.id);
                 Ok(Some((Shape::Exact(l, t), r.op)))
             }
+            FeatureKind::Sweep(w) => {
+                let s = sk(w.sketch)?;
+                let along = sk(w.path_sketch).map_err(|e| e.replace("its sketch", "its path sketch"))?;
+                // Both sketches in the frame of the component the sweep belongs to.
+                let placed = |id: Id, plane: Plane| plane.transformed(context.component_placement(f.owner).inverse() * context.component_placement(self.feature(id).unwrap().owner));
+                let (plane, path_plane) = (placed(w.sketch, s.plane), placed(w.path_sketch, along.plane));
+                let all = profile::profiles(s);
+                let picked = Self::pick(&all, &w.profiles)?;
+                let path = profile::chain(along, &w.path)?;
+                let follow = w.orient == SweepOrient::Follow;
+                let l = exact::sweep(&picked, &plane, &path, &path_plane, follow)?;
+                let t = exact::tag_swept(&l, &picked, &plane, &path, &path_plane, follow, f.id);
+                Ok(Some((Shape::Exact(l, t), w.op)))
+            }
             FeatureKind::Text(t) if t.op == Op::New => {
                 let profiles = t.outlines()?;
                 let plane = t.placement(None)?;
@@ -1327,7 +1381,7 @@ impl Document {
                     _ => {}
                 },
                 FeatureKind::Relief(r) => { for v in [&mut r.width, &mut r.depth, &mut r.base] { set(v, Kind::Length); } }
-                FeatureKind::Import(_) | FeatureKind::Combine(_) | FeatureKind::Remove(_) | FeatureKind::Split(_) | FeatureKind::ScriptRun(_) => {}
+                FeatureKind::Import(_) | FeatureKind::Combine(_) | FeatureKind::Remove(_) | FeatureKind::Split(_) | FeatureKind::ScriptRun(_) | FeatureKind::Sweep(_) => {}
             }
             if let Some(e) = err {
                 built.errors.insert(f.id, e);
@@ -1725,7 +1779,7 @@ impl Document {
                 if context.errors.contains_key(&source.id) || !context.components.contains_key(&source.owner) {
                     return Err("the feature it repeats could not be built".into());
                 }
-                let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, primitives, imports and standalone text can be patterned")?;
+                let (tool, op) = self.tool(source, bodies, context)?.ok_or("only extrudes, revolves, sweeps, primitives, imports and standalone text can be patterned")?;
                 let mut landed = 0;
                 for (k, place) in p.placements()?.iter().enumerate() {
                     // Include the pattern feature in copy identity; separate patterns of the

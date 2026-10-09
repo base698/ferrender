@@ -55,7 +55,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "get_scene_info",
-            "description": "Get the Ferrender document: active component, component tree, units, parameters, the feature timeline (sketches, primitives, extrudes, revolves, with any errors) and the bodies with their sizes and volumes. Call this first; never assume the document is empty.",
+            "description": "Get the Ferrender document: active component, component tree, units, parameters, the feature timeline (sketches, primitives, extrudes, revolves, sweeps, with any errors) and the bodies with their sizes and volumes. Call this first; never assume the document is empty.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
@@ -85,7 +85,7 @@ fn tools() -> Value {
         },
         {
             "name": "execute_ferrender_commands",
-            "description": "Run modelling commands in order; each is one undo step and execution stops at the first error. Commands are JSON objects with an \"op\": create_component, activate_component, move_component, create_plane, create_sketch, add_geometry, add_constraint, set_dimension, move, trim, mirror, offset, fillet, chamfer, project, delete, extrude, revolve, primitive, pattern, fillet_edges, chamfer_edges, shell, transform, combine, edit_feature, delete_feature, rollback, set_parameter, set_visible, import_mesh (STL, OBJ or 3MF), mesh_measure, mesh_repair, mesh_decimate, mesh_smooth, mesh_subdivide, mesh_cut, mesh_mirror, mesh_offset, mesh_extrude_region, mesh_sculpt, mesh_from_image, export_stl, export_step, save, open, undo, redo. Call get_reference for the arguments of each. Results list only the bodies a command changed. Inside a command, \"$last_sketch\", \"$last_feature\" and \"$last_body\" stand for the newest of each.",
+            "description": "Run modelling commands in order; each is one undo step and execution stops at the first error. Commands are JSON objects with an \"op\": create_component, activate_component, move_component, create_plane, create_sketch, add_geometry, add_constraint, set_dimension, move, trim, mirror, offset, fillet, chamfer, project, delete, extrude, revolve, sweep, primitive, pattern, fillet_edges, chamfer_edges, shell, transform, combine, edit_feature, delete_feature, rollback, set_parameter, set_visible, import_mesh (STL, OBJ or 3MF), mesh_measure, mesh_repair, mesh_decimate, mesh_smooth, mesh_subdivide, mesh_cut, mesh_mirror, mesh_offset, mesh_extrude_region, mesh_sculpt, mesh_from_image, export_stl, export_step, save, open, undo, redo. Call get_reference for the arguments of each. Results list only the bodies a command changed. Inside a command, \"$last_sketch\", \"$last_feature\" and \"$last_body\" stand for the newest of each.",
             "inputSchema": {"type": "object", "properties": {"commands": {"type": "array", "items": {"type": "object"}, "description": "Command objects, each with an \"op\"."}}, "required": ["commands"]}
         }
     ])

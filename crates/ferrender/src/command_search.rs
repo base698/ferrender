@@ -69,6 +69,7 @@ pub fn commands(app: &App) -> Vec<Command> {
     let profiles=app.doc().sketches().any(|(f,s)|!app.doc().is_suppressed(f.id) && app.session.built.sketch_plane(app.doc(),f.id).is_some() && !fr_core::profile::profiles(s).is_empty());
     add("Extrude",Action::Extrude,"E","Pull a closed profile or flat face into a solid.","model extrude pad pocket",(!(profiles || app.sel_face.as_ref().is_some_and(|f|f.plane.is_some()))).then_some("Draw a closed profile or select a flat face first."));
     add("Revolve",Action::Revolve,"","Turn a closed profile around an axis.","model revolve lathe",(!profiles).then_some("Draw a closed profile first."));
+    add("Sweep",Action::Sweep,"","Carry a closed profile along a path drawn in another sketch.","model sweep pipe path rail tube handle frame",(!profiles).then_some("Draw a path in one sketch and a closed profile in another first."));
     if let Some((_,sk))=sketch {
         add("Finish Sketch",Action::FinishSketch,"","Return to the model.","exit close sketch done",None);
         for (title,tool,key,hint) in [
@@ -119,7 +120,7 @@ pub fn commands(app: &App) -> Vec<Command> {
         let chosen=app.sel_feature.or(app.sel_body);
         let source=app.doc().features.iter().take(app.doc().active()).any(|f|!app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner)
             && (Some(f.id)==chosen || f.owner==app.doc().active_component)
-            && (matches!(f.kind,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)) || matches!(&f.kind,FeatureKind::Text(t) if t.op==Op::New)));
+            && (matches!(f.kind,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Sweep(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)) || matches!(&f.kind,FeatureKind::Text(t) if t.op==Op::New)));
         add("Pattern / Mirror",Action::Pattern,"","Repeat a source in a line, grid, circle or mirror.","model pattern array mirror circular linear grid",(!source).then_some("Create a repeatable solid feature first."));
         add("Fillet Edges",Action::Blend(false),"","Round exact solid edges.","model fillet round",need_exact);
         add("Chamfer Edges",Action::Blend(true),"","Bevel exact solid edges.","model chamfer bevel",need_exact);

@@ -85,7 +85,7 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if doc.features.iter().any(|f| has_tags(&f.kind) || f.script_key.is_some()) { 13 }
+    if doc.features.iter().any(|f| has_tags(&f.kind) || f.script_key.is_some() || matches!(&f.kind, FeatureKind::Sweep(_))) { 13 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::ScriptRun(_)) || f.made_by.is_some()) { 12 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::MeshOp(_) | FeatureKind::Relief(_))) { 11 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Remove(_) | FeatureKind::Split(_))) { 8 }
