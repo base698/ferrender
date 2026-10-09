@@ -1,12 +1,14 @@
 # Ferrender 0.4 independent review
 
-**Updated 9 October 2026, 13:30 UTC.** The current reviewed source is `1be424a40d717e98efe2094067f55d868fbc8498` on `0.4-dev`, after merging PRs #1, #2 and #3. Its tracked tree is identical to the final tested and packaged candidate `013192b30e8f123e17b0097c6a08d340fffec315` (tree `a2c1cdc099b4841087c89a4148a724abe966d0d6`). The candidate's exact build identity is recorded in the test pack's `pr-integration/BUILD-INFO.txt`. This review does not publish or approve a release by itself.
+**Updated 9 October 2026, 13:30 UTC.** The independently reviewed source for the results below is `1be424a40d717e98efe2094067f55d868fbc8498` on `0.4-dev`, after merging PRs #1, #2 and #3. Its tracked tree is identical to the final tested and packaged candidate `013192b30e8f123e17b0097c6a08d340fffec315` (tree `a2c1cdc099b4841087c89a4148a724abe966d0d6`). The candidate's exact build identity is recorded in the test pack's `pr-integration/BUILD-INFO.txt`. This review does not publish or approve a release by itself.
 
 The original baseline was `f38e1f7`, inspected on 8–9 October, followed by delivery `7a9fd6eb19d5cf43c356b429184e253d2ea063c6` (code fixes in `5c0eb8c`). The review used isolated clones, three scoped review agents for the initial assessment and separate native apps/settings. The current assessment below supersedes the older test totals and pending-check statements; historical results remain for traceability.
 
 The baseline had significant correctness and security defects despite its passing feature tests. Reproductions included successful script filesystem escapes, document identity loss after failed scripts, wrong Boolean volumes, decimation holes, stale GPU geometry and permanently suppressed script results. The reviewed candidate fixes these cases and adds explicit refusal where a reliable result is unavailable. No finite suite proves the absence of other bugs.
 
 ## Current assessment — integrated PRs #1, #2 and #3
+
+**Artifact locations updated 9 October 2026:** the collection moved from Documents to Synology `Backup/3d`, accessible through `~/Documents/3d`. Finished models, large imports and current test evidence now have separate folders; see `AGENTS.md` and the archive indexes. Original file contents were verified during migration. Later acceptance and partial-Sweep work (PRs #5 and #6) is tracked in [the acceptance run](ACCEPTANCE_0.4.0.md) and draft PR #4; the 497-test result below belongs to the earlier reviewed revision. This location update does not claim new product tests.
 
 - **Local verification:** the final combined workspace/all-target suite passed **497 tests, zero failures, six intentionally ignored, across 44 test targets**, including native Metal/offscreen rendering and UI regressions. The earlier PR #1/#2 integration passed 476 tests; the boundary-fix run passed 455. These are successive suites, not additional tests to add together.
 - **Hosted verification:** each final PR revision passed Apple Silicon, Intel Mac, Linux and RustSec/cargo-deny jobs. All three platforms built a release and exercised `package-release.py` with its geometry smoke test. Linux ran the complete offscreen suite using software rendering; hosted macOS jobs ran the non-rendering and UI-state tests. Local native Mac rendering was exercised separately.
@@ -39,7 +41,7 @@ The Intel job exposed a one-ULP fixture coordinate difference. Cross-platform fi
 
 An additional native closed-ring Sweep check was interrupted when the Mac locked before the dialog opened. It is **not** recorded as a manual pass; automated closed-path and reversed-selection regressions passed. Continuous orbit/drag feel remains a human check. This documentation update did not rerun the product suites or the full security audit.
 
-Integration evidence, build, saved models and the detailed integration record are under `~/Documents/ferr-tests/ferrender-0.4-review/pr-integration/`, outside Git. See `evidence/` for test/CI logs and `native/` for saved designs and replay measurements. The repository acceptance plan now includes script checks **30–34** and Sweep checks **S1–S5**.
+Integration evidence, build, saved models and the detailed integration record are under `~/Documents/3d/ferrender/testing/0.4-review/pr-integration/`, outside Git. See `evidence/` for test/CI logs and `native/` for saved designs and replay measurements. The repository acceptance plan now includes script checks **30–34** and Sweep checks **S1–S5**.
 
 ## Boundary-fix follow-up — 9 October 2026
 
@@ -91,7 +93,7 @@ Test machine: Apple M3 Max, 48 GiB RAM, macOS 26.2 (25C56), arm64. Native render
 - **Organic turtle:** an original connected anatomical seed was generated outside Ferrender, then imported and refined using Ferrender's Repair, Loop subdivision, smoothing, Pull/Smooth sculpt strokes and quadric decimation. This is not a downloaded finished turtle or a claim of manual brush sculpting from an empty viewport. The seed has 191,992 triangles; subdivision produces 767,968; the delivered model has 150,000 triangles, 75,002 vertices, one shell, zero open/non-manifold edges and volume about 90,425.199726 mm³. Undo/Redo, saved-file reopen and exported-STL reimport pass.
 - **Security:** harmless scratch-file exploits were reproduced before fixing. Tests cover real outside modules, leaf/dangling symlinks, failed script transactions, read-only caches, bounded source/output, malicious archives and amplified 3MF components. Tests use local temporary data, not personal files.
 
-The test pack includes `king-classic-75mm.ferr/.stl/.step`, `king-classic-generator.rhai`, `sea-turtle-organic.ferr/.stl`, its seed, views, a read-only future-version fixture, compatibility and geometry evidence. The user copy belongs under `~/Documents/ferr-tests/ferrender-0.4-review/`. The repository contains code/tests/docs, not these large meshes or personal files.
+The test pack includes `king-classic-75mm.ferr/.stl/.step`, `king-classic-generator.rhai`, `sea-turtle-organic.ferr/.stl`, its seed, views, a read-only future-version fixture, compatibility and geometry evidence. The organized archive is under `~/Documents/3d/` on Synology `Backup/3d`: finished king files are in `ferrender/models/chess/king-75mm/`, turtle files in `ferrender/models/sea-turtle/`, and review fixtures/evidence in `ferrender/testing/0.4-review/`. The repository contains code/tests/docs, not these large meshes or personal files.
 
 ## Original fixed findings (supplemented by the follow-ups above)
 
@@ -180,7 +182,7 @@ The earlier signed app at commit `4858b6a` completed the live command-bridge seq
 
 ## Unlocked-screen follow-up — 9 October 2026
 
-This follow-up used a separate **Ferrender UI Review** app and private settings. Native file dialogs, menus, numeric fields, viewport clicks and timeline menus were driven through macOS UI automation; the local command bridge was used read-only to record the resulting geometry. Original user designs were not overwritten. Evidence and test copies are under `~/Documents/ferr-tests/ferrender-0.4-review/evidence/unlocked/`, outside Git.
+This follow-up used a separate **Ferrender UI Review** app and private settings. Native file dialogs, menus, numeric fields, viewport clicks and timeline menus were driven through macOS UI automation; the local command bridge was used read-only to record the resulting geometry. Original user designs were not overwritten. Evidence and test copies are under `~/Documents/3d/ferrender/testing/0.4-review/evidence/unlocked/`, outside Git.
 
 Initial checks used clean release `c7dd232`. Two defects found through the real UI were corrected in **`5c0eb8cac28c0681a324542f8e44355a3642a20c`**. The retest executable used that source plus only the in-progress review Markdown, so About reported local changes. A subsequent clean build at `7a9fd6e` was packaged and opened with the saved king. Its actual Help → About dialog showed the full commit above, “Source: Clean checkout” and “Build: release”, matching `BUILD-INFO.txt`. No model logic changed between this build and the `5c0eb8c` retest.
 

@@ -1,6 +1,6 @@
 # A face relief from a photograph, over MCP
 
-This is the 0.4 mesh acceptance run: a printable bas-relief of a person's face made from one photograph, using only Ferrender's tools through its MCP server, with a depth map produced outside Ferrender. It was performed on 2026-10-08 with the portrait in `~/Documents/ferr-tests/face-relief/`; the images from that run (the depth map, the step screenshots and the mounted relief) are kept in that folder rather than in this repository, since they are a likeness of a real person. Reproduce it with your own photo.
+This is the 0.4 mesh acceptance run: a printable bas-relief of a person's face made from one photograph, using only Ferrender's tools through its MCP server, with a depth map produced outside Ferrender. It was performed on 2026-10-08. The design and images from that run (the depth map, the step screenshots and the mounted relief) are now archived in `~/Documents/3d/ferrender/models/face-relief/` on Synology `Backup/3d`, rather than in this repository, since they are a likeness of a real person. Reproduce it with your own photo.
 
 ## What you need
 

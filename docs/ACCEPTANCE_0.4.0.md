@@ -12,13 +12,15 @@ Mark each step **Pass**, **Fail** or **Unsure**. A step passes only if every "Ex
 2. Start the build under test with its own settings, so your real settings, recent files and cache key are untouched:
 
    ```sh
-   export FERRENDER_CONFIG_DIR="$HOME/Documents/ferr-tests/acceptance-0.4.0/config"
-   mkdir -p "$FERRENDER_CONFIG_DIR" "$HOME/Documents/ferr-tests/acceptance-0.4.0/work"
+   export FERRENDER_CONFIG_DIR="$HOME/Library/Application Support/Ferrender-Acceptance-0.4"
+   mkdir -p "$FERRENDER_CONFIG_DIR" "$HOME/Documents/3d/ferrender/testing/acceptance-0.4.0/work"
    open -n ~/Desktop/Ferrender.app
    ```
 
-3. Save everything you make into `~/Documents/ferr-tests/acceptance-0.4.0/work`. Work on copies of fixtures, never the originals.
-4. Fixtures: the scans in `~/Documents/ferr-tests/large-stl`, the review pack in `~/Documents/ferr-tests/ferrender-0.4-review`, and any 0.3.0 design in `~/Documents/ferr-tests/ferrender-0.3.0-release`.
+   Keep the test configuration local: it contains settings, recovery data and the installation cache key. Verify the Synology share is mounted before using `~/Documents/3d`.
+
+3. Save everything you make into `~/Documents/3d/ferrender/testing/acceptance-0.4.0/work`. Work on copies of fixtures, never the originals.
+4. Fixtures: the scans in `~/Documents/3d/meshes/large-imports`, the review pack in `~/Documents/3d/ferrender/testing/0.4-review`, and a preserved 0.3.0 design such as `~/Documents/3d/ferrender/Coffee Holder/Coffee Holder.ferr` (use a copy).
 
 ## Part A: gate (25 minutes)
 
@@ -70,7 +72,7 @@ Expect: the plane is still on that chamfer face.
 ### 4. Meshes
 
 **B6. Import and handle a multi-million-triangle scan.** [5, 21] Import `03-Beethoven.stl` (3.5 M triangles).
-Expect: the toast within a few seconds, with triangles, shells and whether it is watertight. Click the scan: the pick is immediate and on the right body. Now open the turtle from the review pack without quitting.
+Expect: the toast within a few seconds, with triangles, shells and whether it is watertight. Click the scan: the pick is immediate and on the right body. Now open `~/Documents/3d/ferrender/models/sea-turtle/sea-turtle-organic.ferr` without quitting.
 Expect: the turtle replaces Beethoven completely; no stale silhouette.
 
 **B7. Edit a scan.** [6, 7] On Beethoven: Mesh → Decimate to 300 000 (Quadric). Undo, Redo. Mesh → Cut Mesh through the middle on XY, keep one side, cap on. Save, reopen.
