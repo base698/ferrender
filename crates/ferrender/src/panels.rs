@@ -750,6 +750,9 @@ fn dialogs(app: &mut App, ctx: &Context) {
                             });
                             ui.end_row();
                         }
+                        ui.label("Along path").on_hover_text("Which parts of the path to sweep. Drag the handles, or type the fractions: 0 is the start of the path and 1 its end.");
+                        crate::sweep_ui::spans(ui, &mut w.spans, &colors);
+                        ui.end_row();
                         ui.label("Orientation");
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut w.orient, SweepOrient::Follow, "Follow path").on_hover_text("The profile turns with the path");

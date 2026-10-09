@@ -58,7 +58,7 @@ fn ring(path: &[Seg], plane: &Plane, z: f64) -> R<Vec<Edge>> {
 }
 
 mod pipe;
-pub use pipe::{sweep, tag_swept};
+pub use pipe::{sweep, sweep_spans, tag_swept};
 
 /// A profile's outer boundary followed by its holes.
 fn outline(p: &Profile, plane: &Plane, z: f64) -> R<Vec<Edge>> {

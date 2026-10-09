@@ -25,6 +25,8 @@ const SHARPEST: f64 = 150.0 * std::f64::consts::PI / 180.0;
 /// One piece of the path in the feature's frame.
 struct Leg {
     edge: Edge,
+    /// The sketch segment the piece was made from, for cutting part of it out.
+    seg: Seg,
     /// The piece as points from its start to its end.
     pts: Vec<DVec3>,
     /// Unit tangents at the start and the end, pointing along the path.
@@ -51,6 +53,9 @@ struct Setup {
     normal: DVec3,
     /// How far the profiles reach to the right (negative) and left of the path.
     reach: (f64, f64),
+    /// The legs are only part of the path, so the profile need not sit on them:
+    /// it is carried to where they start before it is swept.
+    placed: bool,
 }
 
 /// The angle from `a` to `b` about `n`, positive anticlockwise seen from `n`'s tip.
@@ -86,18 +91,137 @@ fn centre(p: &Profile) -> DVec2 {
     if area.abs() < 1e-12 { p.centroid() } else { first / area }
 }
 
+/// Measures a kernel edge as a piece of the path.
+fn leg(edge: Edge, seg: Seg, id: Id, n: DVec3, measured: Option<f64>) -> R<Leg> {
+    let pts: Vec<DVec3> = edge.approximation_segments(PATH).into_iter().map(g).collect();
+    if pts.len() < 2 { return Err("a piece of the path has no length".to_owned()); }
+    let chords: Vec<DVec3> = pts.windows(2).map(|w| w[1] - w[0]).filter(|d| d.length() > 1e-12).collect();
+    let (Some(first), Some(last)) = (chords.first().copied(), chords.last().copied()) else { return Err("a piece of the path has no length".to_owned()) };
+    let (t0, t1) = (facing(g(edge.start_tangent()), first), facing(g(edge.end_tangent()), last));
+    let turning = turn(n, t0, first) + chords.windows(2).map(|w| turn(n, w[0], w[1])).sum::<f64>() + turn(n, last, t1);
+    Ok(Leg { edge, seg, len: measured.unwrap_or_else(|| chords.iter().map(|d| d.length()).sum()), pts, t0, t1, id, turning })
+}
+
 fn legs(path: &Chain, plane: &Plane) -> R<Vec<Leg>> {
     let n = plane.normal();
     path.segs.iter().zip(&path.ids).map(|(seg, id)| {
         let edge = seg_edge(seg, plane, 0.0).map_err(|e| format!("the path has an edge the kernel rejects: {e}"))?;
-        let pts: Vec<DVec3> = edge.approximation_segments(PATH).into_iter().map(g).collect();
-        if pts.len() < 2 { return Err("a piece of the path has no length".to_owned()); }
-        let chords: Vec<DVec3> = pts.windows(2).map(|w| w[1] - w[0]).filter(|d| d.length() > 1e-12).collect();
-        let (Some(first), Some(last)) = (chords.first().copied(), chords.last().copied()) else { return Err("a piece of the path has no length".to_owned()) };
-        let (t0, t1) = (facing(g(edge.start_tangent()), first), facing(g(edge.end_tangent()), last));
-        let turning = turn(n, t0, first) + chords.windows(2).map(|w| turn(n, w[0], w[1])).sum::<f64>() + turn(n, last, t1);
-        Ok(Leg { edge, len: chords.iter().map(|d| d.length()).sum(), pts, t0, t1, id: *id, turning })
+        leg(edge, *seg, *id, n, seg_length(seg))
     }).collect()
+}
+
+/// The point a fraction `t` of the way along a line, arc or circle, in sketch
+/// coordinates. A circle starts at the sketch's +X side and runs anticlockwise.
+fn along_seg(seg: &Seg, t: f64) -> Option<DVec2> {
+    use std::f64::consts::TAU;
+    match *seg {
+        Seg::Line(a, b) => Some(a.lerp(b, t)),
+        Seg::Circle(centre, r) => Some(centre + DVec2::from_angle(TAU * t) * r),
+        Seg::Arc(a, m, b) => {
+            let (centre, radius, start, sweep) = arc_of(a, m, b)?;
+            Some(centre + DVec2::from_angle(start + sweep * t) * radius)
+        }
+        Seg::Spline(_) => None,
+    }
+}
+
+/// An arc through three points as its centre, radius, start angle and signed sweep.
+fn arc_of(a: DVec2, m: DVec2, b: DVec2) -> Option<(DVec2, f64, f64, f64)> {
+    use std::f64::consts::TAU;
+    let centre = crate::sketch::arc3_center(a, m, b).ok()?;
+    let start = (a - centre).y.atan2((a - centre).x);
+    let end = (b - centre).y.atan2((b - centre).x);
+    let anticlockwise = (m - a).perp_dot(b - m) > 0.0;
+    let mut sweep = (end - start).rem_euclid(TAU);
+    if sweep < 1e-12 { sweep = TAU; }
+    if !anticlockwise { sweep -= TAU; }
+    Some((centre, centre.distance(a), start, sweep))
+}
+
+/// The exact length of a line, arc or circle; a spline is measured along its points instead.
+fn seg_length(seg: &Seg) -> Option<f64> {
+    match *seg {
+        Seg::Line(a, b) => Some(a.distance(b)),
+        Seg::Circle(_, r) => Some(std::f64::consts::TAU * r),
+        Seg::Arc(a, m, b) => arc_of(a, m, b).map(|(_, radius, _, sweep)| radius * sweep.abs()),
+        Seg::Spline(_) => None,
+    }
+}
+
+/// The point at distance `d` along a run of points.
+fn along_points(pts: &[DVec3], d: f64) -> DVec3 {
+    let mut left = d;
+    for w in pts.windows(2) {
+        let step = w[0].distance(w[1]);
+        if left <= step && step > 0.0 { return w[0].lerp(w[1], left / step); }
+        left -= step;
+    }
+    *pts.last().unwrap()
+}
+
+/// The part of a piece between two fractions of its length. Lines, arcs and
+/// circles are cut exactly. A spline is refitted through points taken from the
+/// original curve, so a cut spline is a very close copy rather than the same curve.
+fn part_of(whole: &Leg, plane: &Plane, t0: f64, t1: f64, n: DVec3) -> R<Leg> {
+    let fail = |e: cadrum::Error| format!("the kernel rejects that part of the path: {e}");
+    match (along_seg(&whole.seg, t0), along_seg(&whole.seg, (t0 + t1) / 2.0), along_seg(&whole.seg, t1)) {
+        (Some(a), Some(m), Some(b)) => {
+            let seg = if matches!(whole.seg, Seg::Line(..)) { Seg::Line(a, b) } else { Seg::Arc(a, m, b) };
+            leg(seg_edge(&seg, plane, 0.0).map_err(fail)?, seg, whole.id, n, seg_length(&seg))
+        }
+        _ => {
+            const SAMPLES: usize = 24;
+            let points: Vec<cadrum::DVec3> = (0..=SAMPLES).map(|k| {
+                let d = whole.len * (t0 + (t1 - t0) * k as f64 / SAMPLES as f64);
+                whole.edge.project(c(along_points(&whole.pts, d))).0
+            }).collect();
+            leg(Edge::bspline(points.iter(), cadrum::BSplineEnd::NotAKnot).map_err(fail)?, whole.seg, whole.id, n, None)
+        }
+    }
+}
+
+/// The pieces of a path between two fractions of its whole length.
+fn between(full: Vec<Leg>, plane: &Plane, from: f64, to: f64, n: DVec3) -> R<Vec<Leg>> {
+    let total: f64 = full.iter().map(|l| l.len).sum();
+    let (from, to) = (from * total, to * total);
+    // A cut that lands within this of a joint is taken to be at the joint.
+    let sliver = 1e-6 * total.max(1.0);
+    let mut out = Vec::new();
+    let mut start = 0.0;
+    for whole in full {
+        let end = start + whole.len;
+        let (lo, hi) = (from.max(start), to.min(end));
+        if hi - lo > sliver {
+            let (t0, t1) = ((lo - start) / whole.len, (hi - start) / whole.len);
+            let (t0, t1) = (if lo - start < sliver { 0.0 } else { t0 }, if end - hi < sliver { 1.0 } else { t1 });
+            out.push(if t0 == 0.0 && t1 == 1.0 { whole } else { part_of(&whole, plane, t0, t1, n)? });
+        }
+        start = end;
+    }
+    if out.is_empty() { return Err("that part of the path has no length".into()); }
+    Ok(out)
+}
+
+/// The parts of a path to sweep, as fractions of its length in order. An empty
+/// list is the whole path. Parts that touch or overlap are joined.
+pub fn sweep_spans(spans: &[[f64; 2]]) -> R<Vec<Option<(f64, f64)>>> {
+    if spans.is_empty() { return Ok(vec![None]); }
+    let mut list = Vec::new();
+    for [a, b] in spans {
+        if !a.is_finite() || !b.is_finite() || *a < -1e-9 || *b > 1.0 + 1e-9 { return Err("each part of the path is given as two fractions between 0 and 1".into()); }
+        let (a, b) = (a.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
+        if b - a < 1e-6 { return Err("each part of the path needs its end after its start".into()); }
+        list.push((a, b));
+    }
+    list.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut joined: Vec<(f64, f64)> = Vec::new();
+    for (a, b) in list {
+        match joined.last_mut() {
+            Some(last) if a <= last.1 + 1e-9 => last.1 = last.1.max(b),
+            _ => joined.push((a, b)),
+        }
+    }
+    Ok(joined.into_iter().map(|(a, b)| if a <= 1e-9 && b >= 1.0 - 1e-9 { None } else { Some((a, b)) }).collect())
 }
 
 fn joints(legs: &[Leg], closed: bool, n: DVec3) -> Vec<Option<f64>> {
@@ -112,18 +236,13 @@ fn joints(legs: &[Leg], closed: bool, n: DVec3) -> Vec<Option<f64>> {
 }
 
 impl Setup {
-    fn new(profiles: &[&Profile], plane: &Plane, path: &Chain, path_plane: &Plane, follow: bool) -> R<Setup> {
+    /// `span` limits the sweep to part of the path, as two fractions of its length.
+    /// Where the profile sits, and so how it is carried, is always taken from the whole path.
+    fn new(profiles: &[&Profile], plane: &Plane, path: &Chain, path_plane: &Plane, follow: bool, span: Option<(f64, f64)>) -> R<Setup> {
         if profiles.is_empty() { return Err("no profile is selected".into()); }
         if path.segs.is_empty() { return Err("the path is empty".into()); }
         let n = path_plane.normal();
-        let mut legs = legs(path, path_plane)?;
-        let mut after = joints(&legs, path.closed, n);
-        // A closed path with corners is walked from just after one of them, so every run ends at a corner.
-        if path.closed && follow && let Some(k) = after.iter().position(Option::is_some) {
-            let first = (k + 1) % legs.len();
-            legs.rotate_left(first);
-            after = joints(&legs, true, n);
-        }
+        let legs = legs(path, path_plane)?;
         let normal = plane.normal();
         let centroid = plane.to_world(centre(profiles[0]));
         // Where the profile's plane meets the path, nearest the profile; failing that, the nearest point of the path.
@@ -149,7 +268,18 @@ impl Setup {
         }
         let left = n.cross(tangent).normalize_or_zero();
         let reach = profiles.iter().flat_map(|p| p.outer.iter()).map(|q| (plane.to_world(*q) - at).dot(left)).fold((f64::MAX, f64::MIN), |(lo, hi), d| (lo.min(d), hi.max(d)));
-        let setup = Setup { legs, after, closed: path.closed, n, follow, at, tangent, normal, reach };
+        let (mut legs, closed, placed) = match span {
+            Some((from, to)) => (between(legs, path_plane, from, to, n)?, false, true),
+            None => (legs, path.closed, false),
+        };
+        let mut after = joints(&legs, closed, n);
+        // A closed path with corners is walked from just after one of them, so every run ends at a corner.
+        if closed && follow && let Some(k) = after.iter().position(Option::is_some) {
+            let first = (k + 1) % legs.len();
+            legs.rotate_left(first);
+            after = joints(&legs, true, n);
+        }
+        let setup = Setup { legs, after, closed, n, follow, at, tangent, normal, reach, placed };
         setup.check()?;
         Ok(setup)
     }
@@ -259,10 +389,14 @@ fn pipe(s: &Setup, boundary: &[Seg], plane: &Plane) -> R<Lumps> {
     let fail = |e: cadrum::Error| format!("the kernel could not sweep the profile: {e}");
     let solid = |l: Solid| if l.volume() > 0.0 { Ok(l) } else { Err("the kernel returned an empty sweep".to_owned()) };
     if !s.follow {
+        // Part of a path: the profile slides, unturned, to where that part starts.
+        let base: Vec<Edge> = if s.placed { base.into_iter().map(|e| e.translate(c(s.start().0 - s.at))).collect() } else { base };
         return Ok(vec![solid(Solid::sweep(&base, s.legs.iter().map(|l| &l.edge), ProfileOrient::Fixed).map_err(fail)?)?]);
     }
     let up = ProfileOrient::Up(c(s.n));
-    if s.after.iter().all(Option::is_none) {
+    // On the whole path the kernel finds the profile's place itself. On part of
+    // one, each run below is given the profile where the run begins.
+    if !s.placed && s.after.iter().all(Option::is_none) {
         return Ok(vec![solid(Solid::sweep(&base, s.legs.iter().map(|l| &l.edge), up).map_err(fail)?)?]);
     }
     let reach = s.reach.0.abs().max(s.reach.1.abs());
@@ -297,18 +431,25 @@ fn pipe(s: &Setup, boundary: &[Seg], plane: &Plane) -> R<Lumps> {
 /// Carries profiles along a path. `path` is in `path_plane`'s coordinates and the
 /// profiles in `plane`'s. With `follow` the profile turns with the path, staying
 /// square to it as it was where they meet; without, it keeps its orientation.
-pub fn sweep(profiles: &[&Profile], plane: &Plane, path: &Chain, path_plane: &Plane, follow: bool) -> R<Lumps> {
-    let s = Setup::new(profiles, plane, path, path_plane, follow)?;
+///
+/// `spans` limits the sweep to parts of the path, each two fractions of its
+/// length (`[[0.1, 0.3], [0.6, 0.7]]`); empty sweeps all of it. Each part is the
+/// piece of the whole sweep that lies there: the profile is where it would be
+/// had it travelled from where it was drawn. Separate parts are separate lumps.
+pub fn sweep(profiles: &[&Profile], plane: &Plane, path: &Chain, path_plane: &Plane, follow: bool, spans: &[[f64; 2]]) -> R<Lumps> {
     let mut parts = Vec::new();
     let mut expected = 0.0;
-    for p in profiles {
-        let mut body = pipe(&s, &p.path, plane)?;
-        for hole in &p.hole_paths {
-            let tool = pipe(&s, hole, plane)?;
-            body = boolean_impl(&body, &tool, Bool::Subtract, false)?;
+    for span in sweep_spans(spans)? {
+        let s = Setup::new(profiles, plane, path, path_plane, follow, span)?;
+        for p in profiles {
+            let mut body = pipe(&s, &p.path, plane)?;
+            for hole in &p.hole_paths {
+                let tool = pipe(&s, hole, plane)?;
+                body = boolean_impl(&body, &tool, Bool::Subtract, false)?;
+            }
+            parts.extend(body);
+            expected += s.expected(p, plane);
         }
-        parts.extend(body);
-        expected += s.expected(p, plane);
     }
     let out = fuse(parts)?;
     let v = volume(&out);
@@ -325,51 +466,77 @@ pub fn sweep(profiles: &[&Profile], plane: &Plane, path: &Chain, path_plane: &Pl
 
 /// Tags for the result of [`sweep`] with the same arguments. A side face is named
 /// by the profile entity and the path entity that made it; along a path of one
-/// piece that is the plain `Swept` tag an extrude gives.
-pub fn tag_swept(lumps: &[Solid], profiles: &[&Profile], plane: &Plane, path: &Chain, path_plane: &Plane, follow: bool, feature: Id) -> Tags {
+/// piece that is the plain `Swept` tag an extrude gives. When only parts of the
+/// path are swept, each name also carries the number of its part, counted from
+/// the start of the path, so two parts on one path entity stay distinct.
+#[allow(clippy::too_many_arguments)]
+pub fn tag_swept(lumps: &[Solid], profiles: &[&Profile], plane: &Plane, path: &Chain, path_plane: &Plane, follow: bool, spans: &[[f64; 2]], feature: Id) -> Tags {
     let plain = || lumps.iter().map(|s| s.iter_face().map(|f| Some(surface_tag(f, feature))).collect()).collect();
-    let Ok(s) = Setup::new(profiles, plane, path, path_plane, follow) else { return plain() };
+    let Ok(spans) = sweep_spans(spans) else { return plain() };
+    let partial = spans.iter().any(Option::is_some);
     // A point on each side face: the middle of a profile segment, carried to the middle of a path piece.
-    let single = s.legs.len() == 1;
-    let mut probes: Vec<(DVec3, Id, Id)> = Vec::new();
-    for leg in &s.legs {
-        let k = leg.pts.len() / 2;
-        let (guess, along) = if leg.pts.len() == 2 { ((leg.pts[0] + leg.pts[1]) / 2.0, leg.pts[1] - leg.pts[0]) } else { (leg.pts[k], leg.pts[k + 1 - usize::from(k + 1 == leg.pts.len())] - leg.pts[k - 1]) };
-        let (mid, tangent) = leg.edge.project(c(guess));
-        let (mid, tangent) = (g(mid), facing(g(tangent), along));
-        for (seg, entity) in segments(profiles) {
-            if entity != 0 { probes.push((s.carry(probe(seg, plane, 0.0), mid, tangent), entity, leg.id)); }
+    // With it, the profile entity, the path entity and the part of the path.
+    let mut probes: Vec<(DVec3, Id, Id, usize)> = Vec::new();
+    // The flat ends of each open part: which end, a point on each profile's outline there, the
+    // normal and the part. The outline is used because a profile's centre can lie in a hole.
+    let mut caps: Vec<(bool, Vec<DVec3>, DVec3, usize)> = Vec::new();
+    let mut single = false;
+    let outline: Vec<DVec3> = profiles.iter().filter_map(|p| p.path.first()).map(|seg| probe(seg, plane, 0.0)).collect();
+    if outline.is_empty() { return plain(); }
+    for (part, span) in spans.into_iter().enumerate() {
+        let Ok(s) = Setup::new(profiles, plane, path, path_plane, follow, span) else { return plain() };
+        single = !partial && s.legs.len() == 1;
+        for leg in &s.legs {
+            let k = leg.pts.len() / 2;
+            let (guess, along) = if leg.pts.len() == 2 { ((leg.pts[0] + leg.pts[1]) / 2.0, leg.pts[1] - leg.pts[0]) } else { (leg.pts[k], leg.pts[k + 1 - usize::from(k + 1 == leg.pts.len())] - leg.pts[k - 1]) };
+            let (mid, tangent) = leg.edge.project(c(guess));
+            let (mid, tangent) = (g(mid), facing(g(tangent), along));
+            for (seg, entity) in segments(profiles) {
+                if entity != 0 { probes.push((s.carry(probe(seg, plane, 0.0), mid, tangent), entity, leg.id, part)); }
+            }
+        }
+        if !s.closed {
+            for (end, (to, along)) in [(false, s.start()), (true, s.end())] {
+                caps.push((end, outline.iter().map(|p| s.carry(*p, to, along)).collect(), s.rotation(along) * s.normal, part));
+            }
         }
     }
-    // The flat ends of an open sweep.
-    let on_profile = plane.to_world(centre(profiles[0]));
-    let caps: Vec<(bool, DVec3, DVec3)> = if s.closed { Vec::new() } else {
-        [(false, s.start()), (true, s.end())].into_iter().map(|(end, (to, along))| (end, s.carry(on_profile, to, along), s.rotation(along) * s.normal)).collect()
-    };
+    // Per face: the profile entities that made it, and for a cap which part it closes.
     let mut sources: Vec<Vec<Vec<Id>>> = Vec::new();
+    let mut closes: Vec<Vec<Option<usize>>> = Vec::new();
     let mut tags: Tags = lumps.iter().map(|lump| {
-        let mut made = Vec::new();
+        let (mut made, mut ends) = (Vec::new(), Vec::new());
         let row = lump.iter_face().map(|f| {
             let kind = kind_of(f);
             if kind == Kind::Plane && let Some(surface) = f.surface() {
-                for (end, point, normal) in &caps {
-                    if g(surface.axis_z).dot(*normal).abs() > 1.0 - 1e-8 && (g(surface.origin) - *point).dot(*normal).abs() < 1e-6 {
-                        made.push(Vec::new());
-                        return Some(Tag::new(Origin::Cap { feature, end: *end }, kind));
-                    }
+                // Two parts can end on the same plane (a part that stops and one that starts on one straight
+                // piece do not, but parts of a ring can); the cap belongs to the end whose point lies on the face.
+                let on_face = |point: &DVec3| g(f.project(c(*point)).0).distance(*point) < 1e-5;
+                let flat = |normal: &DVec3, point: &DVec3| g(surface.axis_z).dot(*normal).abs() > 1.0 - 1e-8 && (g(surface.origin) - *point).dot(*normal).abs() < 1e-6;
+                if let Some((end, _, _, part)) = caps.iter().find(|(_, points, normal, _)| flat(normal, &points[0]) && (!partial || points.iter().any(on_face))) {
+                    made.push(Vec::new());
+                    ends.push(Some(*part));
+                    return Some(Tag::new(Origin::Cap { feature, end: *end }, kind));
                 }
             }
-            let hits: Vec<&(DVec3, Id, Id)> = probes.iter().filter(|(p, ..)| g(f.project(c(*p)).0).distance(*p) < 1e-5).collect();
-            let mut source: Vec<Tag> = hits.iter().map(|(_, entity, leg)| Tag::new(if single { Origin::Swept { feature, entity: *entity } } else { Origin::Semantic { feature, role: format!("sweep:{entity}:{leg}") } }, kind)).collect();
+            let hits: Vec<&(DVec3, Id, Id, usize)> = probes.iter().filter(|(p, ..)| g(f.project(c(*p)).0).distance(*p) < 1e-5).collect();
+            let mut source: Vec<Tag> = hits.iter().map(|(_, entity, leg, part)| {
+                let origin = if single { Origin::Swept { feature, entity: *entity } }
+                    else if partial { Origin::Semantic { feature, role: format!("sweep:{entity}:{leg}:{part}") } }
+                    else { Origin::Semantic { feature, role: format!("sweep:{entity}:{leg}") } };
+                Tag::new(origin, kind)
+            }).collect();
             source.sort();
             source.dedup();
-            let mut entities: Vec<Id> = hits.iter().map(|(_, entity, _)| *entity).collect();
+            let mut entities: Vec<Id> = hits.iter().map(|(_, entity, ..)| *entity).collect();
             entities.sort();
             entities.dedup();
             made.push(entities);
+            ends.push(None);
             Some(match source.len() { 0 => surface_tag(f, feature), 1 => source.pop().unwrap(), _ => Tag::new(Origin::Merged { sources: source }, kind) })
         }).collect();
         sources.push(made);
+        closes.push(ends);
         row
     }).collect();
     // A cap is named by the profile entities around it, so two profiles' caps differ.
@@ -381,7 +548,15 @@ pub fn tag_swept(lumps: &[Solid], profiles: &[&Profile], plane: &Plane, path: &C
             let mut entities: Vec<Id> = f.iter_edge().flat_map(|e| edges.get(&edge_key(e)).into_iter().flatten()).filter(|&&i| i != fi).flat_map(|&i| sources[li][i].iter().copied()).collect();
             entities.sort();
             entities.dedup();
-            if !entities.is_empty() { tags[li][fi] = Some(Tag::new(Origin::ProfileCap { feature, end, entities }, Kind::Plane)); }
+            if entities.is_empty() { continue; }
+            tags[li][fi] = Some(match closes[li][fi] {
+                // Several parts each have a start and an end cap around the same entities: the part tells them apart.
+                Some(part) if partial => {
+                    let around: Vec<String> = entities.iter().map(|e| e.to_string()).collect();
+                    Tag::new(Origin::Semantic { feature, role: format!("sweep:cap:{part}:{}:{}", if end { "end" } else { "start" }, around.join(",")) }, Kind::Plane)
+                }
+                _ => Tag::new(Origin::ProfileCap { feature, end, entities }, Kind::Plane),
+            });
         }
     }
     tags

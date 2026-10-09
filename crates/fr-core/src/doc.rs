@@ -244,6 +244,11 @@ pub struct Sweep {
     /// Empty means every entity of the sketch that is not construction geometry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path: Vec<Id>,
+    /// The parts of the path to sweep, each a start and an end as fractions of the
+    /// path's length from 0 to 1, for example `[[0.1, 0.3], [0.6, 0.7]]`.
+    /// Empty means the whole path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<[f64; 2]>,
     #[serde(default)]
     pub orient: SweepOrient,
     #[serde(default)]
@@ -1274,8 +1279,8 @@ impl Document {
                 let picked = Self::pick(&all, &w.profiles)?;
                 let path = profile::chain(along, &w.path)?;
                 let follow = w.orient == SweepOrient::Follow;
-                let l = exact::sweep(&picked, &plane, &path, &path_plane, follow)?;
-                let t = exact::tag_swept(&l, &picked, &plane, &path, &path_plane, follow, f.id);
+                let l = exact::sweep(&picked, &plane, &path, &path_plane, follow, &w.spans)?;
+                let t = exact::tag_swept(&l, &picked, &plane, &path, &path_plane, follow, &w.spans, f.id);
                 Ok(Some((Shape::Exact(l, t), w.op)))
             }
             FeatureKind::Text(t) if t.op == Op::New => {
