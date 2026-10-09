@@ -26,7 +26,11 @@ def main():
     binary = ROOT/('dist/Ferrender.app/Contents/MacOS/ferrender' if mac else 'target/release/ferrender')
     info = subprocess.check_output([str(binary), '--version'], text=True)
     target = {'macos-arm64': 'aarch64-apple-darwin', 'macos-x86_64': 'x86_64-apple-darwin', 'linux-x86_64': 'x86_64-unknown-linux-gnu'}[args.platform]
-    for expected in [f'Ferrender {version}', f'Commit: {commit}', 'Source: Clean checkout', 'Build: release', f'Platform: {target}']:
+    # The executable records at compile time which OpenCascade directory cadrum
+    # linked; a build that bypassed scripts/prepare-occt.py says "unverified".
+    pins = json.loads((ROOT/'scripts/occt-pins.json').read_text())
+    occt = f"OpenCascade: verified {pins['tag']} sha256:{pins['assets'][target]['sha256']}"
+    for expected in [f'Ferrender {version}', f'Commit: {commit}', 'Source: Clean checkout', 'Build: release', f'Platform: {target}', occt]:
         if expected not in info:
             raise SystemExit(f'Build metadata mismatch: expected {expected!r}; got {info!r}')
     # CI and the macOS bundler prepare this exact native dependency before

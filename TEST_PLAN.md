@@ -5,7 +5,7 @@ engine and that the screens draw; they do not cover real mouse, trackpad or keyb
 the live Claude API, Linux, or opening our files in other programs. This plan is ordered so
 the things no test has ever exercised come first.
 
-Run `cargo run --release -p ferrender`. Note the step number and what you saw for anything
+Run `export OCCT_ROOT="$(python3 scripts/prepare-occt.py)"`, then `cargo run --release -p ferrender`. Note the step number and what you saw for anything
 that fails; a screenshot plus the saved `.ferr` is enough to reproduce most things.
 
 ## 1. Never checked by a person (highest value)
@@ -19,7 +19,7 @@ that fails; a screenshot plus the saved `.ferr` is enough to reproduce most thin
 - [ ] **STL in a slicer**: export the same part in mm, cm and in. In the slicer the mm file should be the right size; the in file should be 25.4x smaller when read as mm. Slicer reports no errors or repairs.
 - [ ] **Assistant with a real API key**: put a key in `~/.config/ferrender/config.toml`, ask for "a 20 mm cube with a 5 mm hole through the top". This path has never been run against the live API.
 - [ ] **MCP from Claude Code**: `claude mcp add ferrender -- <path>/target/release/ferrender mcp`, with the app open, ask for the small screw. Watch the app update live.
-- [ ] **Linux build**: `cargo build --release` on a Linux machine (needs a C++ compiler; first build downloads OpenCascade). Viewport renders, file dialogs open.
+- [ ] **Linux build**: `export OCCT_ROOT="$(python3 scripts/prepare-occt.py)"` then `cargo build --release` on a Linux machine (needs a C++ compiler; the helper downloads and verifies OpenCascade). Viewport renders, file dialogs open.
 
 ## 2. Sketching
 

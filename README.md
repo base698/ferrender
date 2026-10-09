@@ -238,13 +238,18 @@ Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System fo
 You need a [Rust toolchain](https://rustup.rs) and a C++ compiler (Xcode's clang, or g++).
 
 ```sh
+export OCCT_ROOT="$(python3 scripts/prepare-occt.py)"   # verified OpenCascade, once per shell
 cargo run --release -p ferrender                # empty design
 cargo run --release -p ferrender -- part.ferr   # or an .stl to import
 ./scripts/bundle-macos.sh                       # dist/Ferrender.app
 ```
 
-The solid kernel is OpenCascade. There is no cmake step: the `cadrum` binding's build script downloads prebuilt
-OpenCascade 8 static libraries the first time (about 33 MB, from that project's GitHub releases, not checksummed).
+The solid kernel is OpenCascade. There is no cmake step: `scripts/prepare-occt.py` (Python 3.12+) downloads the
+`cadrum` binding's prebuilt OpenCascade 8 static libraries the first time (about 33 MB, from that project's GitHub
+releases) and checks them against the SHA256 pinned in `scripts/occt-pins.json`. Release builds refuse to compile
+without it, and Help → About and `--version` show the result on the `OpenCascade:` line. Debug builds, and release
+builds with `FERRENDER_ALLOW_UNVERIFIED_OCCT=1` (needed on platforms without a pinned archive), may use cadrum's
+own unchecked download; they are marked `unverified` and cannot be packaged.
 
 **Linux** needs the usual winit and wgpu system packages (X11 or Wayland development libraries and a Vulkan or GL
 driver). CI builds and tests on Ubuntu 24.04 with software Vulkan; a native Linux desktop session has not been manually checked.

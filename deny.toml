@@ -1,0 +1,20 @@
+# RustSec and crate-source policy for the locked dependency graph, on every
+# release target. CI runs: cargo deny --locked check advisories sources
+[graph]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+# Each exception names why the crate is still present. An entry that no longer
+# matches the lockfile is reported, so remove it once the dependency is gone.
+ignore = [
+    { id = "RUSTSEC-2026-0249", reason = "smartstring is a required dependency of rhai 1.26.1, the newest release; informational unmaintained notice with no known vulnerability. Remove when Rhai migrates." },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser no longer reads Ferrender's fonts or designs. It remains on Linux only, through winit's Wayland title-bar renderer (sctk-adwaita, ab_glyph), which reads system interface fonts." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
