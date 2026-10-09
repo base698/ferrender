@@ -121,7 +121,7 @@ fn run(inputs) {
 
 Expect: exits 0, 0 and 1. The check prints the feature and body counts. The third prints "the run exceeded its time limit of 2 s" after about two seconds and `slow.ferr` is not written. A script that only loops, with no modeling calls, stops sooner with "Too many operations": that is the separate operation limit, not a failure of the time limit.
 
-## Part C: Sweep (15 minutes)
+## Part C: Sweep (20 minutes)
 
 Sweep was added after the plan was written, so it has no plan target. These are its release checks.
 
@@ -139,6 +139,9 @@ Expect: three different messages, each naming the cause (fixed orientation, bend
 
 **C5. STEP carries true surfaces.** [S5] Export STEP from C3 and open it in another CAD program if one is installed.
 Expect: the bend is one smooth face, not facets.
+
+**C6. Parts of a path.** [S6] Reopen Sweep on the C1 sketches. In **Along path** drag the right handle to about the middle, then type `0.10` and `0.30`, press **Add part** and set the new part to `0.60` and `0.70`.
+Expect: the preview follows the handle while you drag, and what remains never shifts. With the two parts set there are two separate pieces in one body, 14 mm and 7 mm long, one on each leg, total 756 mm³ (36 × 21). The path is drawn faint with the two covered stretches bold. Handles will not cross. **Whole path** brings back the full bar.
 
 ## Part D: what only a person can judge (25 minutes)
 
@@ -169,7 +172,7 @@ Record: the result, or "not tested". Only automated builds and tests have run on
 | Build commit from A1 | | |
 | A1 to A7 | | |
 | B1 to B15 | | |
-| C1 to C5 | | |
+| C1 to C6 | | |
 | D1 to D6 | | |
 
 **Go** needs every Part A step to pass, no Fail in Parts B and C, and a decision written down for D1, D2 and D5. After that, follow [RELEASING.md](../RELEASING.md).
