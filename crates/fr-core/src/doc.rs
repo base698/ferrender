@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use glam::{DAffine3, DVec2, DVec3};
 use serde::{Deserialize, Serialize};
 
-use crate::csg::{self, Bool};
+use crate::csg::Bool;
 use crate::exact::{self, Lumps, Place};
 use crate::expr::{self, Kind, Quantity, Value};
 use crate::mesh::{self, Mesh};
@@ -537,6 +537,8 @@ pub enum MeshOpKind {
     Mirror { plane: PlaneRef, #[serde(default)] weld: bool },
     Offset { distance: Value, #[serde(default, skip_serializing_if = "Option::is_none")] direction: Option<DVec3> },
     ExtrudeRegion { distance: Value, #[serde(default, skip_serializing_if = "Option::is_none")] direction: Option<DVec3> },
+    /// One brush stroke (see `meshops::sculpt`).
+    Sculpt { brush: crate::meshops::Brush, at: DVec3, radius: Value, strength: Value },
 }
 
 fn yes() -> bool { true }
@@ -552,6 +554,7 @@ impl MeshOpKind {
             MeshOpKind::Mirror { .. } => "mesh_mirror",
             MeshOpKind::Offset { .. } => "mesh_offset",
             MeshOpKind::ExtrudeRegion { .. } => "mesh_extrude_region",
+            MeshOpKind::Sculpt { .. } => "mesh_sculpt",
         }
     }
 }
@@ -785,7 +788,7 @@ impl Body {
         }
         let tool = exact::tessellate(tool)?.0;
         let mut tool = tool; tool.face_ids.clear();
-        let made = csg::boolean(&self.bare(), &tool, Bool::Subtract)?;
+        let made = crate::meshops::boolean(&self.bare(), &tool, Bool::Subtract)?;
         self.set_mesh(made);
         Ok(())
     }
@@ -1231,6 +1234,7 @@ impl Document {
                 }
                 FeatureKind::MeshOp(m) => match &mut m.op {
                     MeshOpKind::Offset { distance, .. } | MeshOpKind::ExtrudeRegion { distance, .. } => set(distance, Kind::Length),
+                    MeshOpKind::Sculpt { radius, strength, .. } => { set(radius, Kind::Length); set(strength, Kind::Length); }
                     _ => {}
                 },
                 FeatureKind::Relief(r) => { for v in [&mut r.width, &mut r.depth, &mut r.base] { set(v, Kind::Length); } }
@@ -1398,6 +1402,7 @@ impl Document {
                     MeshOpKind::Mirror { plane, weld } => { let (plane, _) = self.plane_reference(plane, context, component)?; mo::mirror(&src, plane, *weld)? }
                     MeshOpKind::Offset { distance, direction } => mo::offset(&src, distance.v, *direction)?,
                     MeshOpKind::ExtrudeRegion { distance, direction } => mo::extrude_region(&src, mask.as_deref().ok_or("extruding a region needs a \"region\"")?, distance.v, *direction)?,
+                    MeshOpKind::Sculpt { brush, at, radius, strength } => mo::sculpt(&src, *brush, *at, radius.v, strength.v)?,
                     MeshOpKind::Cut { plane, keep, cap } => {
                         let (plane, _) = self.plane_reference(plane, context, component)?;
                         let mut pieces = mo::cut(&src, plane, *keep, *cap)?.into_iter();
@@ -1452,7 +1457,7 @@ impl Document {
                 } else {
                     let mut result = bodies[ti].bare();
                     for t in &placed_tools {
-                        result = csg::boolean(&result, &t.bare(), op)?;
+                        result = crate::meshops::boolean(&result, &t.bare(), op)?;
                     }
                     bodies[ti].set_mesh(result);
                 }
@@ -1667,7 +1672,7 @@ impl Document {
                     None => {
                         let mut m = tool.mesh()?;
                         for i in &hits {
-                            m = csg::boolean(&bodies[*i].bare(), &m, Bool::Union)?;
+                            m = crate::meshops::boolean(&bodies[*i].bare(), &m, Bool::Union)?;
                         }
                         bodies[hits[0]].set_mesh(m);
                     }
@@ -1697,7 +1702,7 @@ impl Document {
                     None => {
                         let m = tool.mesh()?;
                         for i in hits {
-                            let made = csg::boolean(&bodies[i].bare(), &m, how)?;
+                            let made = crate::meshops::boolean(&bodies[i].bare(), &m, how)?;
                             bodies[i].set_mesh(made);
                         }
                     }

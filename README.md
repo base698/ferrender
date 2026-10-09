@@ -515,8 +515,12 @@ shrink), Subdivide (Loop or midpoint), Cut by a plane (capped, one side or
 both), Mirror, and Offset / Thicken, which turns an open surface such as a
 relief into a closed printable solid or hollows a closed one to a wall. Relief
 from Image builds a height field from a photo or a depth map, bright pixels
-high, on a slab; inverted and thin it is a lithophane. Applying a mesh
-operation to an exact body makes it a mesh. Over the command API the same
+high, on a slab; inverted and thin it is a lithophane. Sculpt opens a brush
+(pull, push, inflate, smooth, flatten) and every click on the body adds one
+stroke to the timeline. Applying a mesh operation to an exact body makes it
+a mesh. Booleans between meshes split only the triangles near the other
+surface, so cutting a small tool out of a scan of millions of triangles takes
+a second or two. Over the command API the same
 operations take regions (a sphere, box, plane side, normal cone or connected
 shell) and `mesh_measure` reports shells, open edges, watertightness, volume
 and wall thickness. Export STL asks whether to write millimetres, centimetres or inches;

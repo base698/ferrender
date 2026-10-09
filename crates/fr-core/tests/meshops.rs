@@ -256,3 +256,70 @@ fn repair_fills_small_holes() {
     let m = measure(&mut s, body);
     assert_eq!(m["watertight"], true, "{m}");
 }
+
+#[test]
+fn booleans_between_meshes_cull_the_far_triangles() {
+    use fr_core::csg::Bool;
+    use fr_core::meshops::boolean;
+    let (s, body) = sphere_session(20_000);
+    let big = s.built.body(body).unwrap().mesh.clone();
+    // A small sphere (radius 6) sitting at the big one's top pole.
+    let (t, tool_id) = sphere_session(2_000);
+    let mut tool = t.built.body(tool_id).unwrap().mesh.clone();
+    tool.map(|p| p * 0.3 + DVec3::new(0.0, 0.0, 20.0));
+    let small = 4.0 / 3.0 * std::f64::consts::PI * 6.0f64.powi(3);
+    let t0 = std::time::Instant::now();
+    let cut = boolean(&big, &tool, Bool::Subtract).unwrap();
+    let took = t0.elapsed().as_secs_f64();
+    assert_eq!(cut.open_edges(), 0, "the cut is watertight");
+    let v = cut.volume();
+    assert!(v < SPHERE_VOLUME - small * 0.35 && v > SPHERE_VOLUME - small * 0.65, "about half the small sphere is removed: {v} of {SPHERE_VOLUME}");
+    let joined = boolean(&big, &tool, Bool::Union).unwrap();
+    assert_eq!(joined.open_edges(), 0);
+    assert!(joined.volume() > SPHERE_VOLUME + small * 0.35 && joined.volume() < SPHERE_VOLUME + small * 0.65, "{}", joined.volume());
+    let common = boolean(&big, &tool, Bool::Intersect).unwrap();
+    assert_eq!(common.open_edges(), 0);
+    assert!(common.volume() > small * 0.35 && common.volume() < small * 0.65, "{}", common.volume());
+    // Disjoint meshes: a union is both, a cut is the first, an intersection is nothing.
+    let mut far = tool.clone();
+    far.map(|p| p + DVec3::new(100.0, 0.0, 0.0));
+    let both = boolean(&big, &far, Bool::Union).unwrap();
+    assert!((both.volume() - SPHERE_VOLUME - small).abs() / SPHERE_VOLUME < 0.02);
+    assert!((boolean(&big, &far, Bool::Subtract).unwrap().volume() - SPHERE_VOLUME).abs() / SPHERE_VOLUME < 0.01);
+    assert!(boolean(&big, &far, Bool::Intersect).unwrap().is_empty());
+    println!("20 k-triangle sphere cut by a 2 k tool: {took:.3} s");
+    // And through the document: combine as before.
+    let mut s = s;
+    run(&mut s, json!({"op": "primitive", "type": "box", "width": 10, "depth": 10, "height": 10, "position": [15, 0, 0]}));
+    let box_id = last(&s);
+    run(&mut s, json!({"op": "combine", "target": body, "tools": [box_id], "operation": "cut"}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    let m = measure(&mut s, body);
+    assert_eq!(m["watertight"], true, "{m}");
+    assert!(m["volume"].as_f64().unwrap() < SPHERE_VOLUME - 100.0);
+}
+
+#[test]
+fn sculpt_strokes_are_features() {
+    let (mut s, body) = sphere_session(5_000);
+    run(&mut s, json!({"op": "mesh_sculpt", "body": body, "brush": "pull", "at": [0, 0, 20], "radius": 8, "strength": 3}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    let m = measure(&mut s, body);
+    assert!((m["max"][2].as_f64().unwrap() - 23.0).abs() < 0.2, "the pole is pulled up 3 mm: {}", m["max"]);
+    assert_eq!(m["watertight"], true);
+    // Flattening around (20,0,0) pulls the nearby surface onto the tangent plane x = 20.
+    let spread = |s: &Session| { let b = s.built.body(body).unwrap(); let near: Vec<f64> = b.mesh.positions().iter().filter(|p| p.distance(DVec3::new(20.0, 0.0, 0.0)) < 4.0).map(|p| (p.x - 20.0).abs()).collect(); near.iter().sum::<f64>() / near.len() as f64 };
+    let before = spread(&s);
+    run(&mut s, json!({"op": "mesh_sculpt", "body": body, "brush": "flatten", "at": [20, 0, 0], "radius": 6, "strength": 1}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    assert!(spread(&s) < before * 0.7, "the side is flatter: {} -> {}", before, spread(&s));
+    run(&mut s, json!({"op": "mesh_sculpt", "body": body, "brush": "smooth", "at": [0, 20, 0], "radius": 6, "strength": 0.5}));
+    run(&mut s, json!({"op": "mesh_sculpt", "body": body, "brush": "inflate", "at": [0, 0, -20], "radius": 6, "strength": 1}));
+    assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
+    let kinds: Vec<&str> = s.doc.features.iter().map(|f| f.type_name()).collect();
+    assert_eq!(kinds, ["import", "mesh_sculpt", "mesh_sculpt", "mesh_sculpt", "mesh_sculpt"]);
+    let m = measure(&mut s, body);
+    assert!(m["min"][2].as_f64().unwrap() < -20.5, "inflating the bottom pushes it out: {}", m["min"]);
+    let bad = execute(&mut s, &json!({"op": "mesh_sculpt", "body": body, "brush": "pull", "at": [0, 0, 20], "radius": 0.001, "strength": 1}), None);
+    assert!(bad.is_err_and(|e| e.contains("no vertex lies within the brush")), "a brush smaller than the mesh's triangles is refused");
+}

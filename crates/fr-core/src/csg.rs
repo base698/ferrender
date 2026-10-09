@@ -141,6 +141,20 @@ impl Node {
         }
     }
 
+    /// Splits `polys` by every plane of this tree and keeps all the pieces: no piece crosses a tree polygon's plane afterwards.
+    fn fragment(&self, polys: Vec<Poly>, out: &mut Vec<Poly>) {
+        let Some(plane) = self.plane else { out.extend(polys); return };
+        let (mut f, mut b) = (Vec::new(), Vec::new());
+        let (mut cf, mut cb) = (Vec::new(), Vec::new());
+        for p in polys {
+            split(plane, p, &mut cf, &mut cb, &mut f, &mut b);
+        }
+        f.append(&mut cf);
+        b.append(&mut cb);
+        match &self.front { Some(n) => n.fragment(f, out), None => out.extend(f) }
+        match &self.back { Some(n) => n.fragment(b, out), None => out.extend(b) }
+    }
+
     fn all(&self, out: &mut Vec<Poly>) {
         out.extend(self.polys.iter().cloned());
         if let Some(f) = &self.front {
@@ -182,6 +196,25 @@ pub enum Bool {
 
 /// Booleans above this many triangles take long enough to be worth refusing.
 pub const MAX_TRIS: usize = 400_000;
+
+/// The triangles of `polys` cut along every plane of `cutter`'s triangles, as
+/// triangles: afterwards no piece crosses `cutter`'s surface, so each piece is
+/// wholly inside or outside it. The pieces are returned with `polys`' winding.
+pub fn fragments(cutter: &Mesh, polys: &Mesh) -> Vec<[DVec3; 3]> {
+    let tree = tree(cutter);
+    let mut out = Vec::new();
+    tree.fragment(polys.tris().filter_map(|t| Poly::new(t.to_vec())).collect(), &mut out);
+    let mut tris = Vec::with_capacity(out.len());
+    for p in out {
+        for i in 1..p.v.len() - 1 {
+            let t = [p.v[0], p.v[i], p.v[i + 1]];
+            if (t[1] - t[0]).cross(t[2] - t[0]).length_squared() > 1e-20 {
+                tris.push(t);
+            }
+        }
+    }
+    tris
+}
 
 pub fn boolean(a: &Mesh, b: &Mesh, op: Bool) -> Result<Mesh, String> {
     if a.len() + b.len() > MAX_TRIS {

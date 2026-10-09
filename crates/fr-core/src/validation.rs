@@ -175,6 +175,10 @@ pub fn document(d: &Document) -> Result<(), String> {
                         expression(&distance.expr)?;
                         if !distance.v.is_finite() || direction.is_some_and(|d| !d.is_finite()) { return Err("the mesh offset needs finite values".into()); }
                     }
+                    MeshOpKind::Sculpt { at, radius, strength, .. } => {
+                        expression(&radius.expr)?; expression(&strength.expr)?;
+                        if !at.is_finite() || !radius.v.is_finite() || radius.v <= 0.0 || !strength.v.is_finite() { return Err("a sculpt stroke needs a finite point, a positive radius and a finite strength".into()); }
+                    }
                 }
                 if let Some(r) = &m.region {
                     use crate::meshops::RegionSpec;

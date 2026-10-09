@@ -1848,6 +1848,11 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 if clicked.is_some() && let Err(e) = app.text_on_face(face) { app.toast(e); }
             }
         }
+        Dialog::Sculpt(_) => {
+            if let Some(pos) = clicked && let Some((id, at, _)) = pick_body(app, &app.session.built, pos) {
+                app.sculpt_at(id, at);
+            }
+        }
         Dialog::Thread(mut t) => {
             if let Some(at) = t.face {
                 painter.circle_stroke(to_screen(app, app.body_point_world(t.body, at)), 5.0, Stroke::new(2.0, colors.selected));
@@ -1996,6 +2001,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Shell(_), _) => "Click the faces to leave open.",
         (Dialog::Hole(_), _) => "Click a flat face to put a hole there; click a hole to take it away. Sketch points snap.",
         (Dialog::Thread(_), _) => "Click the round side of a rod, or the inside of a hole.",
+        (Dialog::Sculpt(_), _) => "Click the body to add a brush stroke.",
         (Dialog::Text(_), _) => "Click a flat face to place text, or choose XY, XZ or YZ. The cross marks its baseline origin.",
         (Dialog::Measure(_), _) => "Click two things to measure between: corners and sketch points, edges and sketch lines, or faces.",
         (Dialog::Transform(_), _) => "Drag colored arrows or rotation rings. Shift gives fine moves or 15° rotations. Click another body to move it.",

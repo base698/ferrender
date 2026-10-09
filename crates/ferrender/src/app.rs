@@ -325,6 +325,17 @@ impl MeshDlg {
     }
 }
 
+/// The sculpt brush: every click on a body adds one stroke as a feature.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SculptDlg {
+    pub brush: usize,
+    pub radius: String,
+    pub strength: String,
+    pub strokes: usize,
+}
+
+pub const BRUSHES: [&str; 5] = ["Pull", "Push", "Inflate", "Smooth", "Flatten"];
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReliefDlg {
     pub path: PathBuf,
@@ -386,6 +397,7 @@ pub enum Dialog {
     Import(PathBuf, Unit),
     Mesh(MeshDlg),
     Relief(ReliefDlg),
+    Sculpt(SculptDlg),
 }
 
 impl PatternDlg {
@@ -660,6 +672,7 @@ pub enum Action {
     /// A Mesh menu operation, by index into [`MESH_OPS`].
     Mesh(usize),
     Relief,
+    Sculpt,
     Primitive(usize),
     RemoveBody,
     SplitBody,
@@ -1887,6 +1900,29 @@ impl App {
         self.session.path.as_ref().and_then(|p| p.file_stem()).map_or("Untitled".to_owned(), |n| n.to_string_lossy().into_owned())
     }
 
+    /// One sculpt stroke at a world point on a body, as the open Sculpt dialog says.
+    pub fn sculpt_at(&mut self, body: Id, at: glam::DVec3) {
+        let Dialog::Sculpt(d) = self.dialog.clone() else { return };
+        use fr_core::doc::{MeshOp, MeshOpKind};
+        use fr_core::meshops::Brush;
+        let brush = [Brush::Pull, Brush::Push, Brush::Inflate, Brush::Smooth, Brush::Flatten][d.brush.min(4)];
+        let local = self.session.built.body(body).map_or(at, |b| b.to_local(at));
+        let r = self.session.edit_feature(|doc| {
+            let radius = doc.enter(&d.radius, Kind::Length)?;
+            let strength = doc.enter(&d.strength, Kind::Length)?;
+            let id = doc.add_feature(FeatureKind::MeshOp(MeshOp { body, op: MeshOpKind::Sculpt { brush, at: local, radius, strength }, region: None }));
+            Ok((id, id))
+        });
+        match r {
+            Ok(_) => {
+                if let Dialog::Sculpt(d) = &mut self.dialog { d.strokes += 1; }
+                self.sel_body = Some(body);
+            }
+            Err(e) => self.toast(e),
+        }
+        self.refresh();
+    }
+
     pub fn import_stl(&mut self, path: &Path, unit: Unit) {
         let r = io::import_mesh(path, unit).and_then(|(mesh, report)| {
             let name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
@@ -2058,6 +2094,12 @@ impl App {
                 let body = self.target_body().or(self.session.built.bodies.first().map(|b| b.id).filter(|_| self.session.built.bodies.len() == 1));
                 if body.is_none() { self.toast("Click a body to select it first."); }
                 self.dialog = Dialog::Mesh(MeshDlg::new(kind, body, self.doc().units));
+            }
+            Action::Sculpt => {
+                self.finish_sketch();
+                let u = self.doc().units;
+                let mm = |v: f64| format!("{} {}", fr_core::units::trim_num(v / u.mm(), 3), u.name());
+                self.dialog = Dialog::Sculpt(SculptDlg { brush: 0, radius: mm(8.0), strength: mm(1.0), strokes: 0 });
             }
             Action::Relief => {
                 self.finish_sketch();

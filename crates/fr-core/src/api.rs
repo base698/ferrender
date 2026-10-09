@@ -56,6 +56,7 @@ Mesh editing. Each is a timeline feature that takes a mesh body and replaces it 
 {"op":"mesh_offset","body":BODY,"distance":2,"direction":[0,0,-1]}   thickens an open surface into a closed solid (walls along its rim), or hollows a closed one; direction optional, else along the surface normals
 {"op":"mesh_extrude_region","body":BODY,"region":REGION,"distance":3,"direction":[0,0,1]}   moves the region's triangles with walls around it
    REGION is {"sphere":{"centre":[x,y,z],"radius":r}} | {"box":{"lo":[..],"hi":[..]}} | {"side":{"plane":PLANE}} (the plane's positive side) | {"normal":{"direction":[x,y,z],"degrees":30}} | {"connected":{"seed":[x,y,z]}}
+{"op":"mesh_sculpt","body":BODY,"brush":"pull","at":[x,y,z],"radius":8,"strength":2}   one stroke: push | pull (along the surface normal under the point, by strength mm) | inflate (along each vertex's own normal) | smooth | flatten (strength 0..1); vertices within the radius move with a smooth falloff; each stroke is a feature
 {"op":"mesh_from_image","path":"/abs/photo.png","width":100,"depth":4,"base":2,"resolution":300,"invert":false,"blur":1,"gamma":1,"plane":"XY","origin":[x,y,z],"operation":"new"}
    a relief: the image's luminance becomes height on a grid (resolution cells along the longer side, at most 1200), bright high (invert for a lithophane), on a slab "base" thick; "depth" is the height of the brightest pixel. The image (PNG or JPEG) is embedded, as a reference image is. A depth map rendered elsewhere works the same way. Then mesh_smooth, mesh_cut to trim, combine onto a plaque, export_stl.
 {"op":"export_stl","path":"...","union":true}      merges overlapping bodies into one shell first (exact bodies only)
@@ -138,7 +139,7 @@ FEATURES
 {"op":"split_body","body":BODY,"plane":"XY"}       plane: XY | XZ | YZ in target-component axes, {"plane":CONSTRUCTION_ID}, or {"face":{"body":ID,"point":[x,y,z]}} with a world-space planar-face pick in document units. Uses the infinite plane. Exact unthreaded bodies only; tangent/nonintersecting planes are rejected. Each solid piece becomes an independent body in the target component; the first negative-side piece keeps the target ID, others have stable synthetic IDs. edit_feature accepts body/plane for Split and bodies for Remove; picks resolve before that operation. Combine with operation:join joins selected pieces again.
 {"op":"rollback","to":ID}                          shows the model as it was just after that feature ("start" = before any, "end" = everything); features added while rolled back are inserted at that point
 {"op":"transform","body":ID,"translate":[x,y,z],"rotate":[rx,ry,rz],"scale":1}   scale about the origin, rotate about X then Y then Z, then translate
-{"op":"combine","target":BODY,"tools":[BODY],"operation":"join","keep_tools":false}   join | cut | intersect between bodies, including imported meshes
+{"op":"combine","target":BODY,"tools":[BODY],"operation":"join","keep_tools":false}   join | cut | intersect between bodies, including imported meshes; a mesh boolean splits only the triangles near the other surface, so a small tool against a scan of millions of triangles is quick
 {"op":"fillet_edges","body":BODY,"edges":[[x,y,z],...],"radius":V}   rounds the edges nearest those points; "edges":"all" takes every edge. An entry can also be {"tag":EDGE_TAG} copied from get_object_info on the body: faces and edges carry tags saying how they were made (swept from a sketch entity, a cap, made by a feature), and a fillet, chamfer, shell, thread, text or face plane finds its faces by tag first when the body changes shape, by position only as a last resort. get_object_info on such a feature reports "resolved": "tag" | "origin" | "position".
 {"op":"chamfer_edges","body":BODY,"edges":[[x,y,z],...],"distance":V}
 {"op":"shell","body":BODY,"open_faces":[[x,y,z],...],"thickness":V}   hollows the body, leaving the faces nearest those points open
@@ -1768,9 +1769,9 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             out["kind"] = json!(if b.is_exact() { "exact" } else { "mesh" });
             Ok(out)
         }
-        "mesh_repair" | "mesh_decimate" | "mesh_smooth" | "mesh_subdivide" | "mesh_cut" | "mesh_mirror" | "mesh_offset" | "mesh_extrude_region" => {
+        "mesh_repair" | "mesh_decimate" | "mesh_smooth" | "mesh_subdivide" | "mesh_cut" | "mesh_mirror" | "mesh_offset" | "mesh_extrude_region" | "mesh_sculpt" => {
             use crate::doc::MeshOpKind;
-            use crate::meshops::{DecimateMethod, Keep, Scheme};
+            use crate::meshops::{Brush, DecimateMethod, Keep, Scheme};
             let body = id_of(c, "body")?;
             let u = s.doc.units.mm();
             let num = |key: &str, default: f64| -> R<f64> { if c[key].is_null() { Ok(default) } else { c[key].as_f64().ok_or_else(|| format!("\"{key}\" must be a number")) } };
@@ -1789,6 +1790,15 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 "mesh_cut" => MeshOpKind::Cut { plane: planes_api::base(s, &c["plane"])?, keep: match c["keep"].as_str().unwrap_or("negative") { "negative" => Keep::Negative, "positive" => Keep::Positive, "both" => Keep::Both, other => return Err(format!("unknown side {other}; keep negative, positive or both")) }, cap: c["cap"].as_bool().unwrap_or(true) },
                 "mesh_mirror" => MeshOpKind::Mirror { plane: planes_api::base(s, &c["plane"])?, weld: c["weld"].as_bool().unwrap_or(true) },
                 "mesh_offset" => MeshOpKind::Offset { distance: distance()?, direction },
+                "mesh_sculpt" => {
+                    let b = s.built.body(body).ok_or(format!("there is no body {body}"))?;
+                    MeshOpKind::Sculpt {
+                        brush: match c["brush"].as_str().unwrap_or("pull") { "push" => Brush::Push, "pull" => Brush::Pull, "smooth" => Brush::Smooth, "flatten" => Brush::Flatten, "inflate" => Brush::Inflate, other => return Err(format!("unknown brush {other}; use push, pull, smooth, flatten or inflate")) },
+                        at: b.to_local(xyz(&c["at"]).map_err(|_| "mesh_sculpt needs \"at\": [x,y,z] on the body")? * u),
+                        radius: s.doc.value(&text_of(&c["radius"]).map_err(|_| "mesh_sculpt needs a \"radius\"")?, Kind::Length)?,
+                        strength: s.doc.value(&text_of(&c["strength"]).map_err(|_| "mesh_sculpt needs a \"strength\" (a length for push, pull and inflate; 0 to 1 for smooth and flatten)")?, Kind::Length)?,
+                    }
+                }
                 _ => MeshOpKind::ExtrudeRegion { distance: distance()?, direction },
             };
             let region = if c["region"].is_null() { None } else { Some(region_of(s, &c["region"], u)?) };

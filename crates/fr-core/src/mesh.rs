@@ -985,6 +985,34 @@ impl Bvh {
         best
     }
 
+    /// How many triangles a ray crosses: odd from inside a closed mesh, even from outside.
+    pub fn crossings(&self, m: &Mesh, origin: DVec3, dir: DVec3) -> usize {
+        if self.nodes.is_empty() { return 0; }
+        let o = origin.as_vec3();
+        let inv = Vec3::new(1.0 / dir.x as f32, 1.0 / dir.y as f32, 1.0 / dir.z as f32);
+        let mut count = 0;
+        let mut stack = vec![0usize];
+        while let Some(ni) = stack.pop() {
+            let n = &self.nodes[ni];
+            if Self::slab(n, o, inv).is_none() { continue; }
+            if n.count > 0 {
+                for &i in &self.order[n.start as usize..(n.start + n.count) as usize] {
+                    if ray_tri(origin, dir, &m.tri(i as usize)).is_some_and(|d| d > 1e-9) { count += 1; }
+                }
+            } else {
+                stack.push(ni + 1);
+                stack.push(n.start as usize);
+            }
+        }
+        count
+    }
+
+    /// Whether a point is inside a closed mesh, by ray parity along a direction unlikely to graze an edge.
+    pub fn contains(&self, m: &Mesh, p: DVec3) -> bool {
+        let dir = DVec3::new(0.577_215_66, 0.618_033_99, 0.532_600_77).normalize();
+        self.crossings(m, p, dir) % 2 == 1
+    }
+
     /// Triangles whose bounds overlap a box.
     pub fn in_box(&self, lo: DVec3, hi: DVec3) -> Vec<usize> {
         let (lo, hi) = (lo.as_vec3(), hi.as_vec3());

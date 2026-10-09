@@ -743,6 +743,155 @@ pub fn from_image(pixels: &crate::reference::Pixels, p: &ReliefParams) -> R<Mesh
     finish(out)
 }
 
+// ----- booleans -----
+
+/// Union, difference or intersection of two meshes. Triangles that cannot
+/// touch the other mesh (their bounds clear every triangle of it) are kept
+/// or dropped whole; only the triangles near the other surface are split,
+/// by a BSP of the other mesh's near triangles, and each piece is classified
+/// by ray parity against the whole other mesh. So a small tool cut from a
+/// scan of millions of triangles costs about the size of the tool.
+pub fn boolean(a: &Mesh, b: &Mesh, op: crate::csg::Bool) -> R<Mesh> {
+    use crate::csg::Bool;
+    let (a, b) = (welded(a), welded(b));
+    if a.is_empty() || b.is_empty() { return Err("a boolean needs two meshes with triangles".into()); }
+    let (bvh_a, bvh_b) = (a.bvh(), b.bvh());
+    let pad = DVec3::splat(1e-6);
+    // Near triangles: those whose bounds overlap some triangle bound of the other mesh.
+    let near = |m: &Mesh, other_bvh: &crate::mesh::Bvh| -> Vec<bool> {
+        m.tris().map(|t| {
+            let (lo, hi) = (t[0].min(t[1]).min(t[2]) - pad, t[0].max(t[1]).max(t[2]) + pad);
+            !other_bvh.in_box(lo, hi).is_empty()
+        }).collect()
+    };
+    let (near_a, near_b) = (near(&a, &bvh_b), near(&b, &bvh_a));
+    let pick = |m: &Mesh, mask: &[bool], want: bool| -> Mesh { let tris: Vec<[DVec3; 3]> = m.tris().zip(mask).filter(|(_, n)| **n == want).map(|(t, _)| t).collect(); Mesh::from_tris(tris) };
+    let (a_near, b_near) = (pick(&a, &near_a, true), pick(&b, &near_b, true));
+    let _ = pick;
+    if a_near.len() + b_near.len() > crate::csg::MAX_TRIS {
+        return Err(format!("the meshes meet across {} triangles; booleans handle up to {} near the other surface, so decimate first", a_near.len() + b_near.len(), crate::csg::MAX_TRIS));
+    }
+    // Pieces of each near set that lie wholly inside or outside the other mesh.
+    let classify = |pieces: Vec<[DVec3; 3]>, other: &Mesh, other_bvh: &crate::mesh::Bvh| -> (Vec<[DVec3; 3]>, Vec<[DVec3; 3]>) {
+        let (mut inside, mut outside) = (Vec::new(), Vec::new());
+        for t in pieces {
+            let c = (t[0] + t[1] + t[2]) / 3.0;
+            // A piece hugging the other surface (a sliver along the seam) is judged by which side of the
+            // nearest triangle it lies on; anything farther off by ray parity. Coplanar pieces count as outside.
+            let is_inside = match other_bvh.nearest(other, c) {
+                Some((d, ti)) if d < 1e-4 => {
+                    let tri = other.tri(ti);
+                    (c - tri[0]).dot(other.normal(ti)) < -1e-9
+                }
+                _ => other_bvh.contains(other, c),
+            };
+            if is_inside { inside.push(t) } else { outside.push(t) }
+        }
+        (inside, outside)
+    };
+    let (a_in, a_out) = if b_near.is_empty() { (Vec::new(), a_near.tris().collect()) } else { classify(crate::csg::fragments(&b_near, &a_near), &b, &bvh_b) };
+    let (b_in, b_out) = if a_near.is_empty() { (Vec::new(), b_near.tris().collect()) } else { classify(crate::csg::fragments(&a_near, &b_near), &a, &bvh_a) };
+    let flip = |mut tris: Vec<[DVec3; 3]>| { for t in &mut tris { t.swap(1, 2); } tris };
+    // Far triangles never cross the other surface, so each connected patch of them is wholly inside
+    // or outside it: one parity test per patch decides, however many triangles it has.
+    let far_split = |m: &Mesh, near: &[bool], other: &Mesh, other_bvh: &crate::mesh::Bvh| -> (Vec<[DVec3; 3]>, Vec<[DVec3; 3]>) {
+        let adj = m.adjacency();
+        let mut seen = vec![false; m.len()];
+        let (mut inside, mut outside) = (Vec::new(), Vec::new());
+        for start in 0..m.len() {
+            if near[start] || seen[start] { continue; }
+            let mut patch = vec![start];
+            seen[start] = true;
+            let mut k = 0;
+            while k < patch.len() {
+                for o in adj.neighbours(patch[k]) {
+                    if !near[o] && !seen[o] { seen[o] = true; patch.push(o); }
+                }
+                k += 1;
+            }
+            let t = m.tri(start);
+            let is_inside = other_bvh.contains(other, (t[0] + t[1] + t[2]) / 3.0);
+            let into = if is_inside { &mut inside } else { &mut outside };
+            into.extend(patch.iter().map(|i| m.tri(*i)));
+        }
+        (inside, outside)
+    };
+    let (a_far_in, a_far_out) = far_split(&a, &near_a, &b, &bvh_b);
+    let (b_far_in, b_far_out) = far_split(&b, &near_b, &a, &bvh_a);
+    let mut all: Vec<[DVec3; 3]> = Vec::new();
+    match op {
+        Bool::Union => { all.extend(a_far_out); all.extend(b_far_out); all.extend(a_out); all.extend(b_out); }
+        Bool::Subtract => { all.extend(a_far_out); all.extend(a_out); all.extend(flip(b_far_in)); all.extend(flip(b_in)); }
+        Bool::Intersect => { all.extend(a_far_in); all.extend(b_far_in); all.extend(a_in); all.extend(b_in); }
+    }
+    if all.is_empty() { return Ok(Mesh::default()); }
+    let mut out = Mesh::from_tris(all);
+    out.stitch();
+    out.weld_exact();
+    out.repair();
+    // Splitting along the seam can drop a sliver whose corners all land on the cut; those leave
+    // three-edge holes, closed here before the result is judged.
+    if fill_holes(&mut out, 8) > 0 { out.repair(); }
+    finish(out)
+}
+
+// ----- sculpting -----
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Brush {
+    /// Pushes the surface in along its normal.
+    Push,
+    /// Pulls it out.
+    #[default]
+    Pull,
+    /// Moves vertices toward the average of their neighbours.
+    Smooth,
+    /// Moves vertices toward the plane of the brush's centre.
+    Flatten,
+    /// Moves vertices along their own normals (a bulge).
+    Inflate,
+}
+
+/// One brush stroke at a point: vertices within `radius` move by up to `strength`
+/// (a length), with a smooth falloff to the rim.
+pub fn sculpt(m: &Mesh, brush: Brush, at: DVec3, radius: f64, strength: f64) -> R<Mesh> {
+    if !(radius > 0.0) { return Err("the brush radius must be greater than zero".into()); }
+    let mut out = welded(m);
+    let Some(centre_tri) = out.nearest_tri(at) else { return Err("the brush is not on the mesh".into()) };
+    let normals = vertex_normals(&out);
+    let tri = out.tri(centre_tri);
+    let centre = {
+        // Drop the point onto the surface.
+        let n = out.normal(centre_tri);
+        at - n * (at - tri[0]).dot(n)
+    };
+    let centre_normal = out.normal(centre_tri);
+    let adj = out.adjacency();
+    let positions = out.positions().to_vec();
+    let falloff = |p: DVec3| { let d = p.distance(centre) / radius; if d >= 1.0 { 0.0 } else { let x = 1.0 - d * d; x * x } };
+    let mut moved = 0;
+    out.map_indexed(|i, p| {
+        let w = falloff(p);
+        if w <= 0.0 { return p; }
+        moved += 1;
+        match brush {
+            Brush::Push => p - centre_normal * (strength * w),
+            Brush::Pull => p + centre_normal * (strength * w),
+            Brush::Inflate => p + normals[i] * (strength * w),
+            Brush::Flatten => { let d = (p - centre).dot(centre_normal); p - centre_normal * d * (w * strength.clamp(0.0, 1.0)) }
+            Brush::Smooth => {
+                let ring = adj.ring(i as u32);
+                if ring.is_empty() { return p; }
+                let mean = ring.iter().map(|o| positions[*o as usize]).sum::<DVec3>() / ring.len() as f64;
+                p + (mean - p) * (w * strength.clamp(0.0, 1.0))
+            }
+        }
+    });
+    if moved == 0 { return Err("no vertex lies within the brush; enlarge the radius or subdivide the mesh".into()); }
+    finish(out)
+}
+
 // ----- measure -----
 
 #[derive(Clone, Debug, Serialize)]

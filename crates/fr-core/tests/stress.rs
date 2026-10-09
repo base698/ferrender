@@ -99,6 +99,35 @@ fn large_meshes_import_pick_and_round_trip_within_budget() {
         println!("  clustered to {} triangles in {:.2} s", coarse.len(), t.elapsed().as_secs_f64());
         assert!(coarse.len() < 400_000 && coarse.len() > 50_000, "clustering aimed at 200 k triangles and made {}", coarse.len());
 
+        // A boolean with a small tool: only the triangles near the tool are split.
+        let tool = {
+            let rows = 60;
+            let r = (hi - lo).max_element() * 0.08;
+            let at = |i: usize, j: usize| {
+                if i == 0 { return centre + DVec3::new(0.0, 0.0, r); }
+                if i == rows { return centre + DVec3::new(0.0, 0.0, -r); }
+                let (u, v) = (i as f64 / rows as f64 * std::f64::consts::PI, j as f64 / rows as f64 * std::f64::consts::TAU);
+                centre + DVec3::new(r * u.sin() * v.cos(), r * u.sin() * v.sin(), r * u.cos())
+            };
+            let mut tris = Vec::new();
+            for i in 0..rows { for j in 0..rows {
+                let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, (j + 1) % rows), at(i, (j + 1) % rows));
+                tris.push([a, b, c]); tris.push([a, c, d]);
+            } }
+            let mut m = fr_core::mesh::Mesh::welded_from_tris(&tris);
+            m.repair();
+            // Put it on the surface so it actually cuts: slide it along +Z until it meets the scan's top.
+            let top = mesh.ray(centre + DVec3::new(0.0, 0.0, (hi.z - lo.z) * 2.0), -DVec3::Z).map(|(d, _)| centre.z + (hi.z - lo.z) * 2.0 - d).unwrap_or(hi.z);
+            m.map(|p| p + DVec3::new(0.0, 0.0, top - centre.z));
+            m
+        };
+        let t = Instant::now();
+        let cut = fr_core::meshops::boolean(&mesh, &tool, fr_core::csg::Bool::Subtract).unwrap();
+        let bool_s = t.elapsed().as_secs_f64();
+        println!("  cut with a {}-triangle tool in {bool_s:.2} s: {} triangles, {} open edges", tool.len(), cut.len(), cut.open_edges());
+        assert!(cut.len() > mesh.len() / 2);
+        assert!(bool_s < 10.0 * m.max(0.5), "the culled boolean took {bool_s:.1} s");
+
         let mut s = Session::default();
         execute(&mut s, &json!({"op": "import_stl", "path": path.display().to_string(), "units": "mm"}), None).unwrap();
         let out = std::env::temp_dir().join(format!("ferrender-stress-{}-{}.ferr", std::process::id(), path.file_stem().unwrap().to_string_lossy()));

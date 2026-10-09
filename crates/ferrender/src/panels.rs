@@ -129,6 +129,8 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Relief from Image\u{2026}", "", Action::Relief);
             ui.separator();
             for (k, name) in crate::app::MESH_OPS.iter().enumerate() { item(app, ui, name, "", Action::Mesh(k)); }
+            ui.separator();
+            item(app, ui, "Sculpt", "", Action::Sculpt);
         });
         ui.menu_button("View", |ui| {
             for (label, view) in [("Home", "iso"), ("Top", "top"), ("Front", "front"), ("Right", "right"), ("Back", "back"), ("Left", "left"), ("Bottom", "bottom")] {
@@ -810,6 +812,18 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 ui.label(RichText::new(hint).color(colors.muted));
                 app.dialog = Dialog::Mesh(m);
                 confirm(app, ui, "OK");
+            });
+        }
+        Dialog::Sculpt(mut d) => {
+            dialog_window(app, "Sculpt").show(ctx, |ui| {
+                egui::Grid::new("sculpt").num_columns(3).show(ui, |ui| {
+                    ui.label("Brush"); egui::ComboBox::from_id_salt("brush").selected_text(crate::app::BRUSHES[d.brush]).show_ui(ui, |ui| { for (i, n) in crate::app::BRUSHES.iter().enumerate() { ui.selectable_value(&mut d.brush, i, *n); } }); ui.end_row();
+                    value_row(app, ui, "Radius", &mut d.radius, Kind::Length);
+                    value_row(app, ui, if d.brush >= 3 { "Strength (0 to 1)" } else { "Depth" }, &mut d.strength, Kind::Length);
+                });
+                ui.label(RichText::new(format!("Click the body to sculpt. Each click is one stroke in the timeline ({} so far).", d.strokes)).color(colors.muted));
+                app.dialog = Dialog::Sculpt(d);
+                if ui.button("Done").clicked() { app.dialog = Dialog::None; }
             });
         }
         Dialog::Relief(mut r) => {
