@@ -53,17 +53,53 @@ S5. **Over MCP and in a script.** `{"op":"sweep","sketch":PROFILE,"path_sketch":
 
 S6. **Parts of a path.** On the S1 sketches open Sweep. The **Along path** row shows a track with one bar across it and `from 0.00 to 1.00`. Drag the right handle left: the preview shortens from the far end and the bar follows; the path in the viewport is drawn faint with the covered stretch bold. Drag the left handle right: the solid now starts further along the path, and what remains of it stays exactly where it was. Type `0.10` and `0.30`, press **Add part**, and set the new part to `0.60` and `0.70`. Expect two separate pieces, one on each leg, 0.2 and 0.1 of the path long, in one body. Handles cannot cross each other or a neighbouring part. OK, then double-click the chip: the same two parts are shown. **Whole path** returns the full mitred bar. Over the API, `"spans": [[0.1,0.3],[0.6,0.7]]` on `sweep` or `edit_feature` gives the same body, and `"spans": [[0.5,0.2]]` is refused.
 
-## Large assemblies and references
+## 9 October changes: sketching, revolve, shell, planes and large assemblies
 
-Added 9 October after the large-assembly evaluation. Lettered L so they do not collide with the numbered checks.
+One ordered session, about 40 minutes, covering everything landed on `0.4-dev` on 9 October after the large-assembly evaluation (commits `f70e64c` to `90a523f`). Lettered L so they do not collide with the numbered checks. Use a fresh document unless a check says otherwise; your own vase and bottle designs are good material for L8 and L10. Check About first: the commit should be `90a523f` or later.
 
-L1. **Display changes do not rebuild.** Open a design that takes a few seconds to rebuild (the turtle, or a script-made grid of a few hundred boxes). Hide and show a body, a sketch, a plane and a component from the browser; activate another component and the root; rename a feature in the timeline; Undo and Redo through those steps. Each should take effect at once, with no progress bar and no rebuild time reported by `get_scene_info`'s `from_cache` flipping on a cached design. Then edit one dimension: that rebuilds as before, and Undo of it rebuilds too.
-L2. **A failed feature leaves everything else alone.** On a design with several bodies, add a hole that does not touch its body (expect the "does not touch" error on the feature). Every other body keeps its id, order in the browser, volume and placement; delete the hole and the design is as before.
-L3. **Fillet all after a patterned cut.** Make a torus, cut a thin box through its middle, then Fillet with every edge (over MCP, `"edges": "all"`). Expect every edge rounded with no error. Copy one edge's `point` from `get_object_info` and fillet it alone: expect the same edge, not an "ambiguous" refusal.
-L5. **Sketch snapping, splines and Move.** In a new sketch, draw a line ending a few pixels from the Y axis: the end lands on the axis and the point shows a vertical constraint to the origin. Draw a spline with four clicks and keep clicking: each three further clicks add a spline from the last end; click an existing point after two clicks: the spline finishes there and the run ends. Select a spline, press M, drag on empty space: the whole spline moves; drag one fit point: only it moves; Escape returns to Select. The Construction toggle is beside the drawing tools.
-L7. **A profile across the axis.** Draw a closed profile to the right of the Y axis and open Revolve with X as the axis: the dialog says how many points lie how far past the axis, rings them in red in the viewport, and offers Use Y; choose it and the preview appears. Draw another profile whose top corner is 1 mm left of the Y axis (zoom in to defeat the snap): with Y chosen the dialog offers Move it onto the axis; click it and the revolve previews, with the corner now on the axis and a vertical constraint to the origin.
-L6. **Construction planes and sections.** On a revolved spline profile, add an offset plane and drag its arrow: the plane follows the pointer without a pause on each step. Open Section Analysis, choose that plane from the list beside YZ/XZ/XY, and change Position and Show the other side: the cut follows the plane's normal. Suppress the plane: the section falls back to the world axis.
-L4. **The save says why there is no cache.** Thread a rod, then save with the cache requested (`"cache": true` over MCP, or a design slow enough to want one in the app). Expect no cache, with the reason in the save message or `cache_skipped`, and a normal rebuild on reopening. Save a quick plain design without requesting a cache: no message.
+### Sketching
+
+L1. **Points land on the axes.** New sketch on XY. Draw a line from the origin out to the right, then a second line back toward the Y axis, ending a few pixels to the right of it. Expect the end to land exactly on the axis and a vertical constraint badge to the origin on that point. Zoom in and drag the point sideways: it stays on the axis. Repeat with a point near the X axis: horizontal constraint. A point placed a long way from either axis gets no constraint.
+
+L2. **Midpoint of a line.** With the Line tool, hover along an existing line toward its middle. Within a few pixels of halfway the point sticks, a small triangle and the word "mid" appear under it. Click: the new line starts at the midpoint, and the midpoint constraint badge shows on that point. Drag either end of the host line afterwards: the new line's end follows the middle.
+
+L3. **Splines keep going and finish on a point.** Spline tool: click four points; a spline appears and the tool is still drawing from its end. Click three more: a second spline from that end. Press Escape: the run ends and Select is the tool. Start a new spline, click two points, then click an existing point of the sketch: the spline ends there (its two missing fit points sit along the last stretch) and the run ends. Hover a spline: its fit points draw as filled handles with a numbered dashed polygon. Drag a handle with Select: the curve follows. Start a line near the middle of a spline's curve: the point lands on the curve.
+
+L4. **Construction lines.** The Construction button is in the CREATE group beside the drawing tools. With nothing selected, click it and draw a line: the line is construction (dashed); click again to go back to normal. Select a construction line: the button shows as on and its tooltip says the selected line is construction; click it and the line becomes normal, and once more makes it construction again. X does the same as the button in all three states.
+
+L5. **Move in a sketch.** Draw a line and a circle. Select the line, press M: the Move button lights and the hint says to drag. Drag on empty space: the line moves with the pointer and the circle stays. Drag one end point: only that point moves. Drag the circle (not selected): it moves. Escape returns to Select. Undo steps back through each move.
+
+### Revolve
+
+L6. **Any line is the axis.** Draw a closed profile to the right of the Y axis, plus a vertical construction line further right. Select the profile and choose Revolve (Y is preselected). Click the construction line in the viewport: the Axis row shows Line, the dashed axis redraws through it, and the preview becomes a ring. Click the profile's own right edge: the preview becomes a solid around that edge. Click near a corner where two lines meet: the nearer line is taken; nothing is swallowed. Choose Y again from the Axis row: the preview returns to the Y revolve.
+
+L7. **Across the axis, far.** With the same profile choose X as the axis. Expect a red "Across the axis" row in the dialog saying how many points lie how far past the axis, those points ringed in red in the viewport, OK disabled, and a **Use Y** button (no "Move" button, since the points are tens of millimetres away). Click Use Y: the row disappears, the rings go, the preview appears, OK is enabled.
+
+L8. **Across the axis, near.** Draw a profile right of the Y axis whose top-left corner is about 1 mm left of the axis (zoom in so the axis snap does not catch it). Choose Revolve with Y. Expect the row to say 1 point lies about 1 mm past the axis, the corner ringed, and both **Use X** (if the profile lies above the X axis) and **Move it onto the axis** offered. Click Move it onto the axis: the corner moves to x = 0 with a vertical constraint to the origin, the ring and the row go, the preview appears. Undo after applying: the corner move and the revolve each undo as a step. Over MCP, `revolve` on such a sketch is refused with a message that names the axis, the distance and the point ids.
+
+### Bodies
+
+L9. **Shell beside a fillet.** Cylinder, 20 mm across, 30 tall. Fillet its top edge with 3 mm. Shell: click the flat top, wall 2 mm, OK. Expect the message "Hollowed to a 2 mm wall, open at 1 face…", and looking down into the top, an open hole to the floor of the cavity with no thin skin over it. Section Analysis through the middle shows a wall of even thickness and an open top. Save, reopen: the opening is still there. Undo the shell and the fillet, then shell the plain cylinder the same way: also open (that is the kernel's own path, unchanged).
+
+L10. **Your bottle.** Open the bottle saved before the fix (`profile-fixed.ferr`). It rebuilds rather than opening from its cache, and the neck is open. Section it along the construction plane in the design: no cap under the neck.
+
+L11. **Fillet all after a patterned cut.** Torus, major 30, tube 8. Box 100 × 100 × 4 at position −50, −50, −2 with operation Cut. Fillet all edges with 0.5 mm (over MCP `"edges": "all"`, or select them all in the app): expect no "ambiguous" refusal and every edge rounded. Copy one edge's `point` from `get_object_info` and fillet it alone: the same edge, no refusal.
+
+### Planes, sections and display
+
+L12. **Planes drag without a pause.** On a revolved spline profile, add an offset construction plane from the XY origin plane and drag its arrow back and forth: the plane follows the pointer with no stall on each step and the body stays where it is. Edit an existing plane and drag again: the same. OK, then Undo.
+
+L13. **Section along a plane.** Open Section Analysis. Beside YZ / XZ / XY a drop-down lists the design's construction planes. Choose one: the cut follows that plane; Position moves it along the plane's normal; Show the other side flips it. Suppress the plane in the timeline: the section falls back to the axis buttons. Unsuppress: the plane is available again.
+
+L14. **Display changes do not rebuild.** Open a design that takes a few seconds to rebuild (the turtle, or a script-made grid of a few hundred boxes), saved with its cache so that `get_scene_info` reports `from_cache: true`. Hide and show a body, a sketch, a plane and a component from the browser; activate another component and the root; rename a feature; Undo and Redo through those steps. Each takes effect at once with no progress bar, and `from_cache` stays true. Edit one dimension: that rebuilds, and `from_cache` turns false.
+
+L15. **A failed feature leaves the rest alone.** On a design with several bodies, add a hole that misses its body (expect the "does not touch" error on the feature). Every other body keeps its id, browser order, volume and placement. Delete the hole: the design is as before.
+
+L16. **The save says why there is no cache.** Thread a rod, then save with the cache requested (`"cache": true` over MCP, or in the app a design slow enough to want one): no cache, with the reason in the save message or `cache_skipped` ("modeled threads"), and a normal rebuild on reopening. The house-sized assembly reports "over the 32 MiB cache limit". A quick plain design saved without requesting a cache: no message.
+
+L17. **Rebuild speed.** `ferrender check --rebuild` on the 400-box probe design from the archive (`evidence/rebuild-and-pumpkin-probes/boxes/boxes-400.ferr`) reports well under a second; the house design reports around 5 s on an Apple Silicon Mac. Report the numbers.
+
+Report by letter and number, for example "L1–L8 pass; L9: the hole is there but the message said 2 faces." Include a screenshot for anything visual.
 
 ## Review regressions to verify before shipping
 
