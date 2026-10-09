@@ -4,6 +4,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+# Verify the official archive before cadrum can consume native libraries.
+OCCT_ROOT=$(python3 scripts/prepare-occt.py)
+export OCCT_ROOT
 cargo build --locked --release -p ferrender
 
 app=dist/Ferrender.app
@@ -15,6 +18,7 @@ cp target/release/ferrender "$app/Contents/MacOS/ferrender"
 mkdir -p "$app/Contents/Resources/licenses"
 cp crates/fr-core/assets/fonts/OFL.txt "$app/Contents/Resources/licenses/NotoSans-OFL.txt"
 cp crates/fr-core/assets/fonts/PROVENANCE.txt "$app/Contents/Resources/licenses/NotoSans-PROVENANCE.txt"
+python3 scripts/bundle-dependency-notices.py --output "$app/Contents/Resources/licenses/rust-dependencies"
 
 icon=""
 if [ -f assets/icon.png ]; then

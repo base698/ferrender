@@ -204,7 +204,7 @@ fn midplane_dialog_handles_opposite_faces_and_edits_the_angular_bisector() {
     let mut h = state_harness();
     plate(&mut h);
     let body = &h.state().session.built.bodies[0];
-    let make_face = |at| PlaneRef::Face { body: body.id, at, frame: body.local_frame() };
+    let make_face = |at| PlaneRef::Face { body: body.id, at, frame: body.local_frame(), tag: None };
     let top = make_face(DVec3::new(20.0, 10.0, 10.0));
     let bottom = make_face(DVec3::new(20.0, 10.0, 0.0));
     let side = make_face(DVec3::new(40.0, 10.0, 5.0));

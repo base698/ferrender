@@ -805,7 +805,7 @@ fn an_allowance_gives_a_screw_and_its_hole_room_to_turn() {
     use fr_core::threads;
     let t = threads::find("M6").unwrap();
     // How near the axis at (x, y) and how far from it a thread's surface comes.
-    let reach = |m: &fr_core::mesh::Mesh, x: f64, y: f64| m.tris.iter().flatten().map(|v| ((v.x - x).powi(2) + (v.y - y).powi(2)).sqrt()).fold((f64::MAX, 0.0), |(lo, hi): (f64, f64), r| (lo.min(r), hi.max(r)));
+    let reach = |m: &fr_core::mesh::Mesh, x: f64, y: f64| m.tris().flatten().map(|v| ((v.x - x).powi(2) + (v.y - y).powi(2)).sqrt()).fold((f64::MAX, 0.0), |(lo, hi): (f64, f64), r| (lo.min(r), hi.max(r)));
     let build = |allowance: Option<f64>| {
         let mut s = Session::default();
         let r = run(&mut s, json!({"op": "batch", "commands": [

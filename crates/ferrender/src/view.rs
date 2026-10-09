@@ -57,6 +57,12 @@ pub struct Scene {
     key: Option<(u64, Option<Dialog>, Vec<Id>, Option<(Id, usize, usize)>)>,
     rev: u64,
     verts: Arc<Vec<f32>>,
+    /// The large mesh bodies, uploaded indexed and never re-sent for a selection change.
+    big_key: Option<(u64, Option<Dialog>, Vec<Id>)>,
+    big: Arc<Vec<gpu::BigMesh>>,
+    /// When the camera last changed, so large meshes draw coarse while the view moves.
+    moved: Option<std::time::Instant>,
+    last_cam: Option<Camera>,
     bounds: Option<(DVec3, DVec3)>,
     /// Software-rendered fallback, with what it was rendered for.
     /// Its background is transparent, so appearance changes do not invalidate it.
@@ -64,11 +70,24 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// How many bodies are drawn through the indexed large-mesh path.
+    #[cfg(test)]
+    pub fn big_count(&self) -> usize { self.big.len() }
+
     /// A new document can reuse session revisions; keep GPU revisions monotonic.
     pub fn invalidate(&mut self) {
         self.key = None;
+        self.big_key = None;
+        self.big = Arc::default();
+        self.verts = Arc::default();
+        self.bounds = None;
+        self.last_cam = None;
+        self.moved = None;
         self.cpu = None;
     }
+
+    #[cfg(test)]
+    pub(crate) fn big_data(&self) -> Arc<Vec<gpu::BigMesh>> { self.big.clone() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,17 +164,17 @@ fn grid_step(app: &App) -> f64 {
 pub fn snap(app: &App, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Snap> {
     let raw = sketch_pos(app, sk, pos)?;
     if let Some((id,p)) = crate::sketch_capture::nearest_point(sk,pos,|p|on_screen(app,sk,p)) {
-        return Some(Snap { p,point:Some(id),on:None,h:false,v:false });
+        return Some(Snap { p,point:Some(id),on:None,h:false,v:false,axis:[false,false], mid:false });
     }
     if let Some(c) = sk.entities.keys().filter_map(|id| crate::sketch_capture::project_entity(sk,*id,pos,|p|on_screen(app,sk,p)))
         .filter(|c|c.distance<=6.0).min_by(|a,b|a.distance.total_cmp(&b.distance)) {
-        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false });
+        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false,axis:[false,false], mid:c.mid });
     }
     Some(free_snap(app,raw,from,false))
 }
 
 fn free_snap(app: &App, raw: DVec2, from: Option<DVec2>, bypass: bool) -> Snap {
-    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false };
+    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false, axis: [false, false], mid: false };
     if bypass { return s; }
     if app.opts.snap_grid {
         let step = grid_step(app);
@@ -170,6 +189,17 @@ fn free_snap(app: &App, raw: DVec2, from: Option<DVec2>, bypass: bool) -> Snap {
             s.p.x = f.x;
             s.v = true;
         }
+    }
+    // The sketch axes snap like drawn lines: a point within a few pixels of one lands
+    // on it, so a revolve profile closes on its axis instead of just past it.
+    let near = |v: f64| v.abs() * app.cam.scale < 6.0;
+    if !s.h && near(s.p.y) {
+        s.p.y = 0.0;
+        s.axis[0] = true;
+    }
+    if !s.v && near(s.p.x) {
+        s.p.x = 0.0;
+        s.axis[1] = true;
     }
     s
 }
@@ -213,7 +243,7 @@ struct Arrow {
 fn extrude_arrow(app: &App) -> Option<Arrow> {
     if let Some((plane, middle, text)) = crate::construction_view::offset_base(app) { return distance_arrow(app, plane, middle, &text); }
     let Dialog::Feature(f) = &app.dialog else { return None };
-    if f.revolve || f.through_all {
+    if f.revolve || f.sweep.is_some() || f.through_all {
         return None;
     }
     let doc = app.doc();
@@ -371,10 +401,18 @@ fn draw_grid(app: &App, painter: &Painter) {
 /// The section view's plane as (normal, offset): everything with `normal . p > offset` is hidden.
 fn section_plane(app: &App) -> Option<(DVec3, f64)> {
     let s = app.section;
+    if !s.on { return None; }
+    let flip = if s.flip { -1.0 } else { 1.0 };
+    // A construction plane cuts along its own normal, offset from where it sits; a
+    // plane that is not built (suppressed, rolled back, in error) falls back to the axis.
+    if let Some(p) = s.plane.and_then(|id| app.shown().planes.get(&id)) {
+        let n = p.plane.normal() * flip;
+        return Some((n, n.dot(p.plane.origin) + s.offset * flip));
+    }
     // Unflipped, each plane hides the side the home view looks at.
-    let toward = [1.0, -1.0, 1.0][s.axis.min(2)] * if s.flip { -1.0 } else { 1.0 };
+    let toward = [1.0, -1.0, 1.0][s.axis.min(2)] * flip;
     let n = [DVec3::X, DVec3::Y, DVec3::Z][s.axis.min(2)] * toward;
-    s.on.then_some((n, s.offset * toward))
+    Some((n, s.offset * toward))
 }
 
 fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
@@ -382,19 +420,43 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
     let hidden = app.doc().hidden_bodies.clone();
     // The selected face is lit through the vertex data, so it is part of what was sent.
     let face = app.sel_face.clone().filter(|_| app.preview.is_none());
-    let key = (app.session.rev, app.preview.as_ref().map(|p| p.0.clone()), hidden.clone(), face.as_ref().map(|f| (f.body, f.tris.len(), f.tris[0])));
+    let key = (app.session.rev, app.preview.as_ref().map(|p| p.0.clone()), hidden.clone(), face.as_ref().and_then(|f| f.tris.first().map(|first| (f.body, f.tris.len(), *first))));
     if app.scene.key.as_ref() != Some(&key) {
         let bodies: Vec<&Body> = app.shown().bodies.iter().filter(|b| !hidden.contains(&b.id) && app.body_visible(b)).collect();
         let verts = Arc::new(gpu::vertices(bodies.iter().copied(), face.as_ref().map(|f| (f.body, f.tris.as_slice()))));
         let bounds = bodies.iter().filter_map(|b| b.mesh.bbox()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let big_key = (key.0, key.1.clone(), key.2.clone());
+        if app.scene.big_key.as_ref() != Some(&big_key) {
+            app.scene.big = Arc::new(bodies.iter().filter(|b| b.mesh.len() > gpu::BIG).map(|b| gpu::BigMesh::new(b)).collect());
+            app.scene.big_key = Some(big_key);
+        }
         app.scene.verts = verts;
         app.scene.bounds = bounds;
         app.scene.rev += 1;
         app.scene.key = Some(key);
     }
-    if app.scene.verts.is_empty() {
+    if app.scene.verts.is_empty() && app.scene.big.is_empty() {
+        // There is no model left to catch up with. Preserve the immediate empty
+        // scene acknowledgement even though the GPU callback below releases its
+        // old buffers. Nonempty scenes still require the actual GPU fence.
         app.timeline.software_done();
-        return;
+        if !app.gpu { return; }
+    }
+    // Submit an empty GPU frame too: it clears the last image and releases its
+    // buffers after Hide All/New, rather than retaining a large deleted model.
+    // While the camera is moving, meshes above the level-of-detail size draw their coarse copy;
+    // a repaint shortly after it stops brings the full mesh back.
+    let mut coarse = false;
+    if app.scene.big.iter().any(|b| b.coarse.is_some()) {
+        let now = std::time::Instant::now();
+        if app.scene.last_cam != Some(app.cam) {
+            app.scene.last_cam = Some(app.cam);
+            app.scene.moved = Some(now);
+        }
+        if let Some(t) = app.scene.moved && now.duration_since(t) < std::time::Duration::from_millis(150) {
+            coarse = true;
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(160));
+        }
     }
     let ppp = ui.ctx().pixels_per_point();
     let size = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
@@ -404,7 +466,7 @@ fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
         let reach = app.scene.bounds.map_or(100.0, |(lo, hi)| (0..8).map(|i| DVec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z }).distance(app.cam.target)).fold(0.0, f64::max)) * 1.05 + 1.0;
         painter.add(eframe::egui_wgpu::Callback::new_paint_callback(
             rect,
-            gpu::Frame { frozen: app.timeline.preview.is_some(), painted: app.timeline.paint_signal(), rev: app.scene.rev, verts: app.scene.verts.clone(), cam: app.cam, origin: [(rect.min.x * ppp).round(), (rect.min.y * ppp).round()], size, selected: app.sel_body, pixels_per_point: ppp, reach, section: section_plane(app) },
+            gpu::Frame { frozen: app.timeline.preview.is_some(), painted: app.timeline.paint_signal(), rev: app.scene.rev, verts: app.scene.verts.clone(), big: app.scene.big.clone(), coarse, cam: app.cam, origin: [(rect.min.x * ppp).round(), (rect.min.y * ppp).round()], size, selected: app.sel_body, pixels_per_point: ppp, reach, section: section_plane(app) },
         ));
         return;
     }
@@ -626,7 +688,7 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
     // Selecting a spline exposes its four interpolation points and their order.
     for (id, e) in &sk.entities {
         if let Geom::Spline { a, b, c, d } = e.geom
-            && (picked(*id) || [a,b,c,d].iter().any(|p| picked(*p)))
+            && (picked(*id) || hover == Hit::Entity(*id) || [a,b,c,d].iter().any(|p| picked(*p) || hover == Hit::Point(*p)))
         {
             let pts: Vec<Pos2> = [a,b,c,d].iter().map(|p| on_screen(app, sk, sk.pos(*p))).collect();
             painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0, colors.selected), 4.0, 4.0));
@@ -635,12 +697,17 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
             }
         }
     }
+    // A spline's fit points are its handles: drawn with a filled centre so they read as draggable.
+    let fit: std::collections::HashSet<Id> = sk.entities.values().filter_map(|e| if let Geom::Spline { a, b, c, d } = e.geom { Some([a, b, c, d]) } else { None }).flatten().collect();
     for (id, p) in &sk.points {
         let at = on_screen(app, sk, *p);
         let hot = picked(*id) || hover == Hit::Point(*id);
         if *id == ORIGIN {
             painter.circle(at, 5.0, colors.paper, Stroke::new(1.5, colors.ink));
             painter.circle_filled(at, 2.2, if hot { colors.selected } else { colors.ink });
+        } else if fit.contains(id) {
+            painter.circle(at, if hot { 5.0 } else { 4.0 }, if hot { colors.selected } else { colors.paper }, Stroke::new(1.3, if solved { colors.ink } else { colors.sketch }));
+            painter.circle_filled(at, 1.8, if hot { colors.paper } else if solved { colors.ink } else { colors.sketch });
         } else {
             painter.circle(at, if hot { 4.5 } else { 3.2 }, if hot { colors.selected } else { colors.paper }, Stroke::new(1.3, if solved { colors.ink } else { colors.sketch }));
         }
@@ -803,7 +870,9 @@ fn reference_select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, sid: Id,
     false
 }
 
-fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, sk: &Sketch, hover: Hit) {
+/// The Select tool, and the Move tool when `moving`: then a drag that starts on empty
+/// space moves the selection instead of drawing a selection box.
+fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, sk: &Sketch, hover: Hit, moving: bool) {
     if reference_select_tool(app, ui, resp, sid, sk, hover) { return; }
     let colors = ViewColors::new(painter.ctx());
     let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
@@ -825,6 +894,12 @@ fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
                         Drag::Move(pts.into_iter().map(|p| (p, sk.pos(p) - grab)).collect())
                     }
                 }
+            }
+            _ if moving && !app.sel.is_empty() => {
+                let mut pts: Vec<Id> = app.sel.iter().flat_map(|e| if sk.points.contains_key(e) { vec![*e] } else { sk.ent_points(*e) }).collect();
+                pts.sort();
+                pts.dedup();
+                Drag::Move(pts.into_iter().map(|p| (p, sk.pos(p) - grab)).collect())
             }
             _ => Drag::Box(origin),
         };
@@ -1016,13 +1091,14 @@ pub(crate) fn line_drawing_snap(sk: &Sketch, start: DVec2, mut snap: Snap, typed
             }
         }
     }
-    let inferred = if angle.is_none() && snap.point.is_none() && snap.on.is_none() { sticky_angle(raw, &candidates, typed) } else { typed.guide = None; raw };
+    let on_axis = snap.axis[0] || snap.axis[1];
+    let inferred = if angle.is_none() && snap.point.is_none() && snap.on.is_none() && !on_axis { sticky_angle(raw, &candidates, typed) } else { typed.guide = None; raw };
     let locked = update_angle_lock(typed, shift, angle.unwrap_or(inferred));
     let target = angle.or(locked).unwrap_or(inferred);
     if angle.is_some() || locked.is_some() || typed.guide.is_some() {
         let radians = target.rem_euclid(360.0).to_radians();
         snap.p = start + DVec2::from_angle(radians) * delta.length();
-        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on) = (None, None); }
+        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on, snap.axis) = (None, None, [false, false]); }
         snap.h = radians.sin().abs() < 1e-9;
         snap.v = radians.cos().abs() < 1e-9;
     }
@@ -1038,9 +1114,10 @@ pub(crate) fn tangent_drawing_snap(start: DVec2, tangent: DVec2, mut snap: Snap,
     let raw = 2.0 * delta.dot(tangent.perp()).atan2(delta.dot(tangent)).to_degrees();
     let candidates: Vec<_> = (-7..=7).filter(|i| *i != 0).map(|i| (i as f64 * 45.0, "Sweep")).collect();
     // Sweep values are signed and must not wrap: +315° and -45° are different arcs.
-    if sweep.is_some() || snap.point.is_some() || snap.on.is_some() { typed.guide = None; }
+    let on_axis = snap.axis[0] || snap.axis[1];
+    if sweep.is_some() || snap.point.is_some() || snap.on.is_some() || on_axis { typed.guide = None; }
     if typed.guide.is_some_and(|g| (raw - g.0).abs() > 6.0) { typed.guide = None; }
-    if sweep.is_none() && typed.guide.is_none() && snap.point.is_none() && snap.on.is_none() {
+    if sweep.is_none() && typed.guide.is_none() && snap.point.is_none() && snap.on.is_none() && !on_axis {
         typed.guide = candidates.into_iter().filter(|(a, _)| (raw - a).abs() <= 3.0).min_by(|a, b| (raw - a.0).abs().total_cmp(&(raw - b.0).abs()));
     }
     let inferred = typed.guide.map_or(raw, |g| g.0);
@@ -1055,7 +1132,7 @@ pub(crate) fn tangent_drawing_snap(start: DVec2, tangent: DVec2, mut snap: Snap,
     if sweep.is_some() || locked.is_some() || typed.guide.is_some() {
         let half = (target / 2.0).to_radians();
         snap.p = start + (tangent * half.cos() + tangent.perp() * half.sin()) * delta.length();
-        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on) = (None, None); }
+        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on, snap.axis) = (None, None, [false, false]); }
     }
     snap
 }
@@ -1081,7 +1158,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     }
     let hovered = resp.hover_pos().and_then(|p| captured_snap(app, ui, sk, p, from));
     // Over the boxes themselves the pointer is not over the sketch; the shape stays where it was.
-    let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false });
+    let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false, axis: [false, false], mid: false });
     let Some(mut s) = hovered.or(kept) else { return };
     let attachment = s;
     if let Some(t) = &mut app.typed {
@@ -1222,6 +1299,12 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
         painter.rect_stroke(Rect::from_center_size(at, Vec2::splat(11.0)), 1.0, Stroke::new(1.6, colors.selected), StrokeKind::Outside);
     } else if let Some(entity) = s.on {
         painter.add(Shape::line(path(app,sk,entity),Stroke::new(2.4,colors.selected)));
+        if s.mid {
+            // A small triangle under the point says it is the midpoint.
+            let tri = vec![at + vec2(0.0, 5.0), at + vec2(-6.0, 13.0), at + vec2(6.0, 13.0)];
+            painter.add(Shape::convex_polygon(tri, colors.selected, Stroke::NONE));
+            painter.text(at + vec2(0.0, 21.0), Align2::CENTER_CENTER, "mid", FontId::proportional(11.0), colors.selected);
+        }
         if let Some(pointer) = resp.hover_pos().filter(|p|p.distance(at)>2.0) {
             painter.line_segment([pointer,at],Stroke::new(1.0,colors.selected));
         }
@@ -1395,7 +1478,7 @@ fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
         app.gap_cache = Some((app.session.rev, sid, sk.open_endpoints()));
     }
     let dim = Hit::None;
-    for (f, _) in app.session.doc.sketches().filter(|(f, s)| f.id != sid && s.visible && !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.session.built.component_visible(f.owner) && app.doc().features.iter().take(app.doc().active()).any(|earlier| earlier.id == f.id)) {
+    for (f, _) in app.session.doc.sketches().filter(|(f, s)| f.id != sid && s.visible && !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.component_visible(f.owner) && app.doc().features.iter().take(app.doc().active()).any(|earlier| earlier.id == f.id)) {
         let Some(other) = app.world_sketch(f.id) else { continue };
         draw_sketch(app, painter, &other, false, dim, &mut Vec::new());
     }
@@ -1423,7 +1506,7 @@ fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
         if resp.clicked() { app.commit_value(); }
     } else {
         match app.tool {
-            Tool::Select => if !reference_consumed { select_tool(app, ui, resp, painter, sid, &sk, hover); },
+            Tool::Select | Tool::Move => if !reference_consumed { select_tool(app, ui, resp, painter, sid, &sk, hover, app.tool == Tool::Move); },
             Tool::Dimension => dimension_tool(app, resp, &sk, hover),
             Tool::Trim => {
                 if let (true, Hit::Entity(e), Some(pos)) = (resp.clicked_by(PointerButton::Primary), hover, resp.interact_pointer_pos())
@@ -1504,7 +1587,7 @@ fn pick_item(app: &App, doc: &Document, pos: Pos2) -> Option<Picked> {
     let (id, at, tri) = pick_body(app, &app.session.built, pos)?;
     let body = app.session.built.body(id)?;
     let face = Face::pick(body, tri);
-    let item = Item::Surface(face.tris.iter().map(|t| body.mesh.tris[*t]).collect());
+    let item = Item::Surface(face.tris.iter().map(|t| body.mesh.tri(*t)).collect());
     // A round face says how big round it is, which is how a hole or a rod is measured.
     let round = fr_core::exact::barrel(&body.solids, &[at, at]).ok().filter(|_| body.is_exact() && face.plane.is_none());
     let label = match round {
@@ -1549,15 +1632,41 @@ pub(crate) fn pick_face(app: &App, pos: Pos2) -> Option<Face> {
     Some(face)
 }
 
-/// The smallest profile under a screen position among the sketches a feature can use.
-fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: Option<Id>) -> Option<(Id, Profile)> {
+/// The sketch line or curve under the pointer that could be a sweep's path: one in a
+/// shown sketch other than the profile's.
+fn pick_path(app: &App, doc: &Document, pos: Pos2, profile: Option<Id>, selected_path: Option<Id>) -> Option<(Id, Id)> {
     doc.sketches()
-        .filter(|(f, s)| !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also == Some(f.id)))
+        .filter(|(f, s)| Some(f.id) != profile && (s.visible || selected_path == Some(f.id)) && !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner))
+        .find_map(|(f, s)| match hit(app, s, pos) {
+            Hit::Entity(e) => Some((f.id, e)),
+            _ => None,
+        })
+}
+
+/// The smallest profile under a screen position among the sketches a feature can use.
+fn pick_profile(app: &App, doc: &Document, pos: Pos2, also: &[Id]) -> Option<(Id, Profile)> {
+    doc.sketches()
+        .filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also.contains(&f.id)))
         .filter_map(|(f, s)| {
             let at = sketch_pos(app, s, pos)?;
             profiles(s).into_iter().filter(|p| p.contains(at)).min_by(|a, b| a.area().total_cmp(&b.area())).map(|p| (f.id, p))
         })
         .min_by(|a, b| a.1.area().total_cmp(&b.1.area()))
+}
+
+/// A sketch point under the cursor for a loft's tip: a point of a visible sketch (or one the
+/// dialog uses) that has no closed region, since in a sketch with regions a point such as a
+/// circle's centre is part of the outline's region; the origin only when the sketch holds nothing else.
+fn pick_sketch_point(app: &App, doc: &Document, pos: Pos2, also: &[Id]) -> Option<(Id, Id)> {
+    doc.sketches()
+        .filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || also.contains(&f.id)))
+        .filter(|(_, s)| profiles(s).is_empty())
+        .filter_map(|(f, s)| match hit(app, s, pos) {
+            Hit::Point(id) if id != 0 || s.entities.is_empty() => Some((f.id, id, on_screen(app, s, s.pos(id)).distance(pos))),
+            _ => None,
+        })
+        .min_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(sid, id, _)| (sid, id))
 }
 
 fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed: bool) {
@@ -1568,14 +1677,16 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
     for feature in &mut doc.features {
         if let FeatureKind::Sketch(sk) = &mut feature.kind {
             sk.plane = app.modeling_source().sketch_plane(app.doc(),feature.id).unwrap_or_else(||sk.plane.transformed(app.modeling_source().component_placement(feature.owner)));
-            if feature.suppressed || app.session.built.errors.contains_key(&feature.id) || !app.shown().component_visible(feature.owner) { sk.visible = false; }
+            if app.doc().is_suppressed(feature.id) || app.session.built.errors.contains_key(&feature.id) || !app.shown().component_visible(feature.owner) { sk.visible = false; }
         }
     }
-    let dlg_sketch = match &app.dialog {
-        Dialog::Feature(f) => f.sketch,
-        _ => None,
+    // Sketches a dialog is using are drawn even when they were put away.
+    let dlg_sketch: Vec<Id> = match &app.dialog {
+        Dialog::Feature(f) => f.sketch.into_iter().collect(),
+        Dialog::Loft(l) => l.sections.iter().map(|section| section.sketch).collect(),
+        _ => Vec::new(),
     };
-    for (f, sk) in doc.sketches().filter(|(f, s)| !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || dlg_sketch == Some(f.id))) {
+    for (f, sk) in doc.sketches().filter(|(f, s)| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.shown().component_visible(f.owner) && (s.visible || dlg_sketch.contains(&f.id))) {
         let _ = f;
         draw_sketch(app, painter, sk, false, Hit::None, &mut Vec::new());
     }
@@ -1605,16 +1716,55 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
             }
         }
         Dialog::Feature(mut f) => {
-            let over = hover.and_then(|p| pick_profile(app, &doc, p, f.sketch));
+            let over = hover.and_then(|p| pick_profile(app, &doc, p, f.sketch.as_slice()));
             if let Some(sk) = f.sketch.and_then(|s| doc.sketch(s)) {
                 for p in profiles(sk).iter().filter(|p| f.profiles.contains(&p.edges)) {
                     fill(app, painter, sk, p, Color32::from_rgba_unmultiplied(0, 120, 255, 84));
+                }
+                // Points across the revolve axis are ringed in red, matching the dialog's offer to fix them.
+                if f.revolve && let Some((_, past, _)) = app.revolve_crossing() {
+                    let red = Color32::from_rgb(214, 48, 48);
+                    for p in past {
+                        let at = on_screen(app, sk, sk.pos(p));
+                        painter.circle_stroke(at, 8.0, Stroke::new(2.2, red));
+                        painter.circle_filled(at, 2.5, red);
+                    }
                 }
                 if f.revolve
                     && let Some((a, b)) = Document::axis_line(sk, f.axis)
                 {
                     let d = (b - a).normalize_or(DVec2::X) * (app.vp.size().max_elem() as f64 / app.cam.scale);
                     painter.extend(Shape::dashed_line(&[on_screen(app, sk, a - d), on_screen(app, sk, a + d)], Stroke::new(1.6, theme::choose(painter.ctx(), Color32::from_rgb(214, 60, 160), Color32::from_rgb(244, 124, 208))), 10.0, 4.0));
+                }
+            }
+            // The sweep's path, in the colour of a selection; dashed while it cannot be followed.
+            let over_path = match (&f.sweep, hover) {
+                (Some(w), Some(p)) => pick_path(app, &doc, p, f.sketch, w.path_sketch),
+                _ => None,
+            };
+            if let Some(w) = &f.sweep {
+                let stroke = Stroke::new(2.6, colors.selected);
+                if let Some(sk) = w.path_sketch.and_then(|s| doc.sketch(s)) {
+                    let chain = fr_core::profile::chain(sk, &w.path);
+                    let ids: Vec<Id> = match &chain { Ok(c) => c.ids.clone(), Err(_) if w.path.is_empty() => sk.entities.iter().filter(|(_, e)| !e.construction).map(|(id, _)| *id).collect(), Err(_) => w.path.clone() };
+                    // When only parts of the path are swept, the whole path is drawn faintly and the parts in full.
+                    let partial = chain.as_ref().ok().filter(|_| !w.spans.is_empty());
+                    for id in ids {
+                        let line: Vec<Pos2> = sk.polyline(id).into_iter().map(|p| on_screen(app, sk, p)).collect();
+                        if partial.is_some() { painter.add(Shape::line(line, Stroke::new(1.4, colors.selected.gamma_multiply(0.45)))); }
+                        else if chain.is_ok() { painter.add(Shape::line(line, stroke)); }
+                        else { painter.extend(Shape::dashed_line(&line, stroke, 8.0, 5.0)); }
+                    }
+                    if let Some(chain) = partial {
+                        for part in crate::sweep_ui::covered(sk, chain, &w.spans) {
+                            painter.add(Shape::line(part.into_iter().map(|p| on_screen(app, sk, p)).collect(), Stroke::new(3.4, colors.selected)));
+                        }
+                    }
+                }
+                if let Some((sid, _)) = over_path && w.path_sketch != Some(sid) && let Some(sk) = doc.sketch(sid) {
+                    for id in sk.entities.iter().filter(|(_, e)| !e.construction).map(|(id, _)| *id) {
+                        painter.add(Shape::line(sk.polyline(id).into_iter().map(|p| on_screen(app, sk, p)).collect(), Stroke::new(2.0, colors.selected.gamma_multiply(0.5))));
+                    }
                 }
             }
             if let Some(face) = &f.face
@@ -1635,9 +1785,10 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 fill(app, painter, doc.sketch(*sid).unwrap(), p, Color32::from_rgba_unmultiplied(0, 120, 255, 40));
             }
             if let Some(pos) = clicked {
-                let line = f.sketch.and_then(|s| doc.sketch(s)).and_then(|sk| match hit(app, sk, pos) {
-                    Hit::Entity(e) if sk.line(e).is_some() => Some(e),
-                    _ => None,
+                // The nearest line of the sketch under the click, ignoring points: an axis is
+                // often picked near where lines meet, and a construction line is as good an axis.
+                let line = f.sketch.and_then(|s| doc.sketch(s)).and_then(|sk| {
+                    sk.entities.keys().filter(|e| sk.line(**e).is_some()).map(|e| (*e, path_dist(&path(app, sk, *e), pos))).filter(|(_, d)| *d <= 6.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(e, _)| e)
                 });
                 if f.pick_to {
                     // Measure from the sketch (or face) plane to the face clicked, along the extrude direction.
@@ -1648,10 +1799,30 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                         f.through_all = false;
                         f.pick_to = false;
                     }
-                } else if let (true, Some(l)) = (f.pick_axis, line) {
+                } else if let (true, Some(l)) = (f.pick_axis || f.revolve, line) {
+                    // Revolving: any line of the sketch clicked becomes the axis, no Line button needed.
                     f.axis = Axis::Line(l);
                     f.pick_axis = false;
+                } else if let (Some(w), Some((sid, entity))) = (&mut f.sweep, over_path) {
+                    // A plain click takes the sketch's whole run; Shift-click builds the path a piece at a time.
+                    let extend = resp.ctx.input(|i| i.modifiers.shift);
+                    if w.path_sketch != Some(sid) { w.path.clear(); }
+                    w.path_sketch = Some(sid);
+                    if extend {
+                        match w.path.iter().position(|e| *e == entity) {
+                            Some(i) => { w.path.remove(i); }
+                            None => w.path.push(entity),
+                        }
+                    } else {
+                        w.path.clear();
+                    }
                 } else if let Some((sid, p)) = over {
+                    // Both sketches may be closed. Let a region click correct
+                    // reversed defaults by releasing its previous path role.
+                    if let Some(w) = &mut f.sweep && w.path_sketch == Some(sid) {
+                        w.path_sketch = None;
+                        w.path.clear();
+                    }
                     let extend = resp.ctx.input(|i| i.modifiers.shift);
                     if !extend || f.sketch != Some(sid) { f.profiles.clear(); }
                     f.sketch = Some(sid);
@@ -1661,6 +1832,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                         None => f.profiles.push(p.edges),
                     }
                 } else if !f.revolve
+                    && f.sweep.is_none()
                     && f.editing.is_none()
                     && let Some(mut face) = pick_face(app, pos)
                 {
@@ -1675,6 +1847,51 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                     }
                 }
                 app.dialog = Dialog::Feature(f);
+            }
+        }
+        Dialog::Loft(mut l) => {
+            // A point under the cursor wins over the region around it: it is the smaller target.
+            let point_over = hover.and_then(|p| pick_sketch_point(app, &doc, p, &dlg_sketch));
+            let over = if point_over.is_some() { None } else { hover.and_then(|p| pick_profile(app, &doc, p, &dlg_sketch)) };
+            // Each section filled and numbered in the order it is joined; a tip is a ringed point.
+            for (i, section) in l.sections.iter().enumerate() {
+                let Some(sk) = doc.sketch(section.sketch) else { continue };
+                let at = if let Some(point) = section.point {
+                    let Some(p) = sk.points.get(&point) else { continue };
+                    let at = on_screen(app, sk, *p);
+                    painter.circle_stroke(at, 14.0, Stroke::new(2.0, colors.selected));
+                    at
+                } else {
+                    let all = profiles(sk);
+                    let Some(p) = all.iter().find(|p| p.edges == section.profile) else { continue };
+                    fill(app, painter, sk, p, Color32::from_rgba_unmultiplied(0, 120, 255, 84));
+                    on_screen(app, sk, p.centroid())
+                };
+                painter.circle_filled(at, 10.0, colors.selected);
+                painter.text(at, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(12.0), Color32::WHITE);
+            }
+            if let Some((sid, p)) = &over {
+                fill(app, painter, doc.sketch(*sid).unwrap(), p, Color32::from_rgba_unmultiplied(0, 120, 255, 40));
+            }
+            if let Some((sid, id)) = point_over && let Some(sk) = doc.sketch(sid) {
+                painter.circle_stroke(on_screen(app, sk, sk.pos(id)), 9.0, Stroke::new(2.0, colors.selected));
+            }
+            if clicked.is_some() && let Some((sid, id)) = point_over {
+                // A sketch gives one section: clicking its chosen point drops it, another point replaces it.
+                match l.sections.iter().position(|section| section.sketch == sid) {
+                    Some(i) if l.sections[i].point == Some(id) => { l.sections.remove(i); }
+                    Some(i) => { l.sections[i].point = Some(id); l.sections[i].profile.clear(); }
+                    None => l.sections.push(fr_core::doc::LoftSection { sketch: sid, profile: Vec::new(), point: Some(id) }),
+                }
+                app.dialog = Dialog::Loft(l);
+            } else if clicked.is_some() && let Some((sid, p)) = over {
+                // A sketch gives one section: clicking its chosen region drops it, another region replaces it.
+                match l.sections.iter().position(|section| section.sketch == sid) {
+                    Some(i) if l.sections[i].profile == p.edges => { l.sections.remove(i); }
+                    Some(i) => { l.sections[i].profile = p.edges; l.sections[i].point = None; }
+                    None => l.sections.push(fr_core::doc::LoftSection { sketch: sid, profile: p.edges, point: None }),
+                }
+                app.dialog = Dialog::Loft(l);
             }
         }
         Dialog::Blend(mut b) => {
@@ -1820,6 +2037,11 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 if clicked.is_some() && let Err(e) = app.text_on_face(face) { app.toast(e); }
             }
         }
+        Dialog::Sculpt(_) => {
+            if let Some(pos) = clicked && let Some((id, at, _)) = pick_body(app, &app.session.built, pos) {
+                app.sculpt_at(id, at);
+            }
+        }
         Dialog::Thread(mut t) => {
             if let Some(at) = t.face {
                 painter.circle_stroke(to_screen(app, app.body_point_world(t.body, at)), 5.0, Stroke::new(2.0, colors.selected));
@@ -1956,18 +2178,26 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Split(_), _) => "Choose a flat face or construction plane. XY, XZ and YZ use the body’s component axes.",
         (Dialog::DeleteComponent(_), _) => "Confirm deletion of the component and its contents, or cancel.",
         (Dialog::Feature(f), _) if f.pick_axis => "Click a sketch line to revolve around.",
+        (Dialog::Feature(f), _) if f.revolve => "Click a line of the sketch to revolve around it, or a region to choose the profile.",
         (Dialog::Feature(f), _) if f.pick_to => "Click the face the extrude should reach.",
+        (Dialog::Feature(f), _) if f.sweep.as_ref().is_some_and(|w| w.path_sketch.is_none()) => "Click a line or curve of the path, drawn in another sketch than the profile.",
+        (Dialog::Feature(f), _) if f.sweep.is_some() && f.profiles.is_empty() => "Click a closed region for the profile.",
+        (Dialog::Feature(f), _) if f.sweep.is_some() => "Click a region to change the profile or a curve to change the path. Shift-click curves to follow only part of a sketch.",
         (Dialog::Feature(f), _) if f.revolve => "Click a closed region to select it. Shift-click to add or remove regions.",
         (Dialog::Feature(_), _) => "Click a closed region or flat face. Shift-click to add or remove regions. Drag the arrow to set the distance.",
         (Dialog::Primitive(d), _) if d.pick_surface => "Click a flat face or construction plane for placement.",
         (Dialog::Primitive(d), _) if d.placing => "Click to place the primitive. Visible sketch geometry snaps; Alt releases. OK commits the feature.",
         (Dialog::Primitive(_), _) => "Use Place in view, colored arrows/rings, or Position fields. F fits the preview.",
+        (Dialog::Loft(l), _) if l.sections.is_empty() => "Click a closed region in the first sketch, then one in each sketch after it, in order. A sketch point makes the loft come to a tip there.",
+        (Dialog::Loft(l), _) if l.sections.len() == 1 => "Click a closed region in the next sketch, drawn on another plane, or a sketch point for a tip.",
+        (Dialog::Loft(_), _) => "Click another region to add a section, or a numbered one to leave it out. Reorder them in the dialog.",
         (Dialog::Pattern(p), _) if p.kind==1 => "Drag a last-copy handle to set the span. Visible sketch geometry snaps along that axis; Alt releases.",
         (Dialog::Pattern(_), _) => "The dots show where each copy will go.",
         (Dialog::Blend(_), _) => "Click edges of a body to add or remove them.",
         (Dialog::Shell(_), _) => "Click the faces to leave open.",
         (Dialog::Hole(_), _) => "Click a flat face to put a hole there; click a hole to take it away. Sketch points snap.",
         (Dialog::Thread(_), _) => "Click the round side of a rod, or the inside of a hole.",
+        (Dialog::Sculpt(_), _) => "Click the body to add a brush stroke.",
         (Dialog::Text(_), _) => "Click a flat face to place text, or choose XY, XZ or YZ. The cross marks its baseline origin.",
         (Dialog::Measure(_), _) => "Click two things to measure between: corners and sketch points, edges and sketch lines, or faces.",
         (Dialog::Transform(_), _) => "Drag colored arrows or rotation rings. Shift gives fine moves or 15° rotations. Click another body to move it.",

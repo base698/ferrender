@@ -119,7 +119,12 @@ pub fn document(d: &Document) -> Result<(), String> {
     // Bound aggregate decoded image memory before validating (and decoding) any image.
     let mut reference_pixels = 0u64;
     for f in &d.features {
-        if let FeatureKind::Sketch(sketch) = &f.kind && let Some(image) = &sketch.reference {
+        let image = match &f.kind {
+            FeatureKind::Sketch(sketch) => sketch.reference.as_ref(),
+            FeatureKind::Relief(r) => Some(&r.image),
+            _ => None,
+        };
+        if let Some(image) = image {
             reference_pixels += u64::from(image.pixel_width) * u64::from(image.pixel_height);
             if reference_pixels > 16 * 1024 * 1024 { return Err("reference images exceed the document limit of 16 megapixels".into()); }
         }
@@ -130,9 +135,16 @@ pub fn document(d: &Document) -> Result<(), String> {
         expression(&p.expr)?;
     }
     let mut ids = BTreeSet::new();
+    let mut script_outputs = BTreeSet::new();
     let mut depths = std::collections::BTreeMap::from([(0,0usize)]);
     for f in &d.features {
         if f.id == 0 || !ids.insert(f.id) || f.id >= d.next_id { return Err("feature ids must be unique and below the next id".into()); }
+        if let Some(key) = &f.script_key {
+            if key.is_empty() || key.len() > 1024 { return Err("script output identities must be nonempty and no longer than 1024 bytes".into()); }
+            if let Some(chip) = f.made_by && !script_outputs.insert((chip, key)) {
+                return Err("a script run has duplicate output identities".into());
+            }
+        }
         let depth=*depths.get(&f.owner).ok_or("each feature owner must be root or an earlier component")?;
         if let FeatureKind::Component(c)=&f.kind {
             if depth>=32 {return Err("components can nest at most 32 levels deep".into());}
@@ -143,6 +155,10 @@ pub fn document(d: &Document) -> Result<(), String> {
             }
         }
         plane_dependencies(d,f)?;
+        if let Some(by)=f.made_by {
+            let earlier=d.features.iter().take_while(|g|g.id!=f.id).any(|g|g.id==by && matches!(g.kind,FeatureKind::ScriptRun(_)));
+            if !earlier { return Err(format!("feature {} says it was made by script run {by}, which is not an earlier script run",f.id)); }
+        }
         match &f.kind {
             FeatureKind::Sketch(s) => s.validate().map_err(|e|format!("sketch {}: {e}",f.id))?,
             FeatureKind::Import(m) => m.validate()?,
@@ -151,6 +167,47 @@ pub fn document(d: &Document) -> Result<(), String> {
             FeatureKind::Primitive(p) => p.validate()?,
             FeatureKind::Remove(r) => r.validate()?,
             FeatureKind::Split(s) => s.validate()?,
+            FeatureKind::Relief(r) => {
+                r.image.validate().map_err(|e| format!("relief {}: {e}", f.id))?;
+                if r.resolution < 2 || r.resolution > 1200 { return Err(format!("relief {}: resolution must be between 2 and 1200", f.id)); }
+                if !r.gamma.is_finite() || r.gamma <= 0.0 || r.gamma > 10.0 || r.blur > 64 { return Err(format!("relief {}: gamma must be between 0 and 10 and blur at most 64", f.id)); }
+                for v in [&r.width, &r.depth, &r.base] { expression(&v.expr)?; if !v.v.is_finite() { return Err(format!("relief {}: values must be finite", f.id)); } }
+            }
+            FeatureKind::ScriptRun(r) => {
+                if r.source.len() > crate::script::MAX_SOURCE_BYTES { return Err(format!("script run {}: the source is larger than 1 MB", f.id)); }
+                if !r.inputs.is_object() { return Err(format!("script run {}: inputs must be an object", f.id)); }
+                if r.script_name.chars().count() > 256 { return Err(format!("script run {}: the name is too long", f.id)); }
+            }
+            FeatureKind::MeshOp(m) => {
+                use crate::doc::MeshOpKind;
+                if m.body == 0 { return Err(format!("mesh operation {}: select a body", f.id)); }
+                match &m.op {
+                    MeshOpKind::Repair { fill_holes } => if *fill_holes > 100_000 { return Err("fill_holes is too large".into()) },
+                    MeshOpKind::Decimate { target, .. } => if *target < 4 { return Err("a decimation target must be at least 4 triangles".into()) },
+                    MeshOpKind::Smooth { iterations, strength } => if *iterations > 500 || !strength.is_finite() || !(0.0..=1.0).contains(strength) { return Err("smoothing takes at most 500 iterations and a strength from 0 to 1".into()) },
+                    MeshOpKind::Subdivide { levels, .. } => if *levels == 0 || *levels > 6 { return Err("subdivision takes 1 to 6 levels".into()) },
+                    MeshOpKind::Cut { plane, .. } | MeshOpKind::Mirror { plane, .. } => crate::body_ops::Split { body: m.body, plane: plane.clone() }.validate()?,
+                    MeshOpKind::Offset { distance, direction } | MeshOpKind::ExtrudeRegion { distance, direction } => {
+                        expression(&distance.expr)?;
+                        if !distance.v.is_finite() || direction.is_some_and(|d| !d.is_finite()) { return Err("the mesh offset needs finite values".into()); }
+                    }
+                    MeshOpKind::Sculpt { at, radius, strength, .. } => {
+                        expression(&radius.expr)?; expression(&strength.expr)?;
+                        if !at.is_finite() || !radius.v.is_finite() || radius.v <= 0.0 || !strength.v.is_finite() { return Err("a sculpt stroke needs a finite point, a positive radius and a finite strength".into()); }
+                    }
+                }
+                if let Some(r) = &m.region {
+                    use crate::meshops::RegionSpec;
+                    let ok = match r {
+                        RegionSpec::Sphere { centre, radius } => centre.is_finite() && radius.is_finite() && *radius > 0.0,
+                        RegionSpec::Box { lo, hi } => lo.is_finite() && hi.is_finite(),
+                        RegionSpec::Side { plane } => plane.origin.is_finite() && plane.x.is_finite() && plane.y.is_finite(),
+                        RegionSpec::Normal { direction, degrees } => direction.is_finite() && degrees.is_finite(),
+                        RegionSpec::Connected { seed } => seed.is_finite(),
+                    };
+                    if !ok { return Err(format!("mesh operation {}: the region needs finite values", f.id)); }
+                }
+            }
             _ => {}
         }
     }
@@ -186,14 +243,15 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
         Ok(())
     };
     let body=|id:Id| -> Result<(),String> {
-        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
+        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Sweep(_)|FeatureKind::Loft(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
         else if id>=1000 && d.feature(id/1000).is_some() {earlier(id/1000,"pattern or split",|k|matches!(k,FeatureKind::Pattern(_)|FeatureKind::Split(_)))}
         else {Ok(())}
     };
     let plane=|r:&PlaneRef| -> Result<(),String> {match r {
         PlaneRef::Origin(_)=>Ok(()),
         PlaneRef::Plane(id)=>earlier(*id,"construction plane",|k|matches!(k,FeatureKind::Plane(_))),
-        PlaneRef::Face {body:id,at,frame}=>{body(*id)?;anchor(*at,*frame)}
+        PlaneRef::Free(p)=>Sketch::new(*p).validate(),
+        PlaneRef::Face {body:id,at,frame,..}=>{body(*id)?;anchor(*at,*frame)}
     }};
     match &f.kind {
         FeatureKind::Split(s)=>{

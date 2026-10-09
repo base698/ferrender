@@ -1,15 +1,17 @@
 [package]
 name = "ferrender"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
 eframe = "0.36.2"
 egui = "0.36.2"
 egui-phosphor = "0.14.0"
-fr-core = { version = "0.3.0", path = "../fr-core" }
+fr-core = { version = "0.4.0", path = "../fr-core" }
 glam = "0.34.1"
 rfd = "0.17.2"
+open = "5"
+crc32fast = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.6"

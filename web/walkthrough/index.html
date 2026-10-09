@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferrender walkthrough</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #b9c4cf; font: 14px/1.45 system-ui, sans-serif; color: #1c2126; }
+  canvas { display: block; }
+  #panel {
+    position: fixed; left: 16px; top: 16px; max-width: 320px; padding: 14px 16px;
+    background: rgba(255, 255, 255, 0.92); border-radius: 8px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+  }
+  #panel h1 { margin: 0 0 6px; font-size: 16px; }
+  #panel p { margin: 6px 0; }
+  #panel table { border-collapse: collapse; margin: 6px 0; }
+  #panel td { padding: 1px 10px 1px 0; vertical-align: top; }
+  #panel td:first-child { white-space: nowrap; font-weight: 600; }
+  #status { color: #55606b; }
+  #status.error { color: #a4261d; }
+  body.walking #panel { opacity: 0.0; pointer-events: none; transition: opacity 0.3s; }
+  #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(30, 60, 110, 0.55); color: #fff; font-size: 22px; }
+  body.dropping #drop { display: flex; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/",
+    "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.16/build/index.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="panel">
+  <h1>Walkthrough</h1>
+  <p id="status">Loading…</p>
+  <table>
+    <tr><td>Click</td><td>look around with the mouse (Esc to release)</td></tr>
+    <tr><td>W A S D</td><td>walk; hold Shift to go faster</td></tr>
+    <tr><td>C</td><td>walk through walls on or off</td></tr>
+    <tr><td>R</td><td>back to the start</td></tr>
+    <tr><td>Drop a file</td><td>view another STL</td></tr>
+  </table>
+  <p><b>Headset:</b> left stick walks, right stick turns, hold a trigger and release to jump to the ring.</p>
+</div>
+<div id="drop">Drop an STL to walk through it</div>
+<script type="module" src="./walk.js"></script>
+</body>
+</html>

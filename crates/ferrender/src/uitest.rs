@@ -16,6 +16,7 @@ mod body_ops;
 mod command_search;
 mod components_followup;
 mod face_extrusion_followup;
+mod loft;
 
 use std::path::PathBuf;
 
@@ -261,6 +262,407 @@ fn line_tool_constraints_and_revolve() {
     assert_eq!(body.mesh.open_edges(), 0);
     assert!(body.mesh.volume() > 50_000.0);
     save(&mut h, "revolve.png");
+}
+
+#[test]
+fn points_near_an_axis_land_on_it_and_splines_carry_on() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    let sketch = |h: &H| h.state().session.doc.sketch(sid).unwrap().clone();
+    let px = 1.0 / h.state().cam.scale;
+
+    // A revolve profile on the left of the Y axis whose top corner is clicked two
+    // pixels past the axis: it lands on the axis and is held there.
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x, y) in [(0.0, 0.0), (-25.0, 0.0), (-30.0, 40.0), (2.0 * px, 40.0), (0.0, 0.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = sketch(&h);
+    assert_eq!(sk.entities.len(), 4, "the outline closes on the origin");
+    assert!(h.state().clicks.is_empty());
+    let top = sk.points.iter().find(|(_, p)| (p.y - 40.0).abs() < 1.0 && p.x > -1.0).map(|(id, p)| (*id, *p)).expect("the top corner");
+    assert!(top.1.x.abs() < 1e-9, "the corner snapped onto the Y axis: {}", top.1.x);
+    assert!(sk.constraints.values().any(|c| c.kind == CKind::Vertical && c.refs.contains(&top.0) && c.refs.contains(&0)), "and is held there, in line with the origin");
+    assert_eq!(fr_core::profile::profiles(&sk).len(), 1);
+    run(&mut h, Action::Revolve);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the revolve dialog should open") };
+    assert!(f.revolve && f.profiles.len() == 1);
+    h.run_steps(2);
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None, "a profile that closes on the axis revolves");
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    run(&mut h, Action::Undo);
+    assert!(h.state().session.built.bodies.is_empty());
+
+    // Seven clicks with the Spline tool make two splines sharing a point, and the tool
+    // is still going from that end until Escape.
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    run(&mut h, Action::Tool(Tool::Spline));
+    for (x, y) in [(5.0, 5.0), (15.0, 20.0), (25.0, 5.0), (35.0, 20.0), (45.0, 5.0), (55.0, 20.0), (65.0, 5.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let splines: Vec<_> = sk.entities.values().filter(|e| matches!(e.geom, Geom::Spline { .. })).collect();
+    assert_eq!(splines.len(), 2, "the second spline starts where the first ended");
+    assert_eq!(sk.points.len() - 1, 7, "the shared point is one point, plus the origin");
+    assert_eq!(h.state().clicks.len(), 1, "the spline carries on from its end");
+    let ends: Vec<(u32, u32)> = splines.iter().filter_map(|e| if let Geom::Spline { a, d, .. } = e.geom { Some((a, d)) } else { None }).collect();
+    let second = ends.iter().find(|(a, _)| ends.iter().any(|(_, d)| d == a)).expect("the second spline starts at the first one's end");
+    assert_eq!(h.state().clicks[0].point, Some(second.1), "the next spline would start at the second one's end");
+    run(&mut h, Action::Cancel);
+    assert!(h.state().clicks.is_empty(), "Escape ends the run");
+    assert_eq!(h.state().session.doc.sketch(sid).unwrap().entities.len(), 2);
+
+    // Two new clicks and then the chain's end point: the spline is finished there with
+    // its missing fit points filled in along the last stretch, and the run ends.
+    run(&mut h, Action::Tool(Tool::Spline));
+    for (x, y) in [(40.0, 30.0), (55.0, 35.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    assert_eq!(h.state().clicks.len(), 2, "two clicks placed: {:?}", h.state().clicks);
+    let end = h.state().session.doc.sketch(sid).unwrap().pos(second.1);
+    let p = at(&h, end.x, end.y);
+    click(&mut h, p);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    assert_eq!(sk.entities.len(), 3, "the third spline was made from three clicks");
+    let closed = sk.entities.values().find_map(|e| if let Geom::Spline { a, b, c, d } = e.geom { (d == second.1 && a != second.0).then_some((a, b, c)) } else { None }).expect("it ends on the point that was clicked");
+    assert!((sk.pos(closed.0).x - 40.0).abs() < 1.0 && (sk.pos(closed.1).x - 55.0).abs() < 1.0, "it passes through the clicked points: {:?} {:?} {:?} end {:?}", sk.pos(closed.0), sk.pos(closed.1), sk.pos(closed.2), end);
+    assert!((sk.pos(closed.2) - (sk.pos(closed.1) + end) / 2.0).length() < 1e-6, "the filled-in point sits halfway along the last stretch");
+    assert!(h.state().clicks.is_empty(), "landing on an existing point ends the run");
+}
+
+#[test]
+fn a_revolve_across_the_axis_names_the_points_and_can_move_them_onto_it() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    // A profile right of the Y axis whose top-left corner is 3 mm past it: too far for the
+    // axis snap, close enough for the dialog's fix.
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x, y) in [(0.0, 0.0), (20.0, 0.0), (20.0, 30.0), (-3.0, 30.0), (0.0, 0.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    assert_eq!(sk.entities.len(), 4);
+    let corner = *sk.points.iter().find(|(_, p)| p.x < -1.0).map(|(id, _)| id).expect("the corner past the axis");
+    assert_eq!(fr_core::Document::axis_crossing(&sk, &[], fr_core::doc::Axis::Y).map(|(p, by)| (p, (by * 100.0).round() / 100.0)), Some((vec![corner], 3.0)));
+    assert!(fr_core::Document::axis_crossing(&sk, &[], fr_core::doc::Axis::X).is_none(), "it only touches X, which is allowed");
+
+    run(&mut h, Action::Revolve);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the revolve dialog should open") };
+    assert!(f.revolve && f.axis == fr_core::doc::Axis::Y);
+    h.run_steps(2);
+    let error = h.state().preview.as_ref().and_then(|p| p.2.clone()).expect("the preview refuses the revolve");
+    assert!(error.contains("crosses the axis") && error.contains(&format!("point {corner}")), "{error}");
+    let (dialog_sid, past, by) = h.state().revolve_crossing().expect("the dialog knows which points are across");
+    assert_eq!((dialog_sid, past.clone()), (sid, vec![corner]));
+    assert!((by - 3.0).abs() < 0.01);
+
+    h.state_mut().move_points_onto_axis(sid, &past, fr_core::doc::Axis::Y);
+    h.run_steps(2);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    assert!(sk.pos(corner).x.abs() < 1e-9, "the corner is on the axis: {:?}", sk.pos(corner));
+    assert!(sk.constraints.values().any(|c| c.kind == CKind::Vertical && c.refs.contains(&corner) && c.refs.contains(&0)), "and held there");
+    assert!(h.state().revolve_crossing().is_none());
+    assert_eq!(h.state().preview.as_ref().and_then(|p| p.2.clone()), None, "the preview now shows the revolve");
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    assert!(h.state().session.built.errors.is_empty());
+
+    // Revolving again: clicking a line of the sketch makes it the axis, with no Line button first.
+    run(&mut h, Action::Undo);
+    run(&mut h, Action::Revolve);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!() };
+    assert_eq!(f.axis, fr_core::doc::Axis::Y);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let right = *sk.entities.iter().find(|(_, e)| matches!(e.geom, Geom::Line { a, b } if (sk.pos(a).x - 20.0).abs() < 1e-6 && (sk.pos(b).x - 20.0).abs() < 1e-6)).map(|(id, _)| id).expect("the right edge");
+    let p = at(&h, 20.0, 15.0);
+    click(&mut h, p);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the dialog stays open") };
+    assert_eq!(f.axis, fr_core::doc::Axis::Line(right), "the clicked edge is the axis");
+    h.run_steps(2);
+    assert_eq!(h.state().preview.as_ref().and_then(|p| p.2.clone()), None, "the profile lies on one side of its own edge");
+}
+
+#[test]
+fn loft_offers_a_lone_sketch_point_as_its_tip() {
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let base = h.state().session.doc.sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "add_geometry", "sketch": base, "items": [{"type": "rect", "from": [-10, -10], "to": [10, 10]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY", "offset": 30}));
+    let apex = h.state().session.doc.sketches().last().unwrap().0.id;
+    let out = exec(&mut h, json!({"op": "add_geometry", "sketch": apex, "items": [{"type": "point", "at": [0, 0]}]}));
+    let point = out["items"][0]["points"][0].as_u64().unwrap() as u32;
+    h.state_mut().finish_sketch();
+    run(&mut h, Action::Loft);
+    let Dialog::Loft(l) = h.state().dialog.clone() else { panic!("the loft dialog should open") };
+    assert_eq!(l.sections.len(), 2, "both sketches are sections already: {:?}", l.sections);
+    assert_eq!(l.sections[1].point, Some(point), "the lone point is the tip");
+    h.run_steps(2);
+    assert_eq!(h.state().preview.as_ref().and_then(|p| p.2.clone()), None, "the pyramid previews");
+    h.state_mut().apply_dialog();
+    let body = &h.state().session.built.bodies[0];
+    let pyramid = 30.0 / 3.0 * 400.0;
+    assert!((body.solids[0].volume() - pyramid).abs() < pyramid * 1e-3, "{}", body.solids[0].volume());
+}
+
+#[test]
+fn move_tool_moves_the_selection_in_a_sketch() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x, y) in [(10.0, 10.0), (30.0, 10.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    run(&mut h, Action::Cancel);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let line = *sk.entities.keys().next().unwrap();
+    let before = sk.line(line).unwrap();
+    // Select the line, then Move: a drag from empty space carries the selection.
+    h.state_mut().sel = vec![line];
+    run(&mut h, Action::Transform);
+    assert_eq!(h.state().tool, Tool::Move, "Move in a sketch is the sketch move tool, not the body dialog");
+    assert!(matches!(h.state().dialog, Dialog::None));
+    let (from, to) = (at(&h, 40.0, 20.0), at(&h, 45.0, 28.0));
+    drag(&mut h, &[from, (from + to.to_vec2()) / 2.0, to]);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let after = sk.line(line).unwrap();
+    assert!((after.0 - before.0 - DVec2::new(5.0, 8.0)).length() < 0.2 && (after.1 - before.1 - DVec2::new(5.0, 8.0)).length() < 0.2, "{before:?} -> {after:?}");
+    assert_eq!(sk.entities.len(), 1, "moving draws nothing new");
+    // Dragging one end point with the Move tool moves only that point.
+    let end = at(&h, after.1.x, after.1.y);
+    drag(&mut h, &[end, end + egui::vec2(10.0, 0.0), end + egui::vec2(20.0, 0.0)]);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let moved = sk.line(line).unwrap();
+    assert!((moved.0 - after.0).length() < 1e-6 && (moved.1 - after.1).length() > 1.0, "{after:?} -> {moved:?}");
+    assert!(h.state().session.can_undo());
+}
+
+#[test]
+fn sweep_covers_the_parts_of_its_path_set_in_the_dialog() {
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    let newest = |h: &H| h.state().doc().sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let path = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": path, "items": [{"type": "polyline", "points": [[0, 0], [50, 0], [50, 50]]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "YZ"}));
+    let profile = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": profile, "items": [{"type": "rect", "from": [-3, -3], "to": [3, 3]}]}));
+    h.state_mut().fit();
+    h.run_steps(3);
+    run(&mut h, Action::Sweep);
+    let sweep_of = |h: &H| match &h.state().dialog { Dialog::Feature(f) => f.sweep.clone().expect("the sweep dialog"), other => panic!("the sweep dialog should be open, not {other:?}") };
+    assert!(sweep_of(&h).spans.is_empty(), "a new sweep follows the whole path");
+    h.run_steps(2);
+    // The control is there, shows the whole path as one part and cannot add another yet.
+    h.get_by_label("Along path");
+    h.get_by_label("Add part");
+    let whole_volume = { let p = h.state().preview.as_ref().expect("a preview"); assert_eq!(p.2, None); p.1.bodies[0].solids.iter().map(|s| s.volume()).sum::<f64>() };
+    assert!((whole_volume - 36.0 * 100.0).abs() < 1e-6, "{whole_volume}");
+    // Drag the end handle of the only part from the right end of the track to its middle.
+    let track = h.get_by_label("Add part").rect();
+    // The track sits above the numbers row, which sits above the buttons; find its handle by trying the row heights.
+    let (left, width) = (track.left() + 6.0, 218.0);
+    let mut dragged = false;
+    for up in [38.0, 44.0, 50.0, 56.0, 62.0, 68.0] {
+        let y = track.top() - up;
+        drag(&mut h, &[egui::pos2(left + width, y), egui::pos2(left + width * 0.75, y), egui::pos2(left + width * 0.5, y)]);
+        h.run_steps(2);
+        if !sweep_of(&h).spans.is_empty() { dragged = true; break; }
+    }
+    assert!(dragged, "dragging the end handle shortens the part");
+    let spans = sweep_of(&h).spans;
+    assert_eq!(spans.len(), 1);
+    assert!(spans[0][0] == 0.0 && (spans[0][1] - 0.5).abs() < 0.03, "the part now ends about half way: {spans:?}");
+    // Set it to exactly the first 30 mm, then add a part with the button: it lands in the uncovered rest.
+    if let Dialog::Feature(f) = &mut h.state_mut().dialog { f.sweep.as_mut().unwrap().spans = vec![[0.1, 0.3]]; }
+    h.run_steps(2);
+    h.get_by_label("Add part").click();
+    h.run_steps(3);
+    let spans = sweep_of(&h).spans;
+    assert_eq!(spans.len(), 2, "{spans:?}");
+    assert!(spans[1][0] > 0.3 && spans[1][1] <= 1.0);
+    // The exact request: 0.1 to 0.3 and 0.6 to 0.7.
+    if let Dialog::Feature(f) = &mut h.state_mut().dialog { f.sweep.as_mut().unwrap().spans = vec![[0.1, 0.3], [0.6, 0.7]]; }
+    h.run_steps(3);
+    let preview = h.state().preview.as_ref().expect("the dialog previews the parts");
+    assert_eq!(preview.2, None, "the preview builds");
+    assert_eq!(preview.1.bodies[0].solids.len(), 2, "two separate pieces");
+    save(&mut h, "sweep-parts-dialog.png");
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None, "the sweep should apply cleanly");
+    let app = h.state();
+    let body = &app.session.built.bodies[0];
+    let volume: f64 = body.solids.iter().map(|s| s.volume()).sum();
+    // 100 mm of path: 20 mm on the first leg and 10 mm on the second.
+    assert!((volume - 36.0 * 30.0).abs() < 1e-6, "{volume}");
+    assert_eq!(body.mesh.open_edges(), 0);
+    let id = app.doc().features.last().unwrap().id;
+    let fr_core::FeatureKind::Sweep(w) = &app.doc().features.last().unwrap().kind else { panic!("a sweep") };
+    assert_eq!(w.spans, vec![[0.1, 0.3], [0.6, 0.7]]);
+    h.state_mut().fit();
+    save(&mut h, "sweep-parts.png");
+    // Editing shows the parts again; Whole path clears them.
+    h.state_mut().edit_feature(id);
+    assert_eq!(sweep_of(&h).spans, vec![[0.1, 0.3], [0.6, 0.7]]);
+    h.run_steps(2);
+    h.get_by_label("Whole path").click();
+    h.run_steps(3);
+    assert!(sweep_of(&h).spans.is_empty());
+    h.state_mut().apply_dialog();
+    let volume: f64 = h.state().session.built.bodies[0].solids.iter().map(|s| s.volume()).sum();
+    assert!((volume - 3600.0).abs() < 1e-6, "{volume}");
+}
+
+#[test]
+fn sweep_picks_its_profile_and_path_previews_and_edits() {
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    let newest = |h: &H| h.state().doc().sketches().last().unwrap().0.id;
+    // An L-shaped path, a second sketch that could also be a path, and a square profile across the start of the L.
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let path = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": path, "items": [{"type": "polyline", "points": [[0, 0], [30, 0], [30, 30]]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let other = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": other, "items": [{"type": "line", "from": [0, 0], "to": [-30, 0]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "YZ"}));
+    let profile = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": profile, "items": [{"type": "rect", "from": [-3, -3], "to": [3, 3]}]}));
+    h.state_mut().fit();
+    h.run_steps(3);
+
+    run(&mut h, Action::Sweep);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the sweep dialog should open") };
+    let w = f.sweep.clone().expect("it is the sweep dialog");
+    assert_eq!(f.sketch, Some(profile), "the newest sketch with a closed region is the profile");
+    assert_eq!(f.profiles.len(), 1);
+    assert_eq!(w.path_sketch, Some(other), "the newest other sketch that is one run is offered as the path");
+    assert_eq!(w.orient, fr_core::doc::SweepOrient::Follow);
+    // The dialog is Sweep's own: no distance arrow, and its own title and rows.
+    h.run_steps(2);
+    h.get_by_label("Follow path");
+    h.get_by_label("Orientation");
+    // Clicking a leg of the L in the viewport makes that sketch the path.
+    let on_leg = at(&h, 30.0, 15.0);
+    click(&mut h, on_leg);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the dialog stays open") };
+    assert_eq!(f.sweep.as_ref().unwrap().path_sketch, Some(path));
+    assert!(f.sweep.as_ref().unwrap().path.is_empty(), "a plain click follows the whole sketch");
+    assert_eq!(f.sketch, Some(profile), "picking the path leaves the profile alone");
+    // The preview shows the mitred bar before OK.
+    h.run_steps(3);
+    let preview = h.state().preview.as_ref().expect("the dialog previews the sweep");
+    assert_eq!(preview.2, None, "the preview builds");
+    assert_eq!(preview.1.bodies.len(), 1);
+    save(&mut h, "sweep-preview.png");
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None, "the sweep should apply cleanly");
+    let app = h.state();
+    assert_eq!(app.dialog, Dialog::None);
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    let body = &app.session.built.bodies[0];
+    assert!(body.is_exact());
+    let volume: f64 = body.solids.iter().map(|s| s.volume()).sum();
+    assert!((volume - 36.0 * 60.0).abs() < 1e-6, "a 6 x 6 bar along two legs of 30, mitred: {volume}");
+    assert_eq!(body.mesh.open_edges(), 0);
+    let id = app.doc().features.last().unwrap().id;
+    assert!(matches!(app.doc().features.last().unwrap().kind, fr_core::FeatureKind::Sweep(_)));
+    assert!(!app.doc().sketch(profile).unwrap().visible && !app.doc().sketch(path).unwrap().visible, "the sketches it used are put away");
+    assert!(app.doc().sketch(other).unwrap().visible, "the sketch it did not use stays");
+    h.state_mut().fit();
+    save(&mut h, "sweep.png");
+
+    // Editing reopens the same dialog with what the feature holds; a fixed orientation is refused on this path.
+    h.state_mut().edit_feature(id);
+    let Dialog::Feature(mut f) = h.state().dialog.clone() else { panic!("editing a sweep opens its dialog") };
+    assert_eq!((f.editing, f.sketch, f.sweep.as_ref().unwrap().path_sketch), (Some(id), Some(profile), Some(path)));
+    f.sweep.as_mut().unwrap().orient = fr_core::doc::SweepOrient::Fixed;
+    h.state_mut().dialog = Dialog::Feature(f);
+    h.run_steps(3);
+    let preview = h.state().preview.as_ref().expect("the edit previews");
+    assert!(preview.2.as_ref().is_some_and(|e| e.contains("fixed orientation")), "the preview says why: {:?}", preview.2);
+    h.state_mut().apply_dialog();
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains("fixed orientation")), "{:?}", h.state().toast);
+    assert!(matches!(h.state().dialog, Dialog::Feature(_)), "a refused edit keeps the dialog open");
+    // The applied feature hid its path sketch, but the edit still draws that
+    // path. Shift-clicking the visible first leg must select it for the edit.
+    assert!(!h.state().doc().sketch(path).unwrap().visible);
+    let first = *h.state().doc().sketch(path).unwrap().entities.keys().next().unwrap();
+    let on_first = at(&h, 15.0, 0.0);
+    h.event(Event::ModifiersChanged(Modifiers::SHIFT));
+    h.hover_at(on_first);
+    h.step();
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos: on_first, button: PointerButton::Primary, pressed, modifiers: Modifiers::SHIFT });
+        h.step();
+    }
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.step();
+    let Dialog::Feature(f) = &h.state().dialog else { panic!() };
+    assert_eq!(f.sweep.as_ref().unwrap().path, vec![first], "the highlighted hidden path remains pickable during editing");
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None);
+    let volume: f64 = h.state().session.built.bodies[0].solids.iter().map(|s| s.volume()).sum();
+    assert!((volume - 36.0 * 30.0).abs() < 1e-6, "one straight leg, fixed: {volume}");
+}
+
+#[test]
+fn sweep_can_correct_reversed_profile_and_closed_path_defaults() {
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap();
+    // Draw the profile first, then a closed path. Both contain regions, so the
+    // newest-region default initially assigns their roles the wrong way round.
+    exec(&mut h, json!({"op": "create_sketch", "plane": "YZ"}));
+    let profile = h.state().doc().sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "add_geometry", "sketch": profile, "items": [{"type": "rect", "from": [-3, -3], "to": [3, 3]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let path = h.state().doc().sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "add_geometry", "sketch": path, "items": [{"type": "rect", "from": [-10, 0], "to": [20, 20]}]}));
+    h.state_mut().fit();
+    h.run_steps(3);
+    run(&mut h, Action::Sweep);
+    let Dialog::Feature(f) = &h.state().dialog else { panic!() };
+    assert_eq!(f.sketch, Some(path));
+    assert_eq!(f.sweep.as_ref().unwrap().path_sketch, Some(profile));
+    // Selecting the intended profile must clear its old path role so the two
+    // sketches can be assigned correctly without adding a third sketch.
+    let inside = crate::view::to_screen(h.state(), DVec3::new(0.0, 0.0, 1.0));
+    click(&mut h, inside);
+    let Dialog::Feature(f) = &h.state().dialog else { panic!() };
+    assert_eq!(f.sketch, Some(profile), "the former path can be selected as the profile");
+    assert_eq!(f.sweep.as_ref().unwrap().path_sketch, None);
+    let on_path = crate::view::to_screen(h.state(), DVec3::new(20.0, 10.0, 0.0));
+    click(&mut h, on_path);
+    let Dialog::Feature(f) = &h.state().dialog else { panic!() };
+    assert_eq!(f.sweep.as_ref().unwrap().path_sketch, Some(path));
+    h.run_steps(3);
+    assert_eq!(h.state().preview.as_ref().unwrap().2, None);
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    let body = &h.state().session.built.bodies[0];
+    assert_eq!(body.mesh.open_edges(), 0);
+    let volume: f64 = body.solids.iter().map(|s| s.volume()).sum();
+    assert!((volume - 36.0 * 100.0).abs() < 1e-6);
 }
 
 fn drag_with(h: &mut H, b: PointerButton, from: Pos2, by: egui::Vec2) {
@@ -547,7 +949,7 @@ fn patterns_extents_and_section() {
     let whole = save(&mut h, "pattern.png");
 
     // Section through the holes: the near half disappears and the cut face is hatched.
-    h.state_mut().section = crate::app::Section { on: true, axis: 1, offset: 10.0, flip: false };
+    h.state_mut().section = crate::app::Section { on: true, axis: 1, plane: None, offset: 10.0, flip: false };
     let cut = save(&mut h, "section.png");
     let px = |img: &image::RgbaImage, p: Pos2| img.get_pixel(p.x as u32, p.y as u32).0;
     let near_edge = crate::view::to_screen(h.state(), DVec3::new(20.0, 0.0, 5.0));
@@ -907,7 +1309,7 @@ fn holes_and_threads_from_the_catalog() {
     h.state_mut().session.save(&path).unwrap();
     let again = fr_core::Session::open(&path).unwrap();
     assert!(again.built.errors.is_empty(), "{:?}", again.built.errors);
-    assert_eq!((again.built.bodies[0].threads.len(), again.built.bodies[0].mesh.tris.len()), (2, h.state().session.built.bodies[0].mesh.tris.len()));
+    assert_eq!((again.built.bodies[0].threads.len(), again.built.bodies[0].mesh.len()), (2, h.state().session.built.bodies[0].mesh.len()));
 }
 
 #[test]
@@ -1217,6 +1619,276 @@ fn appearance_renders_sketch_dialog_and_model_in_both_themes() {
     }
 }
 
+/// A binary STL of a closed sphere with about `n` triangles.
+fn sphere_stl(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
+    let rows = ((n / 2) as f64).sqrt() as usize;
+    let at = |i: usize, j: usize| {
+        // Exact poles, so the fan triangles there share one vertex.
+        if i == 0 { return DVec3::new(0.0, 0.0, 30.0); }
+        if i == rows { return DVec3::new(0.0, 0.0, -30.0); }
+        let (u, v) = (i as f64 / rows as f64 * std::f64::consts::PI, j as f64 / rows as f64 * std::f64::consts::TAU);
+        DVec3::new(30.0 * u.sin() * v.cos(), 30.0 * u.sin() * v.sin(), 30.0 * u.cos())
+    };
+    let mut bytes = vec![b' '; 80];
+    bytes.extend([0u8; 4]);
+    let mut count = 0u32;
+    for i in 0..rows {
+        for j in 0..rows {
+            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, (j + 1) % rows), at(i, (j + 1) % rows));
+            for t in [[a, b, c], [a, c, d]] {
+                bytes.extend([0u8; 12]);
+                for v in t { for x in v.to_array() { bytes.extend((x as f32).to_le_bytes()); } }
+                bytes.extend([0u8; 2]);
+                count += 1;
+            }
+        }
+    }
+    bytes[80..84].copy_from_slice(&count.to_le_bytes());
+    let path = dir.join("sphere.stl");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn large_meshes_draw_through_the_indexed_path() {
+    let dir = out_dir().join("large-mesh");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = sphere_stl(&dir, 300_000);
+    let mut h = harness();
+    h.state_mut().opts.grid = false;
+    h.state_mut().import_stl(&path, fr_core::Unit::Mm);
+    h.run_steps(3);
+    let (body_id, tris, welded, open) = { let b = &h.state().session.built.bodies[0]; (b.id, b.mesh.len(), b.mesh.is_welded(), b.mesh.open_edges()) };
+    assert!(tris > crate::gpu::BIG, "the sphere must be big enough for the indexed path: {tris}");
+    assert!(welded && open == 0);
+    assert!(h.state().gpu);
+    let img = save(&mut h, "large-mesh-gpu.png");
+    assert_eq!(h.state().scene.big_count(), 1, "the sphere goes through the indexed path");
+    let bg = crate::theme::Palette::from_ctx(&h.ctx).background.to_array();
+    let centre = crate::view::to_screen(h.state(), DVec3::ZERO);
+    let px = img.get_pixel(centre.x as u32, centre.y as u32).0;
+    assert!((0..3).any(|i| px[i].abs_diff(bg[i]) > 60), "the large mesh must be shaded on screen: {px:?} vs {bg:?}");
+    // Picking goes through the BVH and lands on the sphere's surface.
+    let (id, at, _) = crate::view::pick_body(h.state(), &h.state().session.built, centre).expect("the sphere is under the pointer");
+    assert_eq!(id, body_id);
+    assert!((at.length() - 30.0).abs() < 0.5, "hit point {at} should lie on the sphere");
+}
+
+#[test]
+fn the_mesh_menu_decimates_and_thickens_through_dialogs() {
+    let dir = out_dir().join("mesh-dialog");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = sphere_stl(&dir, 20_000);
+    let mut h = harness();
+    h.state_mut().import_stl(&path, fr_core::Unit::Mm);
+    h.run_steps(2);
+    let body = h.state().session.built.bodies[0].id;
+    let before = h.state().session.built.bodies[0].mesh.len();
+    // Decimate to a tenth through the dialog.
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, Action::Mesh(1));
+    let Dialog::Mesh(mut m) = h.state().dialog.clone() else { panic!("the Decimate dialog should open") };
+    assert_eq!(m.body, Some(body), "the only body is picked");
+    m.count = 2000;
+    h.state_mut().dialog = Dialog::Mesh(m);
+    h.state_mut().apply_dialog();
+    h.run_steps(2);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    assert_eq!(app.doc().features.last().unwrap().type_name(), "mesh_decimate");
+    let after = app.session.built.bodies[0].mesh.len();
+    assert!(after < before / 5 && after > 1500, "{before} -> {after}");
+    // Cut it in half (uncapped) and thicken the dome into a solid, 2 mm straight down.
+    h.state_mut().run(&ctx, Action::Mesh(4));
+    let Dialog::Mesh(mut m) = h.state().dialog.clone() else { panic!() };
+    m.choice = 1; // keep the positive side
+    m.flag = false; // no cap
+    h.state_mut().dialog = Dialog::Mesh(m);
+    h.state_mut().apply_dialog();
+    h.run_steps(1);
+    h.state_mut().run(&ctx, Action::Mesh(6));
+    let Dialog::Mesh(m) = h.state().dialog.clone() else { panic!() };
+    assert!(m.flag, "straight down is the default for thickening");
+    h.state_mut().apply_dialog();
+    h.run_steps(2);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    let b = &app.session.built.bodies[0];
+    assert_eq!(b.mesh.open_edges(), 0, "the thickened dome is closed");
+    assert!(b.mesh.bbox().unwrap().0.z < -1.9);
+    let kinds: Vec<&str> = app.doc().features.iter().map(|f| f.type_name()).collect();
+    assert_eq!(kinds, ["import", "mesh_decimate", "mesh_cut", "mesh_offset"]);
+    save(&mut h, "mesh-dialogs.png");
+}
+
+/// Pumps frames until the script worker has finished and been committed.
+fn wait_for_script(h: &mut H) {
+    for _ in 0..600 {
+        h.state_mut().poll_script();
+        h.run_steps(1);
+        if !h.state().scripts.busy() { return; }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let app = h.state();
+    let run = app.scripts.running.as_ref().unwrap();
+    panic!("the script did not finish in time: at {:?}, pending question {:?}, cancelled {:?}, log {:?}", run.message, run.pending.as_ref().map(|q| (&q.text, &q.answer)), run.cancel_at, run.log);
+}
+
+/// Pumps frames until the running script has asked a question.
+fn wait_for_question(h: &mut H) {
+    for _ in 0..600 {
+        h.state_mut().poll_script();
+        h.run_steps(1);
+        if h.state().scripts.running.as_ref().is_some_and(|r| r.pending.is_some()) { return; }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the script did not ask in time");
+}
+
+#[test]
+fn a_script_question_is_answered_in_the_progress_window() {
+    let source = "const META = #{ name: \"Asker\", description: \"asks\" };\nfn run(inputs) {\n    let size = ask(\"How big?\", \"5\");\n    if confirm(\"Make the box of \" + size + \" mm?\") { primitive(#{ type: \"box\", width: size.parse_float(), depth: 2, height: 2 }); }\n    size\n}\n";
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        app.scripts.reload(None);
+        app.scripts.entries.insert(0, crate::scripts_ui::Entry { path: None, file_name: "asker.rhai".into(), source: source.into(), meta: fr_core::script::meta(source), sample: false });
+        app.open_script(0);
+    }
+    assert!(matches!(h.state().dialog, Dialog::Script(_)));
+    h.run_steps(2);
+    h.get_by_label("Run").click();
+    h.run_steps(1);
+    // ask: type an answer and OK.
+    wait_for_question(&mut h);
+    {
+        let run = h.state_mut().scripts.running.as_mut().unwrap();
+        let q = run.pending.as_mut().unwrap();
+        assert_eq!(q.text, "How big?");
+        assert_eq!(q.default.as_deref(), Some("5"));
+        assert_eq!(q.answer, "5", "the offered answer is filled in");
+        q.answer = "7".into();
+    }
+    h.run_steps(1);
+    h.get_by_label("OK").click();
+    h.run_steps(1);
+    // confirm: Yes.
+    wait_for_question(&mut h);
+    {
+        let run = h.state().scripts.running.as_ref().unwrap();
+        let q = run.pending.as_ref().unwrap();
+        assert_eq!(q.text, "Make the box of 7 mm?");
+        assert!(q.default.is_none(), "confirm has yes and no, not a text field");
+    }
+    h.run_steps(1);
+    h.get_by_label("Yes").click();
+    h.run_steps(1);
+    wait_for_script(&mut h);
+    let app = h.state();
+    assert_eq!(app.doc().features.len(), 2, "chip and box; log {:?} err {:?}", app.scripts.log, app.scripts.last_error);
+    let (lo, hi) = app.session.built.bodies[0].mesh.bbox().unwrap();
+    assert!(((hi.x - lo.x) - 7.0).abs() < 1e-6, "the typed answer sized the box: {}", hi.x - lo.x);
+    // Cancel while a question is pending declines it and ends the run with nothing applied.
+    h.state_mut().open_script(0);
+    h.run_steps(2);
+    h.get_by_label("Run").click();
+    h.run_steps(1);
+    wait_for_question(&mut h);
+    h.state_mut().cancel_script();
+    h.run_steps(1);
+    wait_for_script(&mut h);
+    assert_eq!(h.state().doc().features.len(), 2, "the cancelled run added nothing");
+}
+
+#[test]
+fn scripts_run_from_the_menu_as_chips_that_rerun_detach_and_delete() {
+    let mut h = harness();
+    let ctx = h.ctx.clone();
+    {
+        let app = h.state_mut();
+        app.scripts.reload(None);
+        let gear = app.scripts.entries.iter().position(|e| e.file_name == "spur-gear.rhai").expect("the gear sample is listed");
+        app.open_script(gear);
+    }
+    let Dialog::Script(mut d) = h.state().dialog.clone() else { panic!("the inputs dialog should open") };
+    assert_eq!(d.name, "Spur gear");
+    assert_eq!(d.fields.iter().map(|f| f.input.kind.as_str()).collect::<Vec<_>>(), ["integer", "length", "length", "length"]);
+    d.fields[0].text = "12".into();
+    h.state_mut().dialog = Dialog::Script(d);
+    h.run_steps(3);
+    assert!(h.state().preview.is_none(), "scripts must not use modeling previews");
+    h.get_by_label("Run").click();
+    h.run_steps(1);
+    assert!(h.state().scripts.busy(), "the run is on a worker thread");
+    wait_for_script(&mut h);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    let kinds: Vec<&str> = app.doc().features.iter().map(|f| f.type_name()).collect();
+    assert_eq!(kinds, ["script", "sketch", "extrude"], "the chip comes first and owns the rest");
+    let chip = app.doc().features[0].id;
+    assert!(app.doc().features[1..].iter().all(|f| f.made_by == Some(chip)));
+    assert!(app.session.can_undo());
+    let (lo, hi) = app.session.built.bodies[0].mesh.bbox().unwrap();
+    assert!(((hi.x - lo.x) - 28.0).abs() < 0.1, "12 teeth of module 2: outer diameter 28, got {}", hi.x - lo.x);
+    // One undo removes the whole run.
+    let undone = { let app = h.state_mut(); app.session.undo() };
+    assert!(undone);
+    assert!(h.state().doc().features.is_empty());
+    let redone = { let app = h.state_mut(); app.session.redo() };
+    assert!(redone);
+    assert_eq!(h.state().doc().features.len(), 3);
+    // Edit inputs and re-run: more teeth, same chip position, the old features gone.
+    h.state_mut().rerun_script(chip, true);
+    let Dialog::Script(mut d) = h.state().dialog.clone() else { panic!("the inputs dialog should open for the re-run") };
+    assert_eq!(d.rerun, Some(chip));
+    assert_eq!(d.fields[0].text, "12", "the last inputs are remembered");
+    d.fields[0].text = "30".into();
+    h.state_mut().dialog = Dialog::Script(d);
+    h.run_steps(3);
+    h.get_by_label("Run again").click();
+    h.run_steps(1);
+    wait_for_script(&mut h);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    let dump: Vec<String> = app.doc().features.iter().map(|f| format!("{} {} made_by={:?} {}", f.id, f.name, f.made_by, match &f.kind { fr_core::FeatureKind::ScriptRun(r) => r.inputs.to_string(), _ => String::new() })).collect();
+    assert_eq!(app.doc().features.len(), 3, "{dump:?} log {:?} err {:?}", app.scripts.log, app.scripts.last_error);
+    let (lo, hi) = app.session.built.bodies[0].mesh.bbox().unwrap();
+    assert!(((hi.x - lo.x) - 64.0).abs() < 0.1, "30 teeth: outer diameter 64, got {}; {dump:?} log {:?} err {:?}", hi.x - lo.x, app.scripts.log, app.scripts.last_error);
+    let chip2 = app.doc().features[0].id;
+    assert!(matches!(app.doc().features[0].kind, fr_core::FeatureKind::ScriptRun(_)));
+    // Suppressing the chip suppresses what it made.
+    let _ = h.state_mut().execute(&json!({"op": "edit_feature", "feature": chip2, "suppressed": true}));
+    h.run_steps(1);
+    assert!(h.state().session.built.bodies.is_empty(), "a suppressed run builds nothing");
+    let _ = h.state_mut().execute(&json!({"op": "edit_feature", "feature": chip2, "suppressed": false}));
+    h.run_steps(1);
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    // Detach keeps the features as ordinary ones.
+    h.state_mut().detach_script(chip2);
+    let app = h.state();
+    assert_eq!(app.doc().features.len(), 2);
+    assert!(app.doc().features.iter().all(|f| f.made_by.is_none()));
+    // A fresh run, then delete removes the run and everything it made.
+    {
+        let app = h.state_mut();
+        let gear = app.scripts.entries.iter().position(|e| e.file_name == "spur-gear.rhai").unwrap();
+        app.open_script(gear);
+    }
+    h.run_steps(3);
+    key(&mut h, Key::Enter);
+    wait_for_script(&mut h);
+    assert_eq!(h.state().doc().features.len(), 5);
+    let chip3 = h.state().doc().features.iter().find(|f| matches!(f.kind, fr_core::FeatureKind::ScriptRun(_))).unwrap().id;
+    h.state_mut().delete_script_run(chip3);
+    assert_eq!(h.state().doc().features.len(), 2);
+    // The log window and export.
+    h.state_mut().run(&ctx, Action::ScriptLog);
+    assert!(h.state().scripts.show_log);
+    let script = fr_core::script::export_timeline(&h.state().session).unwrap().source;
+    assert!(script.contains("add_feature"));
+    save(&mut h, "scripts-menu.png");
+}
+
 #[test]
 fn editing_extrusions_preserves_taper_and_through_all() {
     let mut h = state_harness();
@@ -1356,7 +2028,7 @@ fn failed_file_open_and_import_remain_visible_and_keep_the_design() {
     h.run_steps(3);
     assert_eq!(h.state().doc(), &original);
     assert_eq!(h.state().session.rev, revision);
-    h.get_by_label("Could not import STL");
+    h.get_by_label("Could not import the mesh");
     assert!(h.state().file_error.as_ref().is_some_and(|e| !e.message.is_empty()));
     key(&mut h, Key::Escape);
     assert!(h.state().file_error.is_none());
@@ -1767,4 +2439,127 @@ fn position_labels_accept_signed_zero_and_keep_zero_valued_parameters() {
     assert!(h.state().sketch().unwrap().1.points.contains_key(&p),"image editor must not forward Delete into the selected sketch");
     key(&mut h,Key::Escape);
     assert!(h.state().reference_editor.sketch_id().is_none());
+}
+
+fn simple_script_dialog(source: &str) -> crate::scripts_ui::ScriptDlg {
+    crate::scripts_ui::ScriptDlg { name: "Review boxes".into(), source: source.into(), script_dir: None, fields: Vec::new(), rerun: None, description: String::new() }
+}
+
+#[test]
+fn script_reruns_preserve_downstream_references_and_allocate_new_outputs_safely() {
+    let mut h = state_harness();
+    let one = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{output_key: \"original\", type: \"box\", width: 10, depth: 10, height: 10}); }";
+    h.state_mut().start_script(simple_script_dialog(one));
+    wait_for_script(&mut h);
+    let chip = h.state().doc().features[0].id;
+    let body = h.state().session.built.bodies[0].id;
+    h.state_mut().execute(&json!({"op":"transform","body":body,"translate":[50,0,0]})).unwrap();
+    let transform = h.state().doc().features.last().unwrap().id;
+    let before = h.state().doc().clone();
+    let two = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{output_key: \"extra\", type: \"box\", width: 5, depth: 5, height: 5, position: [100,0,0]}); primitive(#{output_key: \"original\", type: \"box\", width: 20, depth: 10, height: 10}); }";
+    let mut dlg = simple_script_dialog(two); dlg.rerun = Some(chip);
+    h.state_mut().start_script(dlg); wait_for_script(&mut h);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    assert!(app.doc().feature(chip).is_some(), "rerun preserves the chip ID");
+    assert!(app.doc().feature(transform).is_some());
+    assert_eq!(app.session.built.bodies.len(), 2);
+    let (lo, hi) = app.session.built.body(body).unwrap().mesh.bbox().unwrap();
+    assert!((lo.x - 50.0).abs() < 1e-6 && (hi.x - 70.0).abs() < 1e-6, "the downstream move still targets the resized original: {lo} {hi}");
+    fr_core::validation::document(app.doc()).unwrap();
+    assert!(h.state_mut().session.undo()); assert_eq!(h.state().doc(), &before);
+    assert!(h.state_mut().session.redo()); assert_eq!(h.state().session.built.bodies.len(), 2);
+}
+
+#[test]
+fn a_script_worker_cannot_overwrite_edits_made_while_it_runs() {
+    let mut h = state_harness();
+    let source = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{type: \"box\", width: 10, depth: 10, height: 10}); }";
+    h.state_mut().start_script(simple_script_dialog(source));
+    // Even if the worker has finished, its result has not been polled/committed.
+    h.state_mut().execute(&json!({"op":"primitive","type":"sphere","diameter":20})).unwrap();
+    let edited = h.state().doc().clone();
+    wait_for_script(&mut h);
+    assert_eq!(h.state().doc(), &edited, "a late script result must not replace the newer sphere");
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+}
+
+#[test]
+fn a_script_can_create_a_component_without_giving_its_chip_a_future_owner() {
+    let mut h = state_harness();
+    let source = "const META = #{name: \"Review boxes\"}; fn run(i) { create_component(#{name: \"Generated\", activate: true}); primitive(#{type: \"box\", width: 10, depth: 10, height: 10}); }";
+    h.state_mut().start_script(simple_script_dialog(source)); wait_for_script(&mut h);
+    let app = h.state();
+    assert_eq!(app.doc().features.len(), 3, "{:?}", app.scripts.last_error);
+    assert_eq!(app.doc().features[0].owner, 0);
+    fr_core::validation::document(app.doc()).unwrap();
+    let chip = app.doc().features[0].id;
+    h.state_mut().execute(&json!({"op":"edit_feature","feature":chip,"suppressed":true})).unwrap();
+    assert!(h.state().session.built.bodies.is_empty());
+    h.state_mut().execute(&json!({"op":"edit_feature","feature":chip,"suppressed":false})).unwrap();
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+}
+
+#[test]
+fn indexed_meshes_refresh_on_document_replacement_move_hide_and_new() {
+    let dir=out_dir().join("indexed-replacement"); std::fs::create_dir_all(&dir).unwrap();
+    let stl=sphere_stl(&dir,300_000);
+    let mesh=fr_core::io::import_mesh(&stl,fr_core::Unit::Mm).unwrap().0;
+    let mut paths=Vec::new();
+    for (name,stretch) in [("sphere",1.0),("wide",2.0)] {
+        let mut m=mesh.clone(); m.map(|p|DVec3::new(p.x*stretch,p.y,p.z));
+        let mut doc=fr_core::Document::new(fr_core::Unit::Mm); doc.add_feature(fr_core::FeatureKind::Import(m));
+        let mut s=fr_core::Session::new(doc); s.cache_policy=fr_core::doc::CachePolicy::Never;
+        let path=dir.join(format!("{name}.ferr")); s.save(&path).unwrap(); paths.push(path);
+    }
+    let mut h=harness(); h.state_mut().opts.grid=false;
+    let camera=|| { let (yaw,pitch)=fr_core::render::Camera::named("top").unwrap(); fr_core::render::Camera{yaw,pitch,scale:3.0,..fr_core::render::Camera::iso()} };
+    let mut rev=0;
+    for (i,path) in paths.iter().enumerate() {
+        h.state_mut().execute(&json!({"op":"open","path":path.to_string_lossy()})).unwrap();
+        if i==0 {rev=h.state().session.rev;} else {assert_eq!(h.state().session.rev,rev,"the replacement deliberately reuses the session revision");}
+        h.state_mut().fit_pending=false; h.state_mut().cam=camera();
+        let img=save(&mut h,&format!("indexed-replacement-{i}.png"));
+        assert_eq!(h.state().scene.big_count(),1);
+        let at=crate::view::to_screen(h.state(),DVec3::new(45.0,5.0,0.0));
+        let pixel=img.get_pixel(at.x as u32,at.y as u32).0;
+        assert_eq!(pixel[0]<220,i==1,"only the second mesh reaches x=45: {pixel:?}");
+    }
+    // Selection changes keep the large CPU packet (and therefore its GPU upload) reusable.
+    let before=h.state().scene.big_data();
+    let centre=crate::view::to_screen(h.state(),DVec3::new(0.0,5.0,0.0));
+    let face=crate::view::pick_face(h.state(),centre);
+    h.state_mut().sel_face=face;
+    let _=save(&mut h,"indexed-selected-face.png");
+    assert!(std::sync::Arc::ptr_eq(&before,&h.state().scene.big_data()));
+    let body=h.state().session.built.bodies[0].id;
+    h.state_mut().execute(&json!({"op":"transform","body":body,"translate":[0,80,0]})).unwrap();
+    h.state_mut().cam=camera(); h.state_mut().fit_pending=false;
+    let moved=save(&mut h,"indexed-moved.png");
+    let sample=crate::view::to_screen(h.state(),DVec3::new(5.0,80.0,0.0));
+    assert!(moved.get_pixel(sample.x as u32,sample.y as u32)[0]<220);
+    h.state_mut().execute(&json!({"op":"set_visible","id":body,"visible":false})).unwrap();
+    let hidden=save(&mut h,"indexed-hidden.png");
+    assert_eq!(h.state().scene.big_count(),0); assert!(hidden.get_pixel(sample.x as u32,sample.y as u32)[0]>220);
+    h.state_mut().execute(&json!({"op":"set_visible","id":body,"visible":true})).unwrap();
+    let shown=save(&mut h,"indexed-shown.png"); assert!(shown.get_pixel(sample.x as u32,sample.y as u32)[0]<220);
+    h.state_mut().execute(&json!({"op":"new","discard_unsaved":true})).unwrap();
+    h.state_mut().fit_pending=false; h.state_mut().cam=camera();
+    let _=save(&mut h,"indexed-new-empty.png"); assert_eq!(h.state().scene.big_count(),0);
+}
+
+#[test]
+fn read_only_cached_geometry_stays_visible_when_edit_commands_are_attempted() {
+    let mut h=state_harness();
+    h.state_mut().execute(&json!({"op":"primitive","type":"box","width":20,"depth":10,"height":5})).unwrap();
+    let bodies=h.state().session.built.bodies.clone();
+    h.state_mut().session.doc=fr_core::Document::new(fr_core::Unit::Mm);
+    h.state_mut().session.read_only=true; h.state_mut().session.from_cache=true;
+    let ctx=h.ctx.clone();
+    for action in [Action::Transform,Action::Mesh(0),Action::NewSketch,Action::Primitive(0),Action::Save,Action::Undo] {
+        h.state_mut().run(&ctx,action); h.run_steps(1);
+        assert_eq!(h.state().dialog,Dialog::None);
+        assert_eq!(h.state().shown().bodies.len(),bodies.len());
+        assert_eq!(h.state().shown().bodies[0].mesh.bbox(),bodies[0].mesh.bbox());
+    }
 }

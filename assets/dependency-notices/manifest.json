@@ -1,0 +1,205 @@
+{
+  "format": 1,
+  "packages": [
+    {
+      "name": "clipper2-rust",
+      "version": "1.2.0",
+      "license": "BSL-1.0",
+      "repository": "https://github.com/larsbrubaker/clipper2-rust",
+      "source_commit": "32519f102e0113119823b9649739f311613ca042",
+      "crate_sha256": "210e9ea90a5f6c731c23bf642383ad7c006d8b24803c5c33afd5aaeae5a33f66",
+      "files": [
+        {
+          "path": "clipper2-rust-1.2.0/LICENSE",
+          "sha256": "beb8e42e9d6b4284e03304d05a81a0755200a965fc8d0a5e0aea1e84cf805d6e",
+          "source": "crate:LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "dashu-base",
+      "version": "0.5.1",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/cmpute/dashu",
+      "source_commit": "95575b987e3b9c77c250e2f908ee7b100e0d5155",
+      "crate_sha256": "a64b04cdfc4c8533100fe00304eb9687173bda47b1f1dac8af12ba13712ed49d",
+      "files": [
+        {
+          "path": "dashu-base-0.5.1/LICENSE-MIT",
+          "sha256": "d37bf20752fdde8a74dfeee8cdbedef6b168fede0a4c7a9bd132db191367ef5c",
+          "source": "https://raw.githubusercontent.com/cmpute/dashu/95575b987e3b9c77c250e2f908ee7b100e0d5155/LICENSE-MIT"
+        },
+        {
+          "path": "dashu-base-0.5.1/LICENSE-APACHE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "source": "https://raw.githubusercontent.com/cmpute/dashu/95575b987e3b9c77c250e2f908ee7b100e0d5155/LICENSE-APACHE"
+        }
+      ]
+    },
+    {
+      "name": "dashu-int",
+      "version": "0.5.1",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/cmpute/dashu",
+      "source_commit": "95575b987e3b9c77c250e2f908ee7b100e0d5155",
+      "crate_sha256": "b6ee98721d5d223e5b64b642dd9588b79d9ef415554b13720308b77d628c3be6",
+      "files": [
+        {
+          "path": "dashu-int-0.5.1/NOTICE.md",
+          "sha256": "13ce2fb7da9c6c3a5a16e86877a604e80237f076b9258115d8f0444127f6a281",
+          "source": "crate:NOTICE.md"
+        },
+        {
+          "path": "dashu-int-0.5.1/LICENSE-MIT",
+          "sha256": "d37bf20752fdde8a74dfeee8cdbedef6b168fede0a4c7a9bd132db191367ef5c",
+          "source": "https://raw.githubusercontent.com/cmpute/dashu/95575b987e3b9c77c250e2f908ee7b100e0d5155/LICENSE-MIT"
+        },
+        {
+          "path": "dashu-int-0.5.1/LICENSE-APACHE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "source": "https://raw.githubusercontent.com/cmpute/dashu/95575b987e3b9c77c250e2f908ee7b100e0d5155/LICENSE-APACHE"
+        }
+      ]
+    },
+    {
+      "name": "dashu-ratio",
+      "version": "0.5.1",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/cmpute/dashu",
+      "source_commit": "95575b987e3b9c77c250e2f908ee7b100e0d5155",
+      "crate_sha256": "727613e0312d442301147d9e45eb2e7c2797230fc6d223a2c51ecf0e98dfeb5e",
+      "files": [
+        {
+          "path": "dashu-ratio-0.5.1/LICENSE-MIT",
+          "sha256": "d37bf20752fdde8a74dfeee8cdbedef6b168fede0a4c7a9bd132db191367ef5c",
+          "source": "https://raw.githubusercontent.com/cmpute/dashu/95575b987e3b9c77c250e2f908ee7b100e0d5155/LICENSE-MIT"
+        },
+        {
+          "path": "dashu-ratio-0.5.1/LICENSE-APACHE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "source": "https://raw.githubusercontent.com/cmpute/dashu/95575b987e3b9c77c250e2f908ee7b100e0d5155/LICENSE-APACHE"
+        }
+      ]
+    },
+    {
+      "name": "manifold-rust",
+      "version": "0.16.0",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/larsbrubaker/manifold-rust",
+      "source_commit": "f43ec62dec5e596a9c273efea008561b6bf7942a",
+      "crate_sha256": "b8be215b39d5e9c27ab5831c4b4f3d126e8b113e9e13d42c1e055ccc448ce34a",
+      "files": [
+        {
+          "path": "manifold-rust-0.16.0/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "source": "crate:LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "num-modular",
+      "version": "0.6.6",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/cmpute/num-modular",
+      "source_commit": "7439ff309dd695bf32ab83fa7dbef881bd433f4d",
+      "crate_sha256": "26ac76200f74e658124f95fa63e1a82b2fd2181c5b2fdde80b3d89d2d3f905e7",
+      "files": [
+        {
+          "path": "num-modular-0.6.6/LICENSE-APACHE",
+          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+          "source": "crate:LICENSE-APACHE"
+        },
+        {
+          "path": "num-modular-0.6.6/COPYING",
+          "sha256": "b72a775087f5989161ef6d88626df7c57733e22c592d4571f5d6b33b7c6d3df8",
+          "source": "crate:COPYING"
+        },
+        {
+          "path": "num-modular-0.6.6/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source": "crate:LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "crossbeam-deque",
+      "version": "0.8.8",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/crossbeam-rs/crossbeam",
+      "source_commit": "2920c984290229ab4e0ca0452ef09e48a82063f3",
+      "crate_sha256": "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a",
+      "files": [
+        {
+          "path": "crossbeam-deque-0.8.8/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source": "crate:LICENSE-APACHE"
+        },
+        {
+          "path": "crossbeam-deque-0.8.8/LICENSE-MIT",
+          "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab",
+          "source": "crate:LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "crossbeam-epoch",
+      "version": "0.9.21",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/crossbeam-rs/crossbeam",
+      "source_commit": "2920c984290229ab4e0ca0452ef09e48a82063f3",
+      "crate_sha256": "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d",
+      "files": [
+        {
+          "path": "crossbeam-epoch-0.9.21/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source": "crate:LICENSE-APACHE"
+        },
+        {
+          "path": "crossbeam-epoch-0.9.21/LICENSE-MIT",
+          "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab",
+          "source": "crate:LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "rayon",
+      "version": "1.12.0",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/rayon-rs/rayon",
+      "source_commit": "c9ced185ae3508246a9eb70c8407a1199bb1b77f",
+      "crate_sha256": "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d",
+      "files": [
+        {
+          "path": "rayon-1.12.0/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source": "crate:LICENSE-APACHE"
+        },
+        {
+          "path": "rayon-1.12.0/LICENSE-MIT",
+          "sha256": "0621878e61f0d0fda054bcbe02df75192c28bde1ecc8289cbd86aeba2dd72720",
+          "source": "crate:LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "rayon-core",
+      "version": "1.13.0",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/rayon-rs/rayon",
+      "source_commit": "7af20d7692d5decbcb4adcaa079cd607e3e50814",
+      "crate_sha256": "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91",
+      "files": [
+        {
+          "path": "rayon-core-1.13.0/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source": "crate:LICENSE-APACHE"
+        },
+        {
+          "path": "rayon-core-1.13.0/LICENSE-MIT",
+          "sha256": "0621878e61f0d0fda054bcbe02df75192c28bde1ecc8289cbd86aeba2dd72720",
+          "source": "crate:LICENSE-MIT"
+        }
+      ]
+    }
+  ]
+}

@@ -3,7 +3,11 @@
 
 use glam::DVec2;
 use serde::{Deserialize, Serialize};
-use ttf_parser::{Face, OutlineBuilder};
+use skrifa::{
+    FontRef, GlyphId, MetadataProvider,
+    instance::{LocationRef, Size},
+    outline::{DrawSettings, OutlinePen},
+};
 
 use crate::profile::{Profile, Seg, inside, signed_area};
 
@@ -54,11 +58,20 @@ pub fn profiles(
     if !spacing.is_finite() || !(0.0..=10_000.0).contains(&spacing) {
         return Err("text spacing must be finite and between 0 and 10000 mm".into());
     }
-    let face = Face::parse(FONT, 0).map_err(|_| "the bundled text font could not be read")?;
-    let cap = face
-        .capital_height()
-        .filter(|h| *h > 0)
+    let font = FontRef::new(FONT).map_err(|_| "the bundled text font could not be read")?;
+    // Font units, unhinted and at the default instance: outlines depend only
+    // on the bundled file, never on a rasterizer's grid.
+    let (size, location) = (Size::unscaled(), LocationRef::default());
+    let cap = font
+        .metrics(size, location)
+        .cap_height
+        .filter(|h| *h > 0.0)
         .ok_or("the bundled font has no capital-height metric")? as f64;
+    let (charmap, advances, outlines) = (
+        font.charmap(),
+        font.glyph_metrics(size, location),
+        font.outline_glyphs(),
+    );
     let scale = height / cap;
     // Relative precision for small labels; at most 0.02 mm curve deviation on
     // large lettering. Subdivision and aggregate vertex limits bound the work.
@@ -68,23 +81,26 @@ pub fn profiles(
     let mut vertices = 0;
     let mut contours = 0;
     for (index, character) in content.chars().enumerate() {
-        let glyph = face
-            .glyph_index(character)
-            .filter(|id| id.0 != 0)
+        let glyph = charmap
+            .map(character)
+            .filter(|id| *id != GlyphId::NOTDEF)
             .ok_or_else(|| {
                 format!(
                     "the built-in font does not support '{character}' (U+{:04X})",
                     character as u32
                 )
             })?;
-        let advance = face.glyph_hor_advance(glyph).filter(|n| *n > 0)
+        let advance = advances.advance_width(glyph).filter(|n| *n > 0.0)
             .ok_or_else(|| format!("'{character}' needs contextual positioning; use precomposed letters instead of combining marks"))? as f64 * scale;
         if character != ' ' {
             let mut outline = Outline::new(scale, cursor, tolerance, MAX_VERTICES - vertices);
-            if face.outline_glyph(glyph, &mut outline).is_none() {
+            let drawn = outlines
+                .get(glyph)
+                .is_some_and(|g| g.draw(DrawSettings::unhinted(size, location), &mut outline).is_ok());
+            outline.finish();
+            if !drawn || outline.contours.is_empty() {
                 return Err(format!("'{character}' has no usable text outline"));
             }
-            outline.finish();
             if let Some(error) = outline.error {
                 return Err(error);
             }
@@ -181,6 +197,8 @@ fn regions(mut rings: Vec<Vec<DVec2>>) -> Result<Vec<Profile>, String> {
             depth: 0,
             path: Vec::new(),
             hole_paths: Vec::new(),
+            path_ids: Vec::new(),
+            hole_path_ids: Vec::new(),
         })
         .collect())
 }
@@ -301,7 +319,7 @@ fn distance_to_segment(p: DVec2, a: DVec2, b: DVec2) -> f64 {
     p.distance(a + ab * ((p - a).dot(ab) / len).clamp(0.0, 1.0))
 }
 
-impl OutlineBuilder for Outline {
+impl OutlinePen for Outline {
     fn move_to(&mut self, x: f32, y: f32) {
         self.finish();
         self.push(self.point(x, y));

@@ -42,12 +42,22 @@ pub enum Appearance {
     Dark,
 }
 
+/// Scripts: remembered inputs per script, folders scripts may use, and shortcuts.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptsCfg {
+    /// Script name to its last inputs (as typed), kept as JSON text.
+    pub last_inputs: std::collections::BTreeMap<String, String>,
+    pub allowed_dirs: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub appearance: Appearance,
     pub ai: Ai,
     pub bridge: BridgeCfg,
+    pub scripts: ScriptsCfg,
 }
 
 impl Config {

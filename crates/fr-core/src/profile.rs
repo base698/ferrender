@@ -24,6 +24,10 @@ pub struct Profile {
     pub path: Vec<Seg>,
     /// The hole boundaries likewise.
     pub hole_paths: Vec<Vec<Seg>>,
+    /// The sketch entity each segment of `path` came from, aligned with it.
+    pub path_ids: Vec<Id>,
+    /// Likewise for each hole path.
+    pub hole_path_ids: Vec<Vec<Id>>,
 }
 
 /// One exact piece of a profile's boundary, in sketch coordinates.
@@ -38,7 +42,7 @@ pub enum Seg {
 }
 
 impl Seg {
-    fn reversed(self) -> Seg {
+    pub(crate) fn reversed(self) -> Seg {
         match self {
             Seg::Line(a, b) => Seg::Line(b, a),
             Seg::Arc(a, m, b) => Seg::Arc(b, m, a),
@@ -46,6 +50,96 @@ impl Seg {
             c => c,
         }
     }
+
+    /// Where the piece starts and ends; a circle gives its centre twice.
+    pub fn ends(&self) -> (DVec2, DVec2) {
+        match *self {
+            Seg::Line(a, b) | Seg::Arc(a, _, b) => (a, b),
+            Seg::Spline(p) => (p[0], p[3]),
+            Seg::Circle(c, _) => (c, c),
+        }
+    }
+}
+
+/// A run of sketch entities joined end to end: the path of a sweep.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chain {
+    /// The pieces in order, each starting where the one before ended.
+    pub segs: Vec<Seg>,
+    /// The sketch entity each piece came from, aligned with `segs`.
+    pub ids: Vec<Id>,
+    /// The last piece ends where the first began (or the path is one circle).
+    pub closed: bool,
+}
+
+/// Orders sketch entities into one path. `pick` names the entities to use, in
+/// any order; empty means every non-construction entity of the sketch. An open
+/// path starts at the free end of the first entity named (or of the lowest id).
+pub fn chain(sk: &Sketch, pick: &[Id]) -> Result<Chain, String> {
+    let mut wanted: Vec<Id> = if pick.is_empty() {
+        sk.entities.iter().filter(|(_, e)| !e.construction).map(|(id, _)| *id).collect()
+    } else {
+        pick.to_vec()
+    };
+    let before = wanted.len();
+    let mut seen = std::collections::BTreeSet::new();
+    wanted.retain(|id| seen.insert(*id));
+    if wanted.len() != before { return Err("the path names an entity twice".into()); }
+    if wanted.is_empty() { return Err("the path sketch has no lines, arcs or splines to follow".into()); }
+    let nodes = point_nodes(sk);
+    struct Piece { id: Id, a: Id, b: Id, seg: Seg }
+    let mut pieces = Vec::new();
+    for id in &wanted {
+        let e = sk.entities.get(id).ok_or(format!("the path's entity {id} is no longer in its sketch"))?;
+        let (a, b, seg) = match e.geom {
+            Geom::Circle { c, r } => {
+                if wanted.len() > 1 { return Err("a circle is a whole path by itself; it cannot be joined to other entities".into()); }
+                if r < 1e-9 { return Err("the path circle has no radius".into()); }
+                return Ok(Chain { segs: vec![Seg::Circle(sk.pos(c), r)], ids: vec![*id], closed: true });
+            }
+            Geom::Line { a, b } => (a, b, Seg::Line(sk.pos(a), sk.pos(b))),
+            Geom::Arc { s, e, .. } => { let pts = sk.polyline(*id); (s, e, Seg::Arc(sk.pos(s), pts[pts.len() / 2], sk.pos(e))) }
+            Geom::Spline { a, b, c, d } => (a, d, Seg::Spline([a, b, c, d].map(|p| sk.pos(p)))),
+        };
+        let (a, b) = (nodes[&a], nodes[&b]);
+        if a == b { return Err(format!("the path's entity {id} starts and ends at the same point")); }
+        pieces.push(Piece { id: *id, a, b, seg });
+    }
+    let mut degree: BTreeMap<Id, usize> = BTreeMap::new();
+    for p in &pieces { *degree.entry(p.a).or_insert(0) += 1; *degree.entry(p.b).or_insert(0) += 1; }
+    if degree.values().any(|d| *d > 2) { return Err("the path branches; pick one run of entities joined end to end".into()); }
+    let free: Vec<Id> = degree.iter().filter(|(_, d)| **d == 1).map(|(n, _)| *n).collect();
+    let closed = free.is_empty();
+    // Start at a free end: the first named entity's if it has one.
+    let mut at = if closed { pieces[0].a } else {
+        let first = &pieces[0];
+        if free.contains(&first.a) { first.a } else if free.contains(&first.b) { first.b } else { free[0] }
+    };
+    let mut used = vec![false; pieces.len()];
+    let (mut segs, mut ids) = (Vec::new(), Vec::new());
+    // A closed path walks its first entity forwards.
+    let mut next = if closed { Some(0) } else { pieces.iter().position(|p| p.a == at || p.b == at) };
+    while let Some(i) = next {
+        used[i] = true;
+        let p = &pieces[i];
+        let forward = p.a == at;
+        segs.push(if forward { p.seg } else { p.seg.reversed() });
+        ids.push(p.id);
+        at = if forward { p.b } else { p.a };
+        next = pieces.iter().enumerate().position(|(j, q)| !used[j] && (q.a == at || q.b == at));
+    }
+    if used.iter().any(|u| !u) { return Err("the path is in separate pieces; pick one run of entities joined end to end".into()); }
+    // Neighbours share a solved node, but their own end points can differ by the
+    // solver's tolerance. Make each piece start exactly where the last one ended.
+    for i in 1..segs.len() {
+        let join = segs[i - 1].ends().1;
+        match &mut segs[i] { Seg::Line(a, _) | Seg::Arc(a, _, _) => *a = join, Seg::Spline(p) => p[0] = join, Seg::Circle(..) => {} }
+    }
+    if closed {
+        let join = segs[0].ends().0;
+        match segs.last_mut().unwrap() { Seg::Line(_, b) | Seg::Arc(_, _, b) => *b = join, Seg::Spline(p) => p[3] = join, Seg::Circle(..) => {} }
+    }
+    Ok(Chain { segs, ids, closed })
 }
 
 pub fn signed_area(p: &[DVec2]) -> f64 {
@@ -114,6 +208,7 @@ struct Face {
     edges: Vec<Id>,
     comp: usize,
     path: Vec<Seg>,
+    path_ids: Vec<Id>,
 }
 
 pub(crate) fn point_nodes(sk: &Sketch) -> BTreeMap<Id, Id> {
@@ -155,7 +250,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
     let mut edges = Vec::new();
     let mut faces: Vec<Face> = Vec::new();
     // Each closed curve is a face and a component of its own.
-    let mut hulls: Vec<(usize, Vec<DVec2>, Vec<Seg>)> = Vec::new();
+    let mut hulls: Vec<(usize, Vec<DVec2>, Vec<Seg>, Vec<Id>)> = Vec::new();
     let mut next_comp = ids.len();
     for (id, e) in sk.entities.iter().filter(|(_, e)| !e.construction) {
         let (a, b) = match e.geom {
@@ -182,8 +277,8 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                     _ => { let Some((c,r)) = sk.curve(*id) else { continue }; Seg::Circle(c,r) },
                 };
                 let path = vec![if signed_area(&pts) < 0.0 { pts.reverse(); seg.reversed() } else { seg }];
-                faces.push(Face { poly: pts.clone(), edges: vec![*id], comp: next_comp, path: path.clone() });
-                hulls.push((next_comp, pts, path));
+                faces.push(Face { poly: pts.clone(), edges: vec![*id], comp: next_comp, path: path.clone(), path_ids: vec![*id] });
+                hulls.push((next_comp, pts, path, vec![*id]));
                 next_comp += 1;
             }
         }
@@ -227,7 +322,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
         if seen[start] {
             continue;
         }
-        let (mut h, mut poly, mut used, mut path) = (start, Vec::new(), Vec::new(), Vec::new());
+        let (mut h, mut poly, mut used, mut path, mut path_ids) = (start, Vec::new(), Vec::new(), Vec::new(), Vec::new());
         while !seen[h] {
             seen[h] = true;
             let e = &edges[h / 2];
@@ -238,6 +333,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                 poly.extend(e.pts[1..].iter().rev());
             }
             used.push(e.id);
+            path_ids.push(e.id);
             path.push(if h % 2 == 0 { e.seg } else { e.seg.reversed() });
             // Turn as far left as possible at the far end, keeping the face on the left.
             let twin = h ^ 1;
@@ -250,17 +346,18 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
         if area > 1e-9 {
             used.sort();
             used.dedup();
-            faces.push(Face { poly, edges: used, comp, path });
+            faces.push(Face { poly, edges: used, comp, path, path_ids });
         } else if area < -1e-9 {
             poly.reverse();
-            hulls.push((comp, poly, path));
+            hulls.push((comp, poly, path, path_ids));
         }
     }
     // A component sitting inside a face of another component is a hole in it.
     let mut holes: Vec<Vec<Vec<DVec2>>> = vec![Vec::new(); faces.len()];
     let mut parent: Vec<Option<usize>> = vec![None; faces.len()];
     let mut hole_paths: Vec<Vec<Vec<Seg>>> = vec![Vec::new(); faces.len()];
-    for (comp, hull, path) in &hulls {
+    let mut hole_path_ids: Vec<Vec<Vec<Id>>> = vec![Vec::new(); faces.len()];
+    for (comp, hull, path, ids) in &hulls {
         let host = (0..faces.len())
             .filter(|i| faces[*i].comp != *comp && hull.iter().all(|p| inside(&faces[*i].poly, *p) || faces[*i].poly.contains(p)))
             .filter(|i| hull.iter().any(|p| inside(&faces[*i].poly, *p)))
@@ -270,6 +367,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
             h.reverse();
             holes[host].push(h);
             hole_paths[host].push(path.clone());
+            hole_path_ids[host].push(ids.clone());
             for (i, f) in faces.iter().enumerate() {
                 if f.comp == *comp {
                     parent[i] = Some(host);
@@ -288,7 +386,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                     break;
                 }
             }
-            Profile { outer: faces[i].poly.clone(), holes: holes[i].clone(), edges: faces[i].edges.clone(), depth, path: faces[i].path.clone(), hole_paths: hole_paths[i].clone() }
+            Profile { outer: faces[i].poly.clone(), holes: holes[i].clone(), edges: faces[i].edges.clone(), depth, path: faces[i].path.clone(), hole_paths: hole_paths[i].clone(), path_ids: faces[i].path_ids.clone(), hole_path_ids: hole_path_ids[i].clone() }
         })
         .collect()
 }

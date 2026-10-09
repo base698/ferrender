@@ -227,7 +227,7 @@ A single angled photo cannot establish hidden dimensions or eliminate perspectiv
 
 Enable **Highlight Open Ends** in the Sketch Palette (on by default). Orange endpoint rings and the open-end count point out places where the ordinary outline ends without a connection; construction guides are excluded. Zoom in, then redraw a missing edge by snapping to existing points, or select two endpoints and apply **Coincident**. Coordinate dimensions can prevent two points with different fixed positions from merging: correct the positions first. No orange markers is a useful check, not proof of a valid region; duplicate, crossing, or self-intersecting geometry can still prevent modeling.
 
-Finish the sketch and confirm that Revolve offers exactly the intended half-profile before continuing. For supported spline operations, image limits, and detailed checks of these tools, use the [0.2 sketching guide and manual test plan](docs/SKETCHING_0.2.md).
+Finish the sketch and confirm that Revolve offers exactly the intended half-profile before continuing. For supported spline operations, image limits, and detailed checks of these tools, use the [0.2 sketching guide and manual test plan](docs/adrs/0001-sketching-tools.md).
 
 ## Remaining useful improvements
 

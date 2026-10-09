@@ -6,8 +6,8 @@
 //! app closes normally, so a copy with no live owner is work that was lost. Each app holds a
 //! lock file for as long as it runs; the system drops the lock however the app ends.
 
-use std::fs::File;
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -18,8 +18,24 @@ use fr_core::io;
 
 const FORMAT: &str = "ferrender-recovery";
 const EXT: &str = "ferr-recovery";
-// A maximum-size native document plus bounded recovery metadata.
-const MAX_RECOVERY_BYTES: u64 = 64 * 1024 * 1024 + 64 * 1024;
+// Recovery v2 has a bounded JSON header followed by the native JSON/ZIP bytes.
+// Keep the payload allowance aligned with the native container reader. Legacy
+// recovery remains bounded by its original plain-JSON allowance.
+const MAGIC: &[u8; 8] = b"FERRREC2";
+const MAX_HEADER_BYTES: u64 = 64 * 1024;
+const MAX_PAYLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_RECOVERY_BYTES: u64 = MAX_PAYLOAD_BYTES + MAX_HEADER_BYTES + 12;
+const MAX_LEGACY_BYTES: u64 = 64 * 1024 * 1024 + MAX_HEADER_BYTES;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Header {
+    format: String,
+    version: u32,
+    path: Option<PathBuf>,
+    saved: u64,
+    payload_bytes: u64,
+    payload_crc32: u32,
+}
 /// Seconds between copies while changes keep coming.
 const EVERY: f64 = 1.0;
 
@@ -70,12 +86,7 @@ impl Found {
 
     /// The design in the copy.
     pub fn load(&self) -> Result<Document, String> {
-        let text = read_copy(&self.file).map_err(|e| format!("could not read the recovery copy: {e}"))?;
-        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("the recovery copy is damaged: {e}"))?;
-        if v["format"] != FORMAT {
-            return Err("the recovery copy has an unrecognized or damaged format".into());
-        }
-        io::from_json(&v["doc"].to_string())
+        load_copy(&self.file).map_err(|e| format!("could not read the recovery copy: {e}"))
     }
 
     pub fn delete(&self) {
@@ -88,27 +99,123 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-fn read_copy(file: &Path) -> std::io::Result<String> {
-    let mut text = String::new();
-    File::open(file)?.take(MAX_RECOVERY_BYTES + 1).read_to_string(&mut text)?;
-    if text.len() as u64 > MAX_RECOVERY_BYTES {
-        return Err(std::io::Error::other("the recovery copy exceeds the supported size limit"));
+/// Open only regular files, checking the size before reading any payload.
+fn open_copy(path: &Path) -> std::io::Result<(File, u64)> {
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(std::io::Error::other("the recovery copy is not a regular file"));
     }
-    Ok(text)
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_RECOVERY_BYTES {
+        return Err(std::io::Error::other("the recovery copy exceeds the supported size limit or is not a regular file"));
+    }
+    Ok((file, metadata.len()))
+}
+
+/// The magic has already been read. This reads metadata only, never geometry.
+fn read_header(reader: &mut impl Read, file_bytes: u64) -> std::io::Result<Header> {
+    let mut size = [0; 4];
+    reader.read_exact(&mut size)?;
+    let size = u32::from_le_bytes(size) as u64;
+    if size == 0 || size > MAX_HEADER_BYTES {
+        return Err(std::io::Error::other("the recovery metadata exceeds the supported size limit"));
+    }
+    let mut bytes = vec![0; size as usize];
+    reader.read_exact(&mut bytes)?;
+    let head: Header = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    if head.format != FORMAT || head.version != 2 {
+        return Err(std::io::Error::other("the recovery copy has an unrecognized format or version"));
+    }
+    if head.payload_bytes == 0 || head.payload_bytes > MAX_PAYLOAD_BYTES {
+        return Err(std::io::Error::other("the recovery payload exceeds the supported size limit"));
+    }
+    if file_bytes != MAGIC.len() as u64 + 4 + size + head.payload_bytes {
+        return Err(std::io::Error::other("the recovery copy is truncated or its size is damaged"));
+    }
+    Ok(head)
+}
+
+fn load_copy(path: &Path) -> Result<Document, String> {
+    let (mut file, size) = open_copy(path).map_err(|e| e.to_string())?;
+    let mut magic = [0; 8];
+    file.read_exact(&mut magic).map_err(|e| e.to_string())?;
+    if &magic == MAGIC {
+        let head = read_header(&mut file, size).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        file.take(head.payload_bytes + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 != head.payload_bytes || crc32fast::hash(&bytes) != head.payload_crc32 {
+            return Err("the recovery payload is truncated or damaged (checksum mismatch)".into());
+        }
+        return io::decode(&bytes);
+    }
+    if size > MAX_LEGACY_BYTES {
+        return Err("the legacy recovery copy exceeds the supported size limit".into());
+    }
+    let mut bytes = magic.to_vec();
+    file.take(MAX_LEGACY_BYTES + 1 - bytes.len() as u64).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_LEGACY_BYTES { return Err("the legacy recovery copy exceeds the supported size limit".into()); }
+    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("the recovery copy is damaged: {e}"))?;
+    if v["format"] != FORMAT { return Err("the recovery copy has an unrecognized or damaged format".into()); }
+    io::from_json(&v["doc"].to_string())
+}
+
+fn metadata(path: &Path) -> std::io::Result<(Option<PathBuf>, u64)> {
+    let (mut file, size) = open_copy(path)?;
+    let mut magic = [0; 8];
+    file.read_exact(&mut magic)?;
+    if &magic == MAGIC {
+        let head = read_header(&mut file, size)?;
+        return Ok((head.path, head.saved));
+    }
+    // The legacy writer placed format/path/saved before ,"doc":. Parse only
+    // that prefix. A quoted path cannot contain this literal delimiter because
+    // its quotes are escaped. Noncanonical/damaged legacy metadata is kept in
+    // the list with an unknown name; loading still validates the entire copy.
+    let mut prefix = magic.to_vec();
+    file.take(MAX_HEADER_BYTES.saturating_sub(prefix.len() as u64)).read_to_end(&mut prefix)?;
+    let marker = b",\"doc\":";
+    if let Some(at) = prefix.windows(marker.len()).position(|w| w == marker) {
+        prefix.truncate(at);
+        prefix.push(b'}');
+    }
+    let v: serde_json::Value = serde_json::from_slice(&prefix).map_err(std::io::Error::other)?;
+    if v["format"] != FORMAT { return Err(std::io::Error::other("unrecognized recovery metadata")); }
+    Ok((v["path"].as_str().map(PathBuf::from), v["saved"].as_u64().unwrap_or(0)))
 }
 
 fn write(file: &Path, doc: &Document, path: Option<&Path>) -> std::io::Result<()> {
-    // Never acknowledge a backup that our native loader would reject.
-    let doc = io::validated_json(doc).map_err(std::io::Error::other)?;
-    let head = serde_json::json!({ "format": FORMAT, "path": path, "saved": now() }).to_string();
-    // The design goes in as it would be saved, after the header's fields.
-    let text = format!("{},\"doc\":{doc}}}", &head[..head.len() - 1]);
-    if text.len() as u64 > MAX_RECOVERY_BYTES {
-        return Err(std::io::Error::other("the recovery copy exceeds the supported size limit"));
+    // The native codec validates the design and detaches image/mesh payloads.
+    // Never expand a large mesh into legacy base64 JSON for autosave.
+    let (payload, _) = io::encode(doc, &io::Extras::default()).map_err(std::io::Error::other)?;
+    if payload.is_empty() || payload.len() as u64 > MAX_PAYLOAD_BYTES {
+        return Err(std::io::Error::other("the recovery payload exceeds the supported size limit"));
+    }
+    let head = Header { format: FORMAT.into(), version: 2, path: path.map(Path::to_path_buf), saved: now(), payload_bytes: payload.len() as u64, payload_crc32: crc32fast::hash(&payload) };
+    let head = serde_json::to_vec(&head).map_err(std::io::Error::other)?;
+    if head.len() as u64 > MAX_HEADER_BYTES {
+        return Err(std::io::Error::other("the recovery metadata exceeds the supported size limit"));
     }
     let tmp = file.with_extension("tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, file)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // Exclusive creation never follows a leftover link or truncates another
+    // file. Only our newly created temporary file is cleaned up on failure.
+    let mut output = options.open(&tmp)?;
+    let result = (|| {
+        output.write_all(MAGIC)?;
+        output.write_all(&(head.len() as u32).to_le_bytes())?;
+        output.write_all(&head)?;
+        output.write_all(&payload)?;
+        output.sync_all()?;
+        drop(output);
+        std::fs::rename(&tmp, file)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+    result
 }
 
 /// Copies in `dir` whose app is no longer running.
@@ -132,12 +239,11 @@ pub fn found(dir: &Path) -> Vec<Found> {
             }
             continue;
         }
-        let head = read_copy(&file).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).filter(|v| v["format"] == FORMAT);
-        match head {
-            Some(v) => out.push(Found { path: v["path"].as_str().map(PathBuf::from), saved: v["saved"].as_u64().unwrap_or(0), file }),
+        match metadata(&file) {
+            Ok((path, saved)) => out.push(Found { path, saved, file }),
             // A read failure or damaged header is not permission to delete someone's work.
             // Keep it visible so the user can inspect the error and choose whether to delete it.
-            None => out.push(Found { file, path: None, saved: 0 }),
+            Err(_) => out.push(Found { file, path: None, saved: 0 }),
         }
     }
     out.sort_by_key(|f| std::cmp::Reverse(f.saved));
@@ -251,6 +357,9 @@ impl Recovery {
             return Some(0.1);
         }
         if !s.dirty && !self.on_disk {
+            // A successful explicit save makes an earlier failed recovery
+            // attempt irrelevant; there is no unsaved work left at risk.
+            self.error = None;
             return None;
         }
         if s.dirty && self.seen == Some(s.edits) && self.on_disk {
@@ -493,6 +602,171 @@ mod tests {
         assert_eq!(std::fs::read(&r.file).unwrap(), previous);
         r.close();
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn legacy_json_recovery_still_discovers_and_loads() {
+        let d = dir("legacy-json");
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(format!("legacy.{EXT}"));
+        let mut doc = Document::new(Unit::Mm);
+        doc.set_param("width", "12.5 mm").unwrap();
+        // The exact old writer layout, including an awkward quoted filename.
+        let path = PathBuf::from("/designs/a,\"doc\":name.ferr");
+        let head = serde_json::json!({"format": FORMAT, "path": path, "saved": 42}).to_string();
+        let old = format!("{},\"doc\":{}}}", &head[..head.len()-1], io::validated_json(&doc).unwrap());
+        std::fs::write(&file, &old).unwrap();
+        let copies = found(&d);
+        assert_eq!(copies.len(), 1);
+        assert_eq!((copies[0].path.as_ref(), copies[0].saved), (Some(&path), 42));
+        assert_eq!(copies[0].load().unwrap(), doc);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), old, "reading never rewrites a legacy copy");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn large_mesh_and_embedded_image_recovery_uses_native_container() {
+        use fr_core::{doc::FeatureKind, mesh::Mesh, reference::ReferenceImage, sketch::{Plane, Sketch}};
+        use glam::DVec3;
+        let d = dir("large-native");
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(format!("large.{EXT}"));
+        let triangles = 1_500_000;
+        assert!(triangles * 48 > 64 * 1024 * 1024, "the old base64 recovery exceeds its JSON allowance");
+        // Indexed storage is the important boundary here; repeated geometry
+        // keeps this I/O regression inexpensive without invoking mesh repair.
+        let mesh = Mesh::from_indexed(vec![DVec3::ZERO, DVec3::X, DVec3::Y], vec![[0, 1, 2]; triangles], true).unwrap();
+        let mut doc = Document::new(Unit::Mm);
+        doc.add_feature(FeatureKind::Import(mesh));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 3).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let mut sketch = Sketch::new(Plane::XY);
+        sketch.reference = Some(ReferenceImage::from_bytes("trace.png", png.get_ref(), 20.0).unwrap());
+        doc.add_feature(FeatureKind::Sketch(sketch));
+        write(&file, &doc, Some(Path::new("/designs/scan.ferr"))).unwrap();
+        let bytes = std::fs::read(&file).unwrap();
+        assert!(bytes.starts_with(MAGIC));
+        let head_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        assert!(bytes[12 + head_len..].starts_with(b"PK"));
+        let copies = found(&d);
+        assert_eq!(copies[0].name(), "scan");
+        let recovered = copies[0].load().unwrap();
+        assert_eq!(recovered, doc);
+        assert_eq!(recovered.sketches().next().unwrap().1.reference.as_ref().unwrap().pixel_height, 3);
+        // Developer-only real scan exercise; CI always covers the synthetic
+        // large document above and never depends on a personal local fixture.
+        if let Some(path) = std::env::var_os("FERRENDER_RECOVERY_TEST_FILE") {
+            let doc = io::open(Path::new(&path)).unwrap().doc.unwrap();
+            let started = std::time::Instant::now();
+            write(&file, &doc, Some(Path::new(&path))).unwrap();
+            assert_eq!(load_copy(&file).unwrap(), doc);
+            eprintln!("real native recovery round trip: {:.3}s, {} bytes", started.elapsed().as_secs_f64(), std::fs::metadata(&file).unwrap().len());
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn discovery_reads_bounded_metadata_without_loading_geometry() {
+        let d = dir("metadata-only");
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(format!("large.{EXT}"));
+        let head = Header { format: FORMAT.into(), version: 2, path: Some("/designs/large.ferr".into()), saved: 99, payload_bytes: 1024 * 1024 * 1024, payload_crc32: 0 };
+        let json = serde_json::to_vec(&head).unwrap();
+        let total = 12 + json.len() as u64 + head.payload_bytes;
+        let mut only_header = (json.len() as u32).to_le_bytes().to_vec();
+        only_header.extend(&json);
+        // Reader contains no payload at all: metadata parsing must not ask for it.
+        assert_eq!(read_header(&mut &only_header[..], total).unwrap().saved, 99);
+        let mut out = File::create(&file).unwrap();
+        out.write_all(MAGIC).unwrap();
+        out.write_all(&only_header).unwrap();
+        out.set_len(total).unwrap(); // sparse dummy payload, never decoded by discovery
+        assert_eq!(metadata(&file).unwrap(), (Some("/designs/large.ferr".into()), 99));
+        assert_eq!(found(&d)[0].name(), "large");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn corrupt_or_oversized_recovery_is_refused_but_kept_visible() {
+        let d = dir("corrupt-v2");
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(format!("copy.{EXT}"));
+        write(&file, &Document::new(Unit::Mm), None).unwrap();
+        let good = std::fs::read(&file).unwrap();
+        let mut corrupt = good.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        for bytes in [corrupt, good[..good.len()-1].to_vec(), [MAGIC.as_slice(), &((MAX_HEADER_BYTES + 1) as u32).to_le_bytes()].concat()] {
+            std::fs::write(&file, &bytes).unwrap();
+            assert!(load_copy(&file).is_err());
+            assert_eq!(found(&d).len(), 1);
+            assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        }
+        let head = Header { format: FORMAT.into(), version: 2, path: None, saved: 0, payload_bytes: MAX_PAYLOAD_BYTES + 1, payload_crc32: 0 };
+        let json = serde_json::to_vec(&head).unwrap();
+        let bytes = [(json.len() as u32).to_le_bytes().as_slice(), &json].concat();
+        assert!(read_header(&mut &bytes[..], 12 + json.len() as u64 + head.payload_bytes).unwrap_err().to_string().contains("size limit"));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn failed_replacement_keeps_the_last_readable_native_copy() {
+        let d = dir("failed-replace");
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(format!("copy.{EXT}"));
+        let mut doc = Document::new(Unit::Mm);
+        doc.set_param("before", "1 mm").unwrap();
+        write(&file, &doc, None).unwrap();
+        let previous = std::fs::read(&file).unwrap();
+        let blocked = file.with_extension("tmp");
+        std::fs::create_dir(&blocked).unwrap();
+        let mut changed = doc.clone();
+        changed.set_param("after", "2 mm").unwrap();
+        assert!(write(&file, &changed, None).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), previous);
+        assert_eq!(load_copy(&file).unwrap(), doc);
+        std::fs::remove_dir(&blocked).unwrap();
+        write(&file, &changed, None).unwrap();
+        assert_eq!(load_copy(&file).unwrap(), changed);
+        assert!(!blocked.exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn saving_clears_a_prior_failed_recovery_warning() {
+        let d = dir("saved-after-error");
+        let mut r = Recovery::start(d.clone());
+        let mut s = Session::default();
+        changed(&mut s, "width");
+        std::fs::create_dir(r.file.with_extension("tmp")).unwrap();
+        r.tick(&s, 0.0);
+        r.wait();
+        r.tick(&s, 0.1);
+        assert!(r.error().is_some() && !r.on_disk);
+        s.save(&d.join("saved.ferr")).unwrap();
+        assert_eq!(r.tick(&s, 0.2), None);
+        assert!(r.error().is_none(), "saved work no longer needs the failed recovery copy");
+        r.close();
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_recovery_links_cannot_overwrite_another_file() {
+        use std::os::unix::fs::symlink;
+        let d = dir("temporary-link");
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(format!("copy.{EXT}"));
+        let sentinel = d.join("unrelated.txt");
+        std::fs::write(&sentinel, "keep this").unwrap();
+        let doc = Document::new(Unit::Mm);
+        write(&file, &doc, None).unwrap();
+        let previous = std::fs::read(&file).unwrap();
+        symlink(&sentinel, file.with_extension("tmp")).unwrap();
+        assert!(write(&file, &doc, None).is_err());
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep this");
+        assert_eq!(std::fs::read(&file).unwrap(), previous);
+        assert_eq!(load_copy(&file).unwrap(), doc);
+        std::fs::remove_dir_all(d).unwrap();
     }
 
 }

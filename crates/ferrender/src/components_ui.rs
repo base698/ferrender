@@ -58,7 +58,7 @@ impl App {
         self.finish_sketch();
         self.cancel_tool();
         self.dialog = Dialog::None;
-        match self.session.edit(|doc| doc.activate_component(id)) {
+        match self.session.edit_without_rebuild(|doc| doc.activate_component(id)) {
             Ok(()) => { self.sel_component = Some(id); self.sel_body = None; self.sel_face = None; self.refresh(); }
             Err(error) => self.toast(error),
         }
@@ -178,7 +178,7 @@ fn component_node(app: &mut App, ui: &mut Ui, id: Id) {
                     }
                 });
                 egui::CollapsingHeader::new(format!("{} Construction", icon::FOLDER)).default_open(true).show(ui, |ui| {
-                    let planes: Vec<_> = app.doc().features.iter().filter_map(|f| if f.owner == id { if let FeatureKind::Plane(p) = &f.kind { Some((f.id, f.name.clone(), p.visible, f.suppressed)) } else { None } } else { None }).collect();
+                    let planes: Vec<_> = app.doc().features.iter().filter_map(|f| if f.owner == id { if let FeatureKind::Plane(p) = &f.kind { Some((f.id, f.name.clone(), p.visible, app.doc().is_suppressed(f.id))) } else { None } } else { None }).collect();
                     if planes.is_empty() { ui.small(RichText::new("None yet").color(colors.muted)); }
                     for (plane, name, visible, suppressed) in planes {
                         ui.horizontal(|ui| {
@@ -192,7 +192,7 @@ fn component_node(app: &mut App, ui: &mut Ui, id: Id) {
                     }
                 });
                 egui::CollapsingHeader::new(format!("{} Sketches", icon::FOLDER)).default_open(true).show(ui, |ui| {
-                    let sketches: Vec<_> = app.doc().sketches().filter(|(f, _)| f.owner == id).map(|(f, sk)| (f.id, f.name.clone(), sk.visible, f.suppressed)).collect();
+                    let sketches: Vec<_> = app.doc().sketches().filter(|(f, _)| f.owner == id).map(|(f, sk)| (f.id, f.name.clone(), sk.visible, app.doc().is_suppressed(f.id))).collect();
                     if sketches.is_empty() { ui.small(RichText::new("None yet").color(colors.muted)); }
                     for (sid, name, visible, suppressed) in sketches {
                         ui.horizontal(|ui| {

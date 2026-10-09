@@ -2,7 +2,7 @@
 
 use egui::{Align, Align2, Color32, Context, FontId, Layout, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, vec2};
 use egui_phosphor::regular as icon;
-use fr_core::doc::{HoleFit, HoleShape};
+use fr_core::doc::{HoleFit, HoleShape, SweepOrient};
 use fr_core::{Axis, CKind, FeatureKind, Id, Kind, Op, Plane, Unit, threads};
 use serde_json::json;
 
@@ -58,7 +58,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Save As\u{2026}", &cmd("\u{21e7}S"), Action::SaveAs);
             item(app, ui, "Recover Unsaved\u{2026}", "", Action::Recover);
             ui.separator();
-            item(app, ui, "Import STL\u{2026}", &cmd("I"), Action::Import);
+            item(app, ui, "Import Mesh\u{2026}", &cmd("I"), Action::Import);
             item(app, ui, "Export STL\u{2026}", &cmd("E"), Action::Export);
             item(app, ui, "Export STEP\u{2026}", "", Action::ExportStep);
         });
@@ -105,6 +105,8 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             ui.separator();
             item(app, ui, "Extrude", "E", Action::Extrude);
             item(app, ui, "Revolve", "", Action::Revolve);
+            item(app, ui, "Sweep", "", Action::Sweep);
+            item(app, ui, "Loft", "", Action::Loft);
             item(app, ui, "Text / Emboss", "", Action::Text);
             ui.menu_button("Primitives", |ui| {
                 for (kind, name) in crate::primitives::NAMES.into_iter().enumerate() { item(app, ui, name, "", Action::Primitive(kind)); }
@@ -124,6 +126,15 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Hole", "", Action::Hole);
             item(app, ui, "Thread", "", Action::Thread);
         });
+        ui.menu_button("Mesh", |ui| {
+            item(app, ui, "Import Mesh\u{2026}", &cmd("I"), Action::Import);
+            item(app, ui, "Relief from Image\u{2026}", "", Action::Relief);
+            ui.separator();
+            for (k, name) in crate::app::MESH_OPS.iter().enumerate() { item(app, ui, name, "", Action::Mesh(k)); }
+            ui.separator();
+            item(app, ui, "Sculpt", "", Action::Sculpt);
+        });
+        ui.menu_button("Scripts", |ui| crate::scripts_ui::menu(app, ui));
         ui.menu_button("View", |ui| {
             for (label, view) in [("Home", "iso"), ("Top", "top"), ("Front", "front"), ("Right", "right"), ("Back", "back"), ("Left", "left"), ("Bottom", "bottom")] {
                 item(app, ui, label, "", Action::View(view));
@@ -218,7 +229,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                     (icon::CIRCLE_NOTCH, "Arc", Tool::Arc, "Centre, start and end arc (A)"),
                     (icon::CIRCLE_NOTCH, "3-Point Arc", Tool::Arc3, "Arc: start, end, then a point that sets the bulge"),
                     (icon::CIRCLE_NOTCH, "Tangent Arc", Tool::TangentArc, "Continue a selected line or arc smoothly"),
-                    (icon::BEZIER_CURVE, "Spline", Tool::Spline, "Curve through four editable fit points"),
+                    (icon::BEZIER_CURVE, "Spline", Tool::Spline, "Curve through four editable fit points; keeps going from its end until Escape"),
                     (icon::DOT_OUTLINE, "Point", Tool::Point, "Point (P)"),
                     (icon::POLYGON, "Polygon", Tool::Polygon, "Regular polygon; set the sides in the Sketch Palette"),
                     (icon::STACK_SIMPLE, "Project", Tool::Project, "Copy the outline of a body's face into the sketch"),
@@ -226,6 +237,17 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                     if big(ui, glyph, label, app.tool == tool, tip).clicked() {
                         app.run(&ctx, Action::Tool(tool));
                     }
+                }
+                // Beside the drawing tools, since it decides what the next line, arc or spline is.
+                // With entities selected it changes those instead, and shows their state.
+                let selected: Vec<bool> = app.sketch().map(|(_, sk)| app.sel.iter().filter_map(|id| sk.entities.get(id).map(|e| e.construction)).collect()).unwrap_or_default();
+                let (on, tip) = match selected.as_slice() {
+                    [] => (app.opts.construction, "Draw new geometry as construction (guide) lines; select lines first to change them instead (X)".to_owned()),
+                    all if all.iter().all(|c| *c) => (true, format!("The {} selected {} construction; click to make {} normal again (X)", all.len(), if all.len() == 1 { "line is" } else { "lines are" }, if all.len() == 1 { "it" } else { "them" })),
+                    some => (false, format!("Make the {} selected {} construction (guide) geometry (X)", some.len(), if some.len() == 1 { "line" } else { "lines" })),
+                };
+                if big(ui, icon::LINE_SEGMENTS, "Construction", on, &tip).clicked() {
+                    app.run(&ctx, Action::Construction);
                 }
             });
             group(ui, "MODIFY", |ui| {
@@ -243,9 +265,6 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
                 if big(ui, icon::SPLIT_HORIZONTAL, "Mirror", false, "Mirror the selection across the line selected last").clicked() {
                     app.run(&ctx, Action::MirrorSketch);
-                }
-                if big(ui, icon::LINE_SEGMENTS, "Construction", app.opts.construction, "Make the selection construction geometry, or draw new geometry as construction (X)").clicked() {
-                    app.run(&ctx, Action::Construction);
                 }
                 if big(ui, icon::FUNCTION, "Parameters", app.show_params, "Named values you can use in any size box as $name").clicked() {
                     app.run(&ctx, Action::Parameters);
@@ -289,15 +308,21 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "CREATE", |ui| {
-                let (ex, rev) = match &app.dialog {
-                    Dialog::Feature(f) => (!f.revolve, f.revolve),
-                    _ => (false, false),
+                let (ex, rev, sweep) = match &app.dialog {
+                    Dialog::Feature(f) => (!f.revolve && f.sweep.is_none(), f.revolve, f.sweep.is_some()),
+                    _ => (false, false, false),
                 };
                 if big(ui, icon::ARROW_FAT_LINES_UP, "Extrude", ex, "Pull a sketch profile into a solid (E)").clicked() {
                     app.run(&ctx, Action::Extrude);
                 }
                 if big(ui, icon::ARROWS_CLOCKWISE, "Revolve", rev, "Turn a sketch profile around an axis, like a lathe").clicked() {
                     app.run(&ctx, Action::Revolve);
+                }
+                if big(ui, icon::PATH, "Sweep", sweep, "Carry a sketch profile along a path drawn in another sketch").clicked() {
+                    app.run(&ctx, Action::Sweep);
+                }
+                if big(ui, icon::STACK, "Loft", matches!(app.dialog, Dialog::Loft(_)), "Skin a solid through closed profiles drawn on different planes").clicked() {
+                    app.run(&ctx, Action::Loft);
                 }
                 if big(ui, icon::CUBE, "Primitive", matches!(app.dialog, Dialog::Primitive(_)), "Create a box, cylinder, sphere, cone or torus").clicked() {
                     app.run(&ctx, Action::Primitive(0));
@@ -307,7 +332,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "MODIFY", |ui| {
-                if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_) | Dialog::MoveComponent(_)), "Move the selected component, or move, rotate or scale a body (M)").clicked() {
+                if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_) | Dialog::MoveComponent(_)) || (app.sketch().is_some() && app.tool == Tool::Move), if app.sketch().is_some() { "Move sketch geometry: drag a point or entity, or select geometry and drag anywhere (M)" } else { "Move the selected component, or move, rotate or scale a body (M)" }).clicked() {
                     app.run(&ctx, Action::Transform);
                 }
                 if big(ui, icon::SPLIT_HORIZONTAL, "Split", matches!(app.dialog, Dialog::Split(_)), "Split a body with a flat face or plane").clicked() { app.run(&ctx, Action::SplitBody); }
@@ -346,7 +371,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "MESH", |ui| {
-                if big(ui, icon::DOWNLOAD_SIMPLE, "Import STL", false, "Bring a mesh in as a body").clicked() {
+                if big(ui, icon::DOWNLOAD_SIMPLE, "Import Mesh", false, "Bring an STL, OBJ or 3MF in as a body").clicked() {
                     app.run(&ctx, Action::Import);
                 }
                 if big(ui, icon::EXPORT, "Export STL", false, "Write the visible bodies for 3D printing").clicked() {
@@ -361,6 +386,9 @@ pub fn status(app: &mut App, ui: &mut Ui) {
     let colors = Palette::from_ctx(ui.ctx());
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("Active: {}", app.doc().component_name(app.doc().active_component))).strong());
+        if app.session.read_only {
+            ui.label(RichText::new("Read-only: written by a newer Ferrender, showing its saved geometry").color(colors.accent));
+        }
         match app.sketch() {
             Some((id, _)) => {
                 let name = app.doc().feature(id).map_or(String::new(), |f| f.name.clone());
@@ -382,7 +410,7 @@ pub fn status(app: &mut App, ui: &mut Ui) {
                     let u = app.doc().units;
                     let size = b.mesh.bbox().map_or(glam::DVec3::ZERO, |(lo, hi)| hi - lo) / u.mm();
                     let n = |v: f64| fr_core::units::trim_num(v, 3);
-                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", format!("{} › {}", app.doc().component_name(b.component), b.name), if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.tris.len())).color(colors.muted));
+                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", format!("{} › {}", app.doc().component_name(b.component), b.name), if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.len())).color(colors.muted));
                 }
                 if let Some(f) = &app.sel_face
                     && let Some(b) = app.session.built.body(f.body)
@@ -423,6 +451,8 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Primitive(_) => icon::CUBE,
         FeatureKind::Extrude(_) => icon::ARROW_FAT_LINES_UP,
         FeatureKind::Revolve(_) => icon::ARROWS_CLOCKWISE,
+        FeatureKind::Sweep(_) => icon::PATH,
+        FeatureKind::Loft(_) => icon::STACK,
         FeatureKind::Import(_) => icon::DOWNLOAD_SIMPLE,
         FeatureKind::Transform(_) => icon::ARROWS_OUT_CARDINAL,
         FeatureKind::Remove(_) => icon::MINUS_CIRCLE,
@@ -435,12 +465,16 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Hole(_) => icon::CIRCLE_DASHED,
         FeatureKind::Thread(_) => icon::SPIRAL,
         FeatureKind::Text(_) => icon::TEXT_T,
+        FeatureKind::MeshOp(_) => icon::POLYGON,
+        FeatureKind::Relief(_) => icon::IMAGE,
+        FeatureKind::ScriptRun(_) => icon::CODE,
     }
 }
 
 /// Edit, suppress and delete, shared by the timeline and the browser.
 pub(crate) fn feature_menu(app: &mut App, ui: &mut Ui, id: Id, suppressed: bool) {
-    if ui.button("Edit").clicked() {
+    let script = crate::scripts_ui::chip_menu(app, ui, id);
+    if !script && ui.button("Edit").clicked() {
         app.edit_feature(id);
         ui.close();
     }
@@ -453,8 +487,8 @@ pub(crate) fn feature_menu(app: &mut App, ui: &mut Ui, id: Id, suppressed: bool)
         let _ = app.execute(&json!({"op": "edit_feature", "feature": id, "suppressed": !suppressed}));
         ui.close();
     }
-    if ui.button("Delete").clicked() {
-        app.delete_feature(id);
+    if ui.button("Delete").on_hover_text(if script { "Deletes the run and everything it made" } else { "" }).clicked() {
+        if script { app.delete_script_run(id); } else { app.delete_feature(id); }
         ui.close();
     }
 }
@@ -692,11 +726,13 @@ fn dialogs(app: &mut App, ctx: &Context) {
             });
         }
         Dialog::Feature(mut f) => {
-            let title = match (f.revolve, f.editing.is_some()) {
-                (false, false) => "Extrude",
-                (false, true) => "Edit Extrude",
-                (true, false) => "Revolve",
-                (true, true) => "Edit Revolve",
+            let title = match (f.revolve, f.sweep.is_some(), f.editing.is_some()) {
+                (_, true, false) => "Sweep",
+                (_, true, true) => "Edit Sweep",
+                (false, _, false) => "Extrude",
+                (false, _, true) => "Edit Extrude",
+                (true, _, false) => "Revolve",
+                (true, _, true) => "Edit Revolve",
             };
             dialog_window(app, title).show(ctx, |ui| {
                 egui::Grid::new("feature").num_columns(3).show(ui, |ui| {
@@ -707,7 +743,36 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         (n, None) => RichText::new(format!("{n} selected")),
                     });
                     ui.end_row();
-                    if f.revolve {
+                    if let Some(w) = &mut f.sweep {
+                        ui.label("Path");
+                        let named = |id: Id| app.doc().feature(id).map_or_else(|| format!("sketch {id}"), |x| x.name.clone());
+                        // Any other sketch whose geometry is one run, or one that was picked a piece at a time.
+                        let choices: Vec<Id> = app.doc().sketches().filter(|(x, s)| Some(x.id) != f.sketch && !app.doc().is_suppressed(x.id) && (w.path_sketch == Some(x.id) || fr_core::profile::chain(s, &[]).is_ok())).map(|(x, _)| x.id).collect();
+                        egui::ComboBox::from_id_salt("sweep-path").selected_text(match w.path_sketch { Some(id) => RichText::new(named(id)), None => RichText::new("click a line or curve").color(colors.accent) }).show_ui(ui, |ui| {
+                            for id in choices {
+                                if ui.selectable_label(w.path_sketch == Some(id), named(id)).clicked() { w.path_sketch = Some(id); w.path.clear(); }
+                            }
+                        });
+                        ui.end_row();
+                        // What the path is, or why it cannot be followed.
+                        if let Some(sk) = w.path_sketch.and_then(|id| app.doc().sketch(id)) {
+                            ui.label("");
+                            ui.label(match fr_core::profile::chain(sk, &w.path) {
+                                Ok(chain) => RichText::new(format!("{} piece{}, {}", chain.ids.len(), if chain.ids.len() == 1 { "" } else { "s" }, if chain.closed { "closed" } else { "open" })).color(colors.muted),
+                                Err(e) => RichText::new(e).color(colors.accent),
+                            });
+                            ui.end_row();
+                        }
+                        ui.label("Along path").on_hover_text("Which parts of the path to sweep. Drag the handles, or type the fractions: 0 is the start of the path and 1 its end.");
+                        crate::sweep_ui::spans(ui, &mut w.spans, &colors);
+                        ui.end_row();
+                        ui.label("Orientation");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut w.orient, SweepOrient::Follow, "Follow path").on_hover_text("The profile turns with the path");
+                            ui.selectable_value(&mut w.orient, SweepOrient::Fixed, "Fixed").on_hover_text("The profile keeps the orientation it was drawn in");
+                        });
+                        ui.end_row();
+                    } else if f.revolve {
                         ui.label("Axis");
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut f.axis, Axis::X, "X");
@@ -717,6 +782,25 @@ fn dialogs(app: &mut App, ctx: &Context) {
                             }
                         });
                         ui.end_row();
+                        // A profile across the axis: say which points, show them, and offer the fixes.
+                        if let Some((sid, past, by)) = app.revolve_crossing() {
+                            let unit = app.doc().units;
+                            ui.label(RichText::new("Across the axis").color(colors.error));
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(format!("{} point{} {} {} {} past the axis, ringed in red.", past.len(), if past.len() == 1 { "" } else { "s" }, if past.len() == 1 { "lies" } else { "lie" }, fr_core::units::fmt_len(by, unit), unit.name())).color(colors.error));
+                                ui.horizontal(|ui| {
+                                    let sk = app.doc().sketch(sid).cloned();
+                                    for (axis, name) in [(Axis::X, "Use X"), (Axis::Y, "Use Y")] {
+                                        let fits = axis != f.axis && sk.as_ref().is_some_and(|sk| fr_core::Document::axis_line(sk, axis).is_some() && fr_core::Document::axis_crossing(sk, &f.profiles, axis).is_none());
+                                        if fits && ui.button(name).on_hover_text("The profile lies on one side of this axis").clicked() { f.axis = axis; }
+                                    }
+                                    if by <= 2.0 && ui.button(if past.len() == 1 { "Move it onto the axis" } else { "Move them onto the axis" }).on_hover_text("Puts the ringed points on the axis and keeps them there").clicked() {
+                                        app.move_points_onto_axis(sid, &past, f.axis);
+                                    }
+                                });
+                            });
+                            ui.end_row();
+                        }
                         value_row(app, ui, "Angle", &mut f.text, Kind::Angle);
                     } else {
                         if !f.through_all {
@@ -741,13 +825,94 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     }
                     op_row(ui, &mut f.op, &Op::ALL);
                 });
-                ui.label(RichText::new("Click a region to select it. Shift-click to add or remove regions.").color(colors.muted));
+                ui.label(RichText::new(if f.sweep.is_some() { "Click a region for the profile and a line or curve of another sketch for the path. Sharp corners are mitred." } else { "Click a region to select it. Shift-click to add or remove regions." }).color(colors.muted));
                 if ui.small_button("Clear profiles").clicked() { f.profiles.clear(); f.face = None; }
                 if f.face.is_some() && f.op == Op::Join {
                     let inward = app.doc().value(&f.text, Kind::Length).is_ok_and(|v| v.v < 0.0);
                     ui.label(RichText::new(if inward { "A negative distance pushes the face in and cuts." } else { "Pulls the face out. A negative distance pushes it in and cuts." }).color(colors.muted));
                 }
                 app.dialog = Dialog::Feature(f);
+                confirm(app, ui, "OK");
+            });
+        }
+        Dialog::Script(d) => crate::scripts_ui::dialog(app, ctx, d),
+        Dialog::Mesh(mut m) => {
+            dialog_window(app, crate::app::MESH_OPS[m.kind]).show(ctx, |ui| {
+                let name = m.body.and_then(|b| app.session.built.body(b)).map_or("Click a body".to_owned(), |b| b.name.clone());
+                ui.label(RichText::new(name).strong());
+                egui::Grid::new("mesh-op").num_columns(3).show(ui, |ui| {
+                    match m.kind {
+                        0 => { ui.label("Fill holes up to"); ui.add(egui::DragValue::new(&mut m.count).range(0..=100_000).suffix(" edges")); ui.end_row(); }
+                        1 => {
+                            ui.label("Target triangles"); ui.add(egui::DragValue::new(&mut m.count).range(4..=16_000_000)); ui.end_row();
+                            ui.label("Method"); egui::ComboBox::from_id_salt("decimate-method").selected_text(["Quadric (faithful)", "Cluster (fast)"][m.choice]).show_ui(ui, |ui| { for (i, n) in ["Quadric (faithful)", "Cluster (fast)"].iter().enumerate() { ui.selectable_value(&mut m.choice, i, *n); } }); ui.end_row();
+                            ui.label("Keep the outline"); ui.checkbox(&mut m.flag, ""); ui.end_row();
+                        }
+                        2 => {
+                            ui.label("Iterations"); ui.add(egui::DragValue::new(&mut m.count).range(1..=500)); ui.end_row();
+                            ui.label("Strength"); ui.add(egui::Slider::new(&mut m.amount, 0.0..=1.0)); ui.end_row();
+                        }
+                        3 => {
+                            ui.label("Levels"); ui.add(egui::DragValue::new(&mut m.count).range(1..=6)); ui.end_row();
+                            ui.label("Scheme"); egui::ComboBox::from_id_salt("subdivide-scheme").selected_text(["Loop (smooth)", "Midpoint"][m.choice]).show_ui(ui, |ui| { for (i, n) in ["Loop (smooth)", "Midpoint"].iter().enumerate() { ui.selectable_value(&mut m.choice, i, *n); } }); ui.end_row();
+                        }
+                        4 | 5 => {
+                            ui.label("Plane"); egui::ComboBox::from_id_salt("mesh-plane").selected_text(["XY", "XZ", "YZ"][m.plane]).show_ui(ui, |ui| { for (i, n) in ["XY", "XZ", "YZ"].iter().enumerate() { ui.selectable_value(&mut m.plane, i, *n); } }); ui.end_row();
+                            value_row(app, ui, "Offset along its normal", &mut m.text, Kind::Length);
+                            if m.kind == 4 {
+                                ui.label("Keep"); egui::ComboBox::from_id_salt("mesh-keep").selected_text(["Negative side", "Positive side", "Both (two bodies)"][m.choice]).show_ui(ui, |ui| { for (i, n) in ["Negative side", "Positive side", "Both (two bodies)"].iter().enumerate() { ui.selectable_value(&mut m.choice, i, *n); } }); ui.end_row();
+                                ui.label("Cap the cut"); ui.checkbox(&mut m.flag, ""); ui.end_row();
+                            } else {
+                                ui.label("Weld the halves"); ui.checkbox(&mut m.flag, ""); ui.end_row();
+                            }
+                        }
+                        _ => {
+                            value_row(app, ui, "Thickness", &mut m.text, Kind::Length);
+                            ui.label("Straight down (Z)"); ui.checkbox(&mut m.flag, ""); ui.end_row();
+                        }
+                    }
+                });
+                let hint = match m.kind {
+                    0 => "Drops bad triangles, makes the orientation consistent and closes small holes.",
+                    1 => "Fewer triangles; quadric keeps the shape, cluster is quick for huge scans.",
+                    2 => "Taubin smoothing: removes noise without shrinking.",
+                    3 => "Each level quadruples the triangles.",
+                    4 => "Keeps one side of the plane; the plane is the origin plane moved by the offset.",
+                    5 => "Adds the mirror image across the plane.",
+                    _ => "Thickens an open surface into a closed solid, or hollows a closed one to a wall.",
+                };
+                ui.label(RichText::new(hint).color(colors.muted));
+                app.dialog = Dialog::Mesh(m);
+                confirm(app, ui, "OK");
+            });
+        }
+        Dialog::Sculpt(mut d) => {
+            dialog_window(app, "Sculpt").show(ctx, |ui| {
+                egui::Grid::new("sculpt").num_columns(3).show(ui, |ui| {
+                    let was_scalar = d.brush >= 3;
+                    ui.label("Brush"); egui::ComboBox::from_id_salt("brush").selected_text(crate::app::BRUSHES[d.brush]).show_ui(ui, |ui| { for (i, n) in crate::app::BRUSHES.iter().enumerate() { ui.selectable_value(&mut d.brush, i, *n); } }); ui.end_row();
+                    if was_scalar != (d.brush >= 3) { d.strength = if d.brush >= 3 { "0.5".into() } else { "1 mm".into() }; }
+                    value_row(app, ui, "Radius", &mut d.radius, Kind::Length);
+                    value_row(app, ui, if d.brush >= 3 { "Strength (0 to 1)" } else { "Depth" }, &mut d.strength, if d.brush >= 3 { Kind::Scalar } else { Kind::Length });
+                });
+                ui.label(RichText::new(format!("Click the body to sculpt. Each click is one stroke in the timeline ({} so far).", d.strokes)).color(colors.muted));
+                app.dialog = Dialog::Sculpt(d);
+                if ui.button("Done").clicked() { app.dialog = Dialog::None; }
+            });
+        }
+        Dialog::Relief(mut r) => {
+            dialog_window(app, "Relief from Image").show(ctx, |ui| {
+                ui.label(RichText::new(r.path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())).strong());
+                egui::Grid::new("relief").num_columns(3).show(ui, |ui| {
+                    value_row(app, ui, "Width", &mut r.width, Kind::Length);
+                    value_row(app, ui, "Relief height", &mut r.depth, Kind::Length);
+                    value_row(app, ui, "Base thickness", &mut r.base, Kind::Length);
+                    ui.label("Resolution"); ui.add(egui::DragValue::new(&mut r.resolution).range(2..=1200).suffix(" cells")); ui.end_row();
+                    ui.label("Blur"); ui.add(egui::DragValue::new(&mut r.blur).range(0..=64).suffix(" cells")); ui.end_row();
+                    ui.label("Invert (lithophane)"); ui.checkbox(&mut r.invert, ""); ui.end_row();
+                });
+                ui.label(RichText::new("Bright pixels stand high; a depth map rendered elsewhere works the same way. Base 0 leaves an open surface.").color(colors.muted));
+                app.dialog = Dialog::Relief(r);
                 confirm(app, ui, "OK");
             });
         }
@@ -792,13 +957,54 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 confirm(app, ui, "OK");
             });
         }
+        Dialog::Loft(mut l) => {
+            dialog_window(app, if l.editing.is_some() { "Edit Loft" } else { "Loft" }).show(ctx, |ui| {
+                egui::Grid::new("loft").num_columns(2).show(ui, |ui| {
+                    ui.label("Sections");
+                    ui.vertical(|ui| {
+                        if l.sections.is_empty() {
+                            ui.label(RichText::new("click a closed region in each sketch").color(colors.accent));
+                        }
+                        // Reorder or drop a section; the order is the order they are joined in.
+                        let mut change = None;
+                        let last = l.sections.len().saturating_sub(1);
+                        for (i, section) in l.sections.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let name = app.doc().feature(section.sketch).map_or_else(|| format!("sketch {}", section.sketch), |x| x.name.clone());
+                                ui.label(if section.point.is_some() { format!("{}. {name} · tip at a point", i + 1) } else { format!("{}. {name} · {} edge{}", i + 1, section.profile.len(), if section.profile.len() == 1 { "" } else { "s" }) });
+                                if ui.add_enabled(i > 0, egui::Button::new(icon::ARROW_UP).small()).on_hover_text("Join this section earlier").clicked() { change = Some((i, i - 1)); }
+                                if ui.add_enabled(i < last, egui::Button::new(icon::ARROW_DOWN).small()).on_hover_text("Join this section later").clicked() { change = Some((i, i + 1)); }
+                                if ui.add(egui::Button::new(icon::X).small()).on_hover_text("Leave this section out").clicked() { change = Some((i, usize::MAX)); }
+                            });
+                        }
+                        match change {
+                            Some((i, usize::MAX)) => { l.sections.remove(i); }
+                            Some((i, j)) => l.sections.swap(i, j),
+                            None => {}
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Walls");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut l.ruled, false, "Smooth").on_hover_text("One surface curving through every section");
+                        ui.selectable_value(&mut l.ruled, true, "Straight").on_hover_text("Flat or ruled walls between neighbouring sections");
+                    });
+                    ui.end_row();
+                    op_row(ui, &mut l.op, &Op::ALL);
+                });
+                ui.label(RichText::new("Click a closed region in each sketch, from one end to the other, or a sketch point to end at a tip. Every outline needs the same number of edges.").color(colors.muted));
+                if ui.small_button("Clear sections").clicked() { l.sections.clear(); }
+                app.dialog = Dialog::Loft(l);
+                confirm(app, ui, "OK");
+            });
+        }
         Dialog::Pattern(mut p) => {
             dialog_window(app, if p.editing.is_some() { "Edit Pattern" } else { "Pattern" }).show(ctx, |ui| {
                 let before = p.editing.and_then(|id| app.doc().features.iter().position(|f| f.id == id)).unwrap_or(app.doc().active());
                 let owner = p.editing.and_then(|id| app.doc().feature(id).map(|f| f.owner));
                 let sources: Vec<(Id, String)> = app.doc().features.iter().take(before)
-                    .filter(|f| !f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner) && owner.is_none_or(|owner| f.owner == owner))
-                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
+                    .filter(|f| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner) && owner.is_none_or(|owner| f.owner == owner))
+                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Sweep(_) | FeatureKind::Loft(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
                     .map(|f| (f.id, format!("{} · {}", f.name, app.doc().component_name(f.owner)))).collect();
                 let shown = sources.iter().find(|s| Some(s.0) == p.source).map_or("choose".to_owned(), |s| s.1.clone());
                 egui::Grid::new("pattern").num_columns(3).show(ui, |ui| {
@@ -1157,14 +1363,18 @@ fn dialogs(app: &mut App, ctx: &Context) {
             });
         }
         Dialog::Import(path, mut unit) => {
-            dialog_window(app, "Import STL").show(ctx, |ui| {
+            dialog_window(app, "Import mesh").show(ctx, |ui| {
                 ui.label(path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()));
-                ui.label("The file's numbers are in:");
-                ui.horizontal(|ui| {
-                    for u in Unit::ALL {
-                        ui.selectable_value(&mut unit, u, u.name());
-                    }
-                });
+                if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("3mf")) {
+                    ui.label("A 3MF carries its own unit.");
+                } else {
+                    ui.label("The file's numbers are in:");
+                    ui.horizontal(|ui| {
+                        for u in Unit::ALL {
+                            ui.selectable_value(&mut unit, u, u.name());
+                        }
+                    });
+                }
                 app.dialog = Dialog::Import(path.clone(), unit);
                 ui.horizontal(|ui| {
                     if ui.button("Import").clicked() {
@@ -1221,12 +1431,23 @@ fn section(app: &mut App, ctx: &Context) {
     let mut open = true;
     let unit = app.doc().units;
     egui::Window::new("Section Analysis").open(&mut open).resizable(false).pivot(Align2::LEFT_BOTTOM).default_pos(app.vp.left_bottom() + vec2(14.0, -40.0)).show(ctx, |ui| {
+        // Construction planes that are built right now can be cut along too.
+        let planes: Vec<(fr_core::sketch::Id, String)> = app.doc().features.iter().filter(|f| matches!(f.kind, fr_core::doc::FeatureKind::Plane(_)) && app.shown().planes.contains_key(&f.id)).map(|f| (f.id, f.name.clone())).collect();
         let s = &mut app.section;
+        if s.plane.is_some_and(|id| !planes.iter().any(|(p, _)| *p == id)) { s.plane = None; }
         ui.checkbox(&mut s.on, "Cut the view open");
         ui.horizontal(|ui| {
             ui.label("Plane");
             for (i, label) in ["YZ", "XZ", "XY"].iter().enumerate() {
-                ui.selectable_value(&mut s.axis, i, *label);
+                if ui.selectable_value(&mut s.axis, i, *label).clicked() { s.plane = None; }
+            }
+            if !planes.is_empty() {
+                let chosen = s.plane.and_then(|id| planes.iter().find(|(p, _)| *p == id)).map_or("Construction plane…".to_owned(), |(_, name)| name.clone());
+                egui::ComboBox::from_id_salt("section-plane").selected_text(chosen).show_ui(ui, |ui| {
+                    for (id, name) in &planes {
+                        if ui.selectable_label(s.plane == Some(*id), name).clicked() { s.plane = Some(*id); }
+                    }
+                });
             }
         });
         ui.horizontal(|ui| {
@@ -1471,6 +1692,7 @@ fn about(app: &mut App, ctx: &Context) {
         ui.add_space(6.0);
         ui.label(format!("Build: {}", build::PROFILE));
         ui.label(format!("Platform: {}", build::TARGET));
+        ui.label(format!("OpenCascade: {}", build::OCCT));
         if build::COMMIT != "unavailable" {
             ui.hyperlink_to("View commit on GitHub", format!("https://github.com/base698/ferrender/commit/{}", build::COMMIT));
         }

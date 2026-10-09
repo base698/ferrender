@@ -72,7 +72,7 @@ impl PlaneDlg {
         fr_core::validation::document(doc)?;
         // Suppression and rollback must not let an invalid edit bypass rebuild validation.
         let feature = doc.feature(id).unwrap();
-        if self.editing.is_some() && (feature.suppressed || !doc.features.iter().take(doc.active()).any(|f| f.id == id) || !doc.component_available(feature.owner)) {
+        if self.editing.is_some() && (doc.is_suppressed(feature.id) || !doc.features.iter().take(doc.active()).any(|f| f.id == id) || !doc.component_available(feature.owner)) {
             let mut trial = doc.clone();
             let index = trial.features.iter().position(|f| f.id == id).unwrap();
             trial.roll_to(index + 1);
@@ -106,6 +106,7 @@ pub fn reference_name(doc: &Document, r: &PlaneRef) -> String {
     match r {
         PlaneRef::Origin(p) => format!("{p:?} origin plane"),
         PlaneRef::Plane(id) => doc.feature(*id).map_or(format!("Missing plane {id}"), |f| f.name.clone()),
+        PlaneRef::Free(p) => format!("A fixed plane through ({}, {}, {}) mm", fr_core::units::trim_num(p.origin.x, 2), fr_core::units::trim_num(p.origin.y, 2), fr_core::units::trim_num(p.origin.z, 2)),
         PlaneRef::Face { body, .. } => format!("Flat face of body {body}"),
     }
 }
@@ -192,7 +193,7 @@ impl App {
         self.finish_sketch();
         let base = self.sel_face.as_ref().filter(|f| f.plane.is_some()).and_then(|f| {
             let body = self.session.built.body(f.body)?;
-            Some(PlaneRef::Face { body: body.id, at: body.to_local(f.at), frame: body.local_frame() })
+            Some(PlaneRef::Face { body: body.id, at: body.to_local(f.at), frame: body.local_frame(), tag: None })
         });
         self.dialog = Dialog::Plane(PlaneDlg { base, ..PlaneDlg::default() });
     }
@@ -208,7 +209,33 @@ pub fn dialog(app: &mut App, ctx: &Context, mut d: PlaneDlg) {
         });
         match d.kind {
             0 => {
-                ui.label(d.base.as_ref().map_or("Choose a base in the viewport or browser.".into(), |r| reference_name(app.doc(), r)));
+                ui.label(d.base.as_ref().map_or("Choose a base: a flat face or construction plane in the viewport, or one of these.".into(), |r| reference_name(app.doc(), r)));
+                // With no body yet there is no face to click: the component's origin planes and
+                // the planes its sketches are drawn on are offered here.
+                let owner = d.owner(app.doc());
+                ui.horizontal(|ui| {
+                    ui.label("Origin");
+                    for (name, origin) in [("XY", OriginPlane::XY), ("XZ", OriginPlane::XZ), ("YZ", OriginPlane::YZ)] {
+                        if ui.selectable_label(d.base == Some(PlaneRef::Origin(origin)), name).on_hover_text("Offset from this origin plane of the plane's component").clicked() {
+                            d.base = Some(PlaneRef::Origin(origin));
+                            d.pick_to = false;
+                        }
+                    }
+                });
+                let sketches: Vec<(String, Plane)> = app.doc().sketches().filter(|(f, _)| f.owner == owner && !app.doc().is_suppressed(f.id)).map(|(f, s)| (f.name.clone(), s.plane)).collect();
+                if !sketches.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label("Sketch");
+                        egui::ComboBox::from_id_salt("plane-base-sketch").selected_text("plane of…").show_ui(ui, |ui| {
+                            for (name, plane) in &sketches {
+                                if ui.selectable_label(false, name).on_hover_text("Offset from the plane this sketch is drawn on, as it is now").clicked() {
+                                    d.base = Some(PlaneRef::Free(*plane));
+                                    d.pick_to = false;
+                                }
+                            }
+                        });
+                    });
+                }
                 egui::Grid::new("plane-offset").show(ui, |ui| crate::panels::value_row(app, ui, "Distance", &mut d.text, Kind::Length));
                 if ui.add_enabled(d.base.is_some(), egui::Button::new("To face").selected(d.pick_to)).clicked() { d.pick_to = !d.pick_to; }
                 if ui.button("Clear base").clicked() { d.base = None; d.pick_to = false; }

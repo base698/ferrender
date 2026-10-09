@@ -125,7 +125,7 @@ fn failed_multi_hole_feature_has_no_partial_effect() {
         &mut s,
         json!({"op":"edit_feature","feature":hole,"suppressed":true}),
     );
-    assert_eq!(failed.tris, s.built.bodies[0].mesh.tris);
+    assert_eq!(failed.tris().collect::<Vec<_>>(), s.built.bodies[0].mesh.tris().collect::<Vec<_>>());
 }
 
 #[test]

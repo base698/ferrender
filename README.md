@@ -196,46 +196,62 @@ been tried against the live API.
 | **Sketch** | Line, rectangle, circle, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
 | **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; signed X/Y position, length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
-| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
+| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, loft through sections, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
 | **Components (0.3 test build)** | Nested ownership, activation, scoped modeling, subtree visibility, and rigid component placement |
 | **Construction planes (0.3 test build)** | Persistent Offset, Midplane, and Three Points references with attached sketches |
+| **Meshes (0.4)** | STL, OBJ and 3MF import of scans with millions of triangles; repair, decimate, smooth, subdivide, cut, mirror, offset / thicken, sculpt; relief from an image; mesh booleans with closed-result checks |
+| **Faces and edges (0.4)** | Picks named by how the face was made, so fillets, shells, threads, text and face planes follow upstream edits |
+| **Scripts (0.4)** | Rhai scripts with declared inputs, a Scripts menu, timeline chips that re-run, `ferrender run` and `check`, six samples |
 | **Inspect** | Measure, Section Analysis, degrees of freedom while sketching |
 | **Timeline** | Edit, rename, suppress, delete, roll back; undo and redo |
-| **Files** | `.ferr` documents; STL in and out; STEP out; recovery of unsaved work after a crash |
+| **Files** | `.ferr` documents, plain JSON or a container with images, meshes, a thumbnail and a geometry cache; STL, OBJ, 3MF in; STL and STEP out; recovery of unsaved work after a crash |
 | **AI** | MCP server, local command socket, built-in assistant |
 
-It is early, and smaller than what it imitates: no joints or linked component instances, no loft or sweep, no drawings, and the
+It is early, and smaller than what it imitates: no joints or linked component instances, no drawings, and the
 [limits](#limits) below are real. `TODO.md` has the list.
+
+## Additions in 0.4.0
+
+**Ferrender 0.4.0** makes meshes a first-class body kind: indexed scans of millions of triangles support fast imports, BVH picking and a coarse display while orbiting, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans reject invalid inputs or results; complex scan intersections can still be refused. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and an authenticated local geometry cache that can skip rebuilding. Foreign or modified supported designs rebuild, while newer unsupported files are visibly unverified previews. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline. See the [0.4 review](docs/releases/0.4/review.md) for measured test coverage, security boundaries and known limitations.
+
+To walk through an exported STL in a browser or a WebXR headset, see the separate [walkthrough page](web/walkthrough/README.md).
+
+See the [0.4.0 release notes](docs/releases/0.4/0.4.0-release-notes.md), the [manual test plan](docs/releases/0.4/test-plan.md), the [file format](docs/FILE_FORMAT.md), the [face relief tutorial](docs/tutorials/FACE_RELIEF_0.4.md) and the [0.4 plan with what shipped and what did not](docs/releases/0.4/plan.md).
 
 ## Modeling additions in 0.3.0
 
 **Ferrender 0.3.0** adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes. Native primitives add editable Box, Cylinder, Sphere, Cone and Torus features. Linear patterns support two directions for rectangular grids. It also adds Remove/Split/Join Bodies, graphical Move and primitive placement, pattern span handles, and sticky sketch capture.
 
-Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [release notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. The [primitive guide](docs/PRIMITIVES_0.3.md) explains dimensions, origins and placement. The [direct modeling guide](docs/DIRECT_MODELING_0.3.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require 0.3.0 or later. Check About for the exact version and source commit.
+Use the [0.3.0 manual test plan](docs/releases/0.3/test-plan.md) for numbered checks and the [release notes](docs/releases/0.3/0.3.0-release-notes.md) for scope and validation status. The [components specification](docs/adrs/0005-components.md) and [construction planes specification](docs/adrs/0006-construction-planes.md) describe the intended behavior and deferred work. The [primitive guide](docs/adrs/0004-solid-primitives.md) explains dimensions, origins and placement. The [direct modeling guide](docs/adrs/0007-direct-modeling.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require 0.3.0 or later. Check About for the exact version and source commit.
 
 ## Sketching improvements in 0.2
 
-The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](docs/SKETCHING_0.2.md) for the controls, limits, and checks. The [30 mm bishop tutorial](BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](docs/tutorials/BISHOP_0.1.md) is preserved.
+The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](docs/adrs/0001-sketching-tools.md) for the controls, limits, and checks. The [30 mm bishop tutorial](BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](docs/tutorials/BISHOP_0.1.md) is preserved.
 
-Version 0.2.2 improves three-point arc placement, dimensions on existing geometry, persistent Shift angle locks, and direct reference-image movement and scaling. See the [0.2.2 guide and focused retest plan](docs/SKETCHING_0.2.2.md).
+Version 0.2.2 improves three-point arc placement, dimensions on existing geometry, persistent Shift angle locks, and direct reference-image movement and scaling. See the [0.2.2 guide and focused retest plan](docs/adrs/0002-sketching-fixes.md).
 
-Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System follows the OS, and your selection is remembered across launches. See the [appearance guide and manual test plan](docs/APPEARANCE.md).
+Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System follows the OS, and your selection is remembered across launches. See the [appearance guide and manual test plan](docs/adrs/0003-appearance-follows-the-system.md).
 
 ## Get started
 
 You need a [Rust toolchain](https://rustup.rs) and a C++ compiler (Xcode's clang, or g++).
 
 ```sh
+export OCCT_ROOT="$(python3 scripts/prepare-occt.py)"   # verified OpenCascade, once per shell
 cargo run --release -p ferrender                # empty design
 cargo run --release -p ferrender -- part.ferr   # or an .stl to import
 ./scripts/bundle-macos.sh                       # dist/Ferrender.app
 ```
 
-The solid kernel is OpenCascade. There is no cmake step: the `cadrum` binding's build script downloads prebuilt
-OpenCascade 8 static libraries the first time (about 33 MB, from that project's GitHub releases, not checksummed).
+The solid kernel is OpenCascade. There is no cmake step: `scripts/prepare-occt.py` (Python 3.12+) downloads the
+`cadrum` binding's prebuilt OpenCascade 8 static libraries the first time (about 33 MB, from that project's GitHub
+releases) and checks them against the SHA256 pinned in `scripts/occt-pins.json`. Release builds refuse to compile
+without it, and Help → About and `--version` show the result on the `OpenCascade:` line. Debug builds, and release
+builds with `FERRENDER_ALLOW_UNVERIFIED_OCCT=1` (needed on platforms without a pinned archive), may use cadrum's
+own unchecked download; they are marked `unverified` and cannot be packaged.
 
 **Linux** needs the usual winit and wgpu system packages (X11 or Wayland development libraries and a Vulkan or GL
 driver). CI builds and tests on Ubuntu 24.04 with software Vulkan; a native Linux desktop session has not been manually checked.
@@ -341,7 +357,7 @@ are shown, not how big anything is.
 
 ### Model
 
-Extrude (E) and Revolve work on closed sketch profiles. A sketch with one
+Extrude (E), Revolve and Sweep work on closed sketch profiles. A sketch with one
 closed region selects it automatically; with multiple regions, click the one
 you want. A normal click replaces the selection; Shift-click adds or removes
 regions. This also applies after projecting a face: its outline remains usable
@@ -354,19 +370,70 @@ also go Through All bodies, reach To Face (click a face and the distance is
 measured for you), and lean its walls with a Taper angle. New Sketch takes an
 Offset, for a sketch on a plane above or below the one you pick.
 
+Sweep carries a profile along a path drawn in another sketch: a handle, a
+pipe run, a gasket, a picture frame. Draw the path first (lines, arcs and
+splines joined end to end, or one circle), then the profile on a plane that
+crosses it. Model → Sweep picks the newest closed region as the profile and
+the newest other sketch that is one run as the path; click a region or a curve
+in the viewport to change either, and Shift-click curves to follow only part
+of a sketch. Pieces that meet tangentially are followed exactly. A sharp
+corner is mitred, as on a picture frame, and may turn by up to 150 degrees. A
+closed path gives a ring or a frame. The profile may sit anywhere along the
+path and off to one side of it. Follow path turns the profile with the path;
+Fixed keeps the orientation it was drawn in. Along path limits the sweep to
+parts of the path: drag the handles on the track, or type the fractions, where
+0 is the start of the path and 1 its end. Add part sweeps another stretch as
+well, so 0.1 to 0.3 and 0.6 to 0.7 gives two separate pieces in one body. Each
+piece is the part of the whole sweep that lies there, so shortening a sweep
+never moves what is left. Parts that touch or overlap are joined. A sweep is refused with the
+reason when a bend is tighter than the profile reaches on its inside, when a
+stretch between two corners is too short for the mitres, or when the kernel's
+result does not have the volume the sweep must have. The path must lie in one
+sketch plane, so a helix or a path that leaves its plane is not possible yet,
+and the profile cannot twist or change size along the way.
+
+Loft skins one solid through closed profiles drawn in sketches on different
+planes: a bottle, a hull, a duct that changes from one outline to another. Draw
+each section in its own sketch (New Sketch on an offset or construction plane,
+or on a face), then Model → Loft. Sketches with a single closed region are
+offered in timeline order; otherwise click a region in each sketch, from one end
+to the other. Sections are numbered in the viewport in the order they are
+joined; click a numbered one to leave it out, or reorder them with the arrows in
+the dialog. Smooth walls curve through every section; Straight joins neighbours
+with flat or ruled walls, which is the same thing when there are only two. The
+ends are flat caps. Every section needs the same number of edges (four lines to
+four lines, a circle to a circle); a mismatch is refused with both counts
+rather than matched up by guesswork. Corners are paired nearest to nearest, so
+it does not matter where an outline was started or which way round it was drawn.
+A region with a hole cannot be a section: loft the hole separately and cut it.
+A loft's faces are named by the edges of its first section, so fillets and
+shells on it survive edits.
+
 ### Primitives (0.3 test build)
 
 Choose **Model → Primitives → Box, Cylinder, Sphere, Cone or Torus**, or use the **Primitive** toolbar button. Set dimensions, position, optional rotation, and New Body / Join / Cut / Intersect. Dimensions and placement accept units and named parameters. Place in view chooses a position on an origin plane, flat face or construction plane; optional alignment and colored arrows/rings refine it. Placement captures numeric values once. Double-click the timeline feature to edit it; no sketch is required.
 
-Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](docs/PRIMITIVES_0.3.md) includes examples and limits.
+Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](docs/adrs/0004-solid-primitives.md) includes examples and limits.
 
 These are exact solids that support subsequent sketches, fillets, holes, transforms, patterns, Combine and STEP export. New Body is the default, so touching primitives stay separate until you choose Join or Combine.
 
+### Faces and edges
+
+Faces of exact bodies carry identities based on sketch entities, primitive roles,
+source faces and the boundaries of split pieces. Fillets, chamfers, shells,
+threads, text and face planes use these identities through upstream edits.
+Pattern copies stay distinct and kernel face order is not an identity. A removed
+or ambiguous reference reports an error instead of choosing an unrelated face.
+`get_object_info` lists these tags and how picks resolved. Old files learn modern
+tags when the saved pick uniquely identifies its original face. Geometry without
+unique provenance uses a conservative signature and may need reselection after
+its shape changes; see the [review](docs/releases/0.4/review.md) for the remaining limits.
+
 ### Exact and mesh bodies
 
-An untapered sketch extrusion, revolve or primitive creates an exact solid: true
+An untapered sketch extrusion, revolve, sweep, loft or primitive creates an exact solid: true
 planes, cylinders and blends, turned into triangles only for display and STL.
-An imported STL, a tapered extrude, and anything combined with one of those is
+An imported mesh, a tapered extrude, and anything combined with one of those is
 a mesh body. Both kinds work with extrude, revolve, cut, join, move and
 pattern. Only exact bodies can be filleted, chamfered, shelled or written to
 STEP. The status bar says which kind the selected body is.
@@ -402,7 +469,7 @@ cancel. Dragging is disabled until the updated view finishes drawing.
 
 ### Pattern
 
-Repeats an extrude, revolve, primitive, standalone text or imported mesh: around an axis,
+Repeats an extrude, revolve, sweep, loft, primitive, standalone text or imported mesh: around an axis,
 in a row or rectangular grid, or mirrored through an origin plane. Axes belong
 to the source component. For four corners choose Linear, Count 2, and enable
 Second direction with Count 2 on another axis. Enter the distance between corner
@@ -501,11 +568,74 @@ works between Ferrender windows.
 
 ### Meshes
 
-Import STL (binary or ASCII) brings a mesh in as a body. Bodies
-can be moved, rotated and scaled, combined with each other, sketched on and
-cut. Export STL asks whether to write millimetres, centimetres or inches;
+Import Mesh reads STL (binary or ASCII), OBJ and 3MF and brings the mesh in
+as a body, streaming the file and sharing vertices as it goes, so scans of
+millions of triangles import in a few seconds and stay quick to orbit and
+pick. On import the mesh is repaired (degenerate and duplicate triangles
+dropped, neighbouring triangles turned to agree, closed shells turned
+outward) and the toast reports shells, open edges and non-manifold edges.
+Bodies above two million triangles draw a coarse copy while the view moves.
+Bodies can be moved, rotated and scaled, combined with each other, sketched
+on and cut. The Mesh menu edits meshes as timeline steps: Repair (with hole
+filling), Decimate (quadric, or clustering for huge scans), Smooth (Taubin, no
+shrink), Subdivide (Loop or midpoint), Cut by a plane (capped, one side or
+both), Mirror, and Offset / Thicken, which turns an open surface such as a
+relief into a closed printable solid or hollows a closed one to a wall. Relief
+from Image builds a height field from a photo or a depth map, bright pixels
+high, on a slab; inverted and thin it is a lithophane. Sculpt opens a brush
+(pull, push, inflate, smooth, flatten) and every click on the body adds one
+stroke to the timeline. Applying a mesh operation to an exact body makes it
+a mesh. Mesh Booleans use Manifold with an exact rational fallback for difficult
+intersections. Results are checked again after conversion to the stored mesh
+precision. Work and triangle limits produce an error instead of a partial result.
+Over the command API the same
+operations take regions (a sphere, box, plane side, normal cone or connected
+shell) and `mesh_measure` reports shells, open edges, watertightness, volume
+and wall thickness. Export STL asks whether to write millimetres, centimetres or inches;
 slicers read STL as millimetres. Export STEP writes the exact bodies as true
 surfaces for other CAD programs; mesh bodies are left out.
+
+### Scripts
+
+The Scripts menu runs Rhai scripts against the open design. A script is a text
+file with a `META` map (name, description, declared inputs) and a `fn
+run(inputs)`; every command of the API is a function in it, so `extrude(#{
+sketch: s, distance: inputs.expr.height })` does what the MCP command does. An
+inputs dialog is made from the declared inputs (lengths and angles take
+expressions, so parameters stay live) and remembers what you typed. Runs go on
+a worker thread with a progress bar and Cancel, land as one undo step, and
+leave a chip in the timeline that owns what the run made: Edit Inputs and
+Re-run, Re-run, Detach, Suppress and Delete act on the whole run. A script's
+`confirm` and `ask` appear as questions in the progress window. Cancel stops
+the script at its next step; a modeling call already under way cannot be
+interrupted, so after a moment the window offers to stop waiting and discard
+the result when that call ends. Scripts can read and write files only in
+their own folder, the design's folder and folders you allow in `config.toml`;
+resolved paths must remain inside those folders, with link-resistant access on
+macOS and Linux. Files a script writes (saves,
+exports, screenshots, text and CSV) are staged beside their targets and moved
+into place only when the run succeeds. Ordinary cancellation and save failures
+restore the previous files. A crash or storage failure during rollback can
+require recovery; the error lists retained recovery files. Undo does not remove
+files a finished run wrote. Samples (export variants of a parameter, export a
+folder of designs, a spur gear, bosses at sketch points, a CI check, the face
+relief) can be copied to your scripts folder (`~/.config/ferrender/scripts`)
+and edited; Export Timeline as Script turns the open design into a script with
+its parameters as inputs (large imported meshes and images go in files beside
+the script, named by content to avoid overwriting older assets; a failed feature
+is exported suppressed, and a timeline marker is
+put back where it was). Headless, `ferrender run script.rhai design.ferr
+--input teeth=24 --save` runs a script and `ferrender check design.ferr` lists
+timeline errors for CI; over MCP, `list_scripts` and `run_script` do the same.
+
+Give outputs stable keys when a script can reorder or repeat modeling commands:
+`primitive(#{output_key: "left-boss", type: "box", width: 10, depth: 10, height: 10});`.
+A later feature keeps addressing `left-boss` even when another output is inserted
+before it. In loops, derive the key from the source item identity, such as a sketch
+point ID, not the iteration number. An explicit unique name also identifies an
+output; otherwise an unchanged source and call site are used. Repeated unkeyed
+modeling calls are refused with guidance. Older unkeyed ScriptRuns with later
+features must be detached or rebuilt deliberately; reruns never guess by order.
 
 ### View
 
@@ -556,12 +686,22 @@ panel, which is saved to the config file.
 
 ### Files
 
-The native format is `.ferr`: one JSON file holding the units, parameters and
+The native format is `.ferr`: a JSON document holding the units, parameters and
 the feature timeline, with every sketch's points, entities, constraints and
-dimension expressions. Bodies are not stored; they are rebuilt from the
-features on open. Imported meshes and reference images are stored inside it.
-Files that use new sketch types, position dimensions, or reference images
-require a version that supports them; keep a separate copy for older builds.
+dimension expressions. The source timeline remains authoritative. A geometry
+cache can skip rebuilding on the same installation: saved containers are
+authenticated with a private local key. Unsigned, foreign or changed caches are
+discarded and supported designs rebuild. Newer unsupported files are explicitly
+unverified read-only previews, including when their saved geometry is exported.
+A design that carries reference images or imported meshes is
+saved as a ZIP container instead (since 0.4): the same JSON as `design.json`,
+each image and mesh as its own entry, a `manifest.json` and a `thumbnail.png`.
+Plain designs stay plain JSON, so they diff in git and open in older builds.
+Every earlier `.ferr` opens unchanged; the first time a design with images or
+meshes is saved by 0.4, the old file is kept beside it as `name (0.3 backup).ferr`.
+Files that use features an older build lacks are refused by it with a message;
+[docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) describes both forms and the version
+table.
 
 Unsaved changes are copied, about a second after each one, to a `recovery`
 folder beside the settings. The copy is removed when you save and when the app
@@ -618,9 +758,9 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 - Holes start on flat faces and stay where they were put; they do not follow
   the face if an earlier feature moves it. A thread that runs through a hole
   ends square at the depth where the hole's axis leaves the body.
-- Mesh bodies (imported STL, tapered extrudes) use the old BSP booleans: fine
-  for parts, slow on dense meshes, refused above 400,000 triangles, and no
-  fillets or Thread (Hole works on them).
+- Mesh Booleans accept up to 8 million input triangles combined, with candidate,
+  output and time budgets. Invalid or unrepresentable results are refused. Mesh
+  bodies have no exact fillets or Thread (Hole works on them).
 - Sketch regions are found from shapes that share points. Two shapes that
   merely cross are not split where they cross.
 - A sketch on a body's face, a projected outline and an extruded face record
@@ -636,7 +776,7 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 - Reference images are limited to 8 MiB of source data, 4,194,304 pixels, and
   8192 pixels per side. Calibration adjusts uniform scale; it cannot undo
   photographic perspective distortion.
-- Not built yet: general helix and sweep, loft, sphere primitives, draft, and
+- Not built yet: helix and other paths that leave one sketch plane, sweeps that twist or scale, lofts through unequal or holed sections, sphere primitives, draft, and
   copying a whole body. See `TODO.md`.
 
 ## Credits

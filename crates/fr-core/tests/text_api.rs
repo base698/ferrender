@@ -142,13 +142,13 @@ fn attached_text_modifies_only_its_selected_body_and_operation_can_change() {
     let feature = output["feature"].as_u64().unwrap();
     assert_eq!(s.built.bodies.len(), 2);
     assert!(volume(&s, target) > base);
-    assert_eq!(s.built.body(other).unwrap().mesh.tris, unchanged.tris);
+    assert_eq!(s.built.body(other).unwrap().mesh.tris().collect::<Vec<_>>(), unchanged.tris().collect::<Vec<_>>());
     assert_eq!(output["changed_bodies"].as_array().unwrap().len(), 1);
     let info = run(&mut s, json!({"op":"edit_feature","feature":feature,"operation":"cut","depth":"0.5 mm"}));
     assert_eq!(info["body"], target);
     assert_eq!(info["face"], json!([-10.0,0.0,4.0]));
     assert!(volume(&s, target) < base);
-    assert_eq!(s.built.body(other).unwrap().mesh.tris, unchanged.tris);
+    assert_eq!(s.built.body(other).unwrap().mesh.tris().collect::<Vec<_>>(), unchanged.tris().collect::<Vec<_>>());
     assert!(s.built.errors.is_empty());
 
     run(&mut s, json!({"op":"edit_feature","feature":feature,"operation":"new"}));
@@ -157,7 +157,7 @@ fn attached_text_modifies_only_its_selected_body_and_operation_can_change() {
     let info = run(&mut s, json!({"op":"edit_feature","feature":feature,"operation":"join","body":target,"face":[-10,0,4]}));
     assert_eq!(info["body"], target);
     assert_eq!(s.built.bodies.len(), 2);
-    assert_eq!(s.built.body(other).unwrap().mesh.tris, unchanged.tris);
+    assert_eq!(s.built.body(other).unwrap().mesh.tris().collect::<Vec<_>>(), unchanged.tris().collect::<Vec<_>>());
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn invalid_attachment_or_overhanging_text_is_rejected_atomically() {
     ] {
         assert!(execute(&mut s, &command, None).is_err(), "accepted {command}");
         assert_eq!(io::to_json(&s.doc), before);
-        assert_eq!(s.built.body(target).unwrap().mesh.tris, geometry.tris);
+        assert_eq!(s.built.body(target).unwrap().mesh.tris().collect::<Vec<_>>(), geometry.tris().collect::<Vec<_>>());
     }
     run(&mut s, json!({"op":"create_sketch"}));
     run(&mut s, json!({"op":"add_geometry","items":[{"type":"circle","center":[60,0],"radius":10}]}));
@@ -194,11 +194,11 @@ fn face_edits_reject_downstream_coordinates_until_the_timeline_is_rolled_back() 
     let feature = run(&mut s, json!({"op":"text","text":"H","body":target,"face":[-10,0,4],"operation":"join","height":4,"depth":1}))["feature"].as_u64().unwrap();
     run(&mut s, json!({"op":"transform","body":target,"translate":[2,0,0]}));
     let before = io::to_json(&s.doc);
-    let before_mesh = s.built.body(target).unwrap().mesh.tris.clone();
+    let before_mesh = s.built.body(target).unwrap().mesh.tris().collect::<Vec<_>>();
     let error = execute(&mut s, &json!({"op":"edit_feature","feature":feature,"body":target,"face":[0,0,4]}), None).unwrap_err();
     assert!(error.contains("rollback"), "{error}");
     assert_eq!(io::to_json(&s.doc), before);
-    assert_eq!(s.built.body(target).unwrap().mesh.tris, before_mesh);
+    assert_eq!(s.built.body(target).unwrap().mesh.tris().collect::<Vec<_>>(), before_mesh);
     assert!(s.doc.rollback.is_none(), "checking placement must not change the real timeline");
 
     // Ordinary dimensions/text edits keep their existing attachment and remain
@@ -217,7 +217,7 @@ fn face_edits_reject_downstream_coordinates_until_the_timeline_is_rolled_back() 
     run(&mut s, json!({"op":"edit_feature","feature":feature,"body":target,"face":[0,0,4]}));
     run(&mut s, json!({"op":"rollback","to":"end"}));
     assert!(s.built.errors.is_empty());
-    let raised_min_x = s.built.body(target).unwrap().mesh.tris.iter().flatten().filter(|p| p.z > 4.5).map(|p| p.x).fold(f64::INFINITY, f64::min);
+    let raised_min_x = s.built.body(target).unwrap().mesh.tris().flatten().filter(|p| p.z > 4.5).map(|p| p.x).fold(f64::INFINITY, f64::min);
     close(raised_min_x, 2.0); // the later move is applied exactly once
 }
 
@@ -227,7 +227,7 @@ fn edited_text_cannot_attach_to_its_own_raised_face() {
     let target = plate(&mut s);
     let feature = run(&mut s, json!({"op":"text","text":"H","body":target,"face":[-10,0,4],"operation":"join","height":4,"depth":1}))["feature"].as_u64().unwrap();
     let body = s.built.body(target).unwrap();
-    let top = body.mesh.tris.iter().find(|tri| tri.iter().all(|p| (p.z - 5.0).abs() < 1e-7)).unwrap();
+    let top = body.mesh.tris().find(|tri| tri.iter().all(|p| (p.z - 5.0).abs() < 1e-7)).unwrap();
     let at = top.iter().copied().sum::<DVec3>() / 3.0;
     let before = io::to_json(&s.doc);
     assert!(execute(&mut s, &json!({"op":"edit_feature","feature":feature,"body":target,"face":at.to_array()}), None).is_err());
@@ -243,9 +243,9 @@ fn unrelated_downstream_body_does_not_block_text_face_edits() {
     let target = plate(&mut s);
     let feature = run(&mut s, json!({"op":"text","text":"H","body":target,"face":[-10,0,4],"operation":"join","height":4,"depth":1}))["feature"].as_u64().unwrap();
     let unrelated = plate(&mut s);
-    let unchanged = s.built.body(unrelated).unwrap().mesh.tris.clone();
+    let unchanged = s.built.body(unrelated).unwrap().mesh.tris().collect::<Vec<_>>();
     run(&mut s, json!({"op":"edit_feature","feature":feature,"body":target,"face":[0,0,4]}));
     assert!(s.doc.rollback.is_none());
-    assert_eq!(s.built.body(unrelated).unwrap().mesh.tris, unchanged);
+    assert_eq!(s.built.body(unrelated).unwrap().mesh.tris().collect::<Vec<_>>(), unchanged);
     assert!(s.built.errors.is_empty());
 }
