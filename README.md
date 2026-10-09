@@ -196,7 +196,7 @@ been tried against the live API.
 | **Sketch** | Line, rectangle, circle, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
 | **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; signed X/Y position, length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
-| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
+| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
@@ -210,7 +210,7 @@ been tried against the live API.
 | **Files** | `.ferr` documents, plain JSON or a container with images, meshes, a thumbnail and a geometry cache; STL, OBJ, 3MF in; STL and STEP out; recovery of unsaved work after a crash |
 | **AI** | MCP server, local command socket, built-in assistant |
 
-It is early, and smaller than what it imitates: no joints or linked component instances, no loft or sweep, no drawings, and the
+It is early, and smaller than what it imitates: no joints or linked component instances, no loft, no drawings, and the
 [limits](#limits) below are real. `TODO.md` has the list.
 
 ## Additions in 0.4.0
@@ -355,7 +355,7 @@ are shown, not how big anything is.
 
 ### Model
 
-Extrude (E) and Revolve work on closed sketch profiles. A sketch with one
+Extrude (E), Revolve and Sweep work on closed sketch profiles. A sketch with one
 closed region selects it automatically; with multiple regions, click the one
 you want. A normal click replaces the selection; Shift-click adds or removes
 regions. This also applies after projecting a face: its outline remains usable
@@ -367,6 +367,23 @@ on round numbers; pull it back through the plane to go the other way). It can
 also go Through All bodies, reach To Face (click a face and the distance is
 measured for you), and lean its walls with a Taper angle. New Sketch takes an
 Offset, for a sketch on a plane above or below the one you pick.
+
+Sweep carries a profile along a path drawn in another sketch: a handle, a
+pipe run, a gasket, a picture frame. Draw the path first (lines, arcs and
+splines joined end to end, or one circle), then the profile on a plane that
+crosses it. Model → Sweep picks the newest closed region as the profile and
+the newest other sketch that is one run as the path; click a region or a curve
+in the viewport to change either, and Shift-click curves to follow only part
+of a sketch. Pieces that meet tangentially are followed exactly. A sharp
+corner is mitred, as on a picture frame, and may turn by up to 150 degrees. A
+closed path gives a ring or a frame. The profile may sit anywhere along the
+path and off to one side of it. Follow path turns the profile with the path;
+Fixed keeps the orientation it was drawn in. A sweep is refused with the
+reason when a bend is tighter than the profile reaches on its inside, when a
+stretch between two corners is too short for the mitres, or when the kernel's
+result does not have the volume the sweep must have. The path must lie in one
+sketch plane, so a helix or a path that leaves its plane is not possible yet,
+and the profile cannot twist or change size along the way.
 
 ### Primitives (0.3 test build)
 
@@ -390,7 +407,7 @@ its shape changes; see the [review](docs/REVIEW_0.4.0.md) for the remaining limi
 
 ### Exact and mesh bodies
 
-An untapered sketch extrusion, revolve or primitive creates an exact solid: true
+An untapered sketch extrusion, revolve, sweep or primitive creates an exact solid: true
 planes, cylinders and blends, turned into triangles only for display and STL.
 An imported mesh, a tapered extrude, and anything combined with one of those is
 a mesh body. Both kinds work with extrude, revolve, cut, join, move and
@@ -428,7 +445,7 @@ cancel. Dragging is disabled until the updated view finishes drawing.
 
 ### Pattern
 
-Repeats an extrude, revolve, primitive, standalone text or imported mesh: around an axis,
+Repeats an extrude, revolve, sweep, primitive, standalone text or imported mesh: around an axis,
 in a row or rectangular grid, or mirrored through an origin plane. Axes belong
 to the source component. For four corners choose Linear, Count 2, and enable
 Second direction with Count 2 on another axis. Enter the distance between corner
@@ -735,7 +752,7 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 - Reference images are limited to 8 MiB of source data, 4,194,304 pixels, and
   8192 pixels per side. Calibration adjusts uniform scale; it cannot undo
   photographic perspective distortion.
-- Not built yet: general helix and sweep, loft, sphere primitives, draft, and
+- Not built yet: helix and other paths that leave one sketch plane, sweeps that twist or scale, loft, sphere primitives, draft, and
   copying a whole body. See `TODO.md`.
 
 ## Credits

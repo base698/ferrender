@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Color32, Context, Key, Modifiers, Pos2, Rect, ViewportCommand};
-use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Pattern, PatternKind, LinearDirection, Revolve, Shell, Text, Thread, Transform};
+use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Pattern, PatternKind, LinearDirection, Revolve, Shell, Sweep, SweepOrient, Text, Thread, Transform};
 pub use fr_core::face::Face;
 use fr_core::render::Camera;
 use fr_core::sketch::Clip;
@@ -111,10 +111,22 @@ pub enum Drag {
     Arrow,
 }
 
-/// The Extrude and Revolve dialogs.
+/// The path half of the Sweep dialog.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SweepDlg {
+    /// The sketch the path is drawn in; set by clicking one of its lines or curves.
+    pub path_sketch: Option<Id>,
+    /// The entities to follow; empty means the whole sketch.
+    pub path: Vec<Id>,
+    pub orient: SweepOrient,
+}
+
+/// The Extrude, Revolve and Sweep dialogs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FeatureDlg {
     pub revolve: bool,
+    /// Set when this is the Sweep dialog.
+    pub sweep: Option<SweepDlg>,
     /// The feature being edited, or none when creating one.
     pub editing: Option<Id>,
     pub sketch: Option<Id>,
@@ -476,8 +488,12 @@ impl Dialog {
                     let taper = f.taper(d)?;
                     return d.add_feature_to(f.face_owner, FeatureKind::Extrude(Extrude { sketch, profiles, distance, symmetric: false, op, taper, through_all: f.through_all }));
                 }
-                let sketch = f.sketch.filter(|_| !f.profiles.is_empty()).ok_or(if f.revolve { "Click a closed sketch profile in the viewport." } else { "Click a closed sketch profile or a flat face in the viewport." })?;
-                let kind = if f.revolve {
+                let sketch = f.sketch.filter(|_| !f.profiles.is_empty()).ok_or(if f.revolve || f.sweep.is_some() { "Click a closed sketch profile in the viewport." } else { "Click a closed sketch profile or a flat face in the viewport." })?;
+                let kind = if let Some(w) = &f.sweep {
+                    let path_sketch = w.path_sketch.ok_or("Click a line or curve of the path, drawn in another sketch.")?;
+                    if path_sketch == sketch { return Err("The profile and the path must be in different sketches.".into()); }
+                    FeatureKind::Sweep(Sweep { sketch, profiles: f.profiles.clone(), path_sketch, path: w.path.clone(), orient: w.orient, op: f.op })
+                } else if f.revolve {
                     FeatureKind::Revolve(Revolve { sketch, profiles: f.profiles.clone(), axis: f.axis, angle: d.enter(&f.text, Kind::Angle)?, op: f.op })
                 } else {
                     FeatureKind::Extrude(Extrude { sketch, profiles: f.profiles.clone(), distance: d.enter(&f.text, Kind::Length)?, symmetric: f.symmetric, op: f.op, taper: f.taper(d)?, through_all: f.through_all })
@@ -489,6 +505,9 @@ impl Dialog {
                     }
                     None => {
                         if let Some(s) = d.sketch_mut(sketch) {
+                            s.visible = false;
+                        }
+                        if let Some(s) = f.sweep.as_ref().and_then(|w| w.path_sketch).and_then(|id| d.sketch_mut(id)) {
                             s.visible = false;
                         }
                         Ok(d.add_feature(kind))
@@ -701,6 +720,7 @@ pub enum Action {
     FinishSketch,
     Extrude,
     Revolve,
+    Sweep,
     Transform,
     Combine,
     Parameters,
@@ -1580,11 +1600,15 @@ impl App {
             FeatureKind::Sketch(_) => self.edit_sketch(id),
             FeatureKind::Extrude(e) => {
                 self.finish_sketch();
-                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, editing: Some(id), sketch: Some(e.sketch), profiles: e.profiles.clone(), text: shown(&e.distance), symmetric: e.symmetric, op: e.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: e.taper.as_ref().map_or(String::new(), shown), through_all: e.through_all, pick_to: false });
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: None, editing: Some(id), sketch: Some(e.sketch), profiles: e.profiles.clone(), text: shown(&e.distance), symmetric: e.symmetric, op: e.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: e.taper.as_ref().map_or(String::new(), shown), through_all: e.through_all, pick_to: false });
+            }
+            FeatureKind::Sweep(w) => {
+                self.finish_sketch();
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch: Some(w.path_sketch), path: w.path.clone(), orient: w.orient }), editing: Some(id), sketch: Some(w.sketch), profiles: w.profiles.clone(), text: String::new(), symmetric: false, op: w.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
             }
             FeatureKind::Revolve(r) => {
                 self.finish_sketch();
-                self.dialog = Dialog::Feature(FeatureDlg { revolve: true, editing: Some(id), sketch: Some(r.sketch), profiles: r.profiles.clone(), text: shown(&r.angle), symmetric: false, op: r.op, axis: r.axis, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: true, sweep: None, editing: Some(id), sketch: Some(r.sketch), profiles: r.profiles.clone(), text: shown(&r.angle), symmetric: false, op: r.op, axis: r.axis, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
             }
             FeatureKind::Text(t) => {
                 self.finish_sketch();
@@ -1598,6 +1622,21 @@ impl App {
             }
             _ => self.toast("This feature has no settings to edit; delete it and add it again to change it."),
         }
+    }
+
+    /// Opens Sweep with what can be told apart already: the newest visible sketch with a closed
+    /// region is the profile, and the newest other visible sketch that is one run is the path.
+    fn open_sweep_dialog(&mut self) {
+        self.finish_sketch();
+        let doc = self.doc();
+        let visible: Vec<Id> = doc.sketches().filter(|(f, s)| s.visible && !doc.is_suppressed(f.id)).map(|(f, _)| f.id).collect();
+        let closed = |id: &Id| fr_core::profile::profiles(doc.sketch(*id).unwrap());
+        let sketch = visible.iter().rev().copied().find(|id| !closed(id).is_empty());
+        let mut profiles = Vec::new();
+        if let Some(id) = sketch && let [only] = closed(&id).as_slice() { profiles.push(only.edges.clone()); }
+        let path_sketch = visible.iter().rev().copied().find(|id| Some(*id) != sketch && fr_core::profile::chain(doc.sketch(*id).unwrap(), &[]).is_ok());
+        let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
+        self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch, path: Vec::new(), orient: SweepOrient::Follow }), editing: None, sketch, profiles, text: String::new(), symmetric: false, op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
     }
 
     fn open_feature_dialog(&mut self, revolve: bool) {
@@ -1627,7 +1666,7 @@ impl App {
         let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
         let unit = doc.units;
         let text = if revolve { "360 deg".to_owned() } else { format!("{} {}", if unit == Unit::In { "0.5" } else if unit == Unit::Cm { "1" } else { "10" }, unit.name()) };
-        self.dialog = Dialog::Feature(FeatureDlg { revolve, editing: None, sketch: picked.0, profiles: picked.1, text, symmetric: false, op, axis: Axis::Y, pick_axis: false, face, face_owner, taper: String::new(), through_all: false, pick_to: false });
+        self.dialog = Dialog::Feature(FeatureDlg { revolve, sweep: None, editing: None, sketch: picked.0, profiles: picked.1, text, symmetric: false, op, axis: Axis::Y, pick_axis: false, face, face_owner, taper: String::new(), through_all: false, pick_to: false });
     }
 
     fn prepare_text_source(&mut self) {
@@ -2094,6 +2133,7 @@ impl App {
             Action::FinishSketch => self.finish_sketch(),
             Action::Extrude => self.open_feature_dialog(false),
             Action::Revolve => self.open_feature_dialog(true),
+            Action::Sweep => self.open_sweep_dialog(),
             Action::Text => self.open_text_dialog(),
             Action::Transform => {
                 if let Some(component) = self.sel_component { self.move_component_dialog(component); return; }
@@ -2239,14 +2279,14 @@ impl App {
             }
             Action::Pattern => {
                 self.finish_sketch();
-                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
+                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Sweep(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
                 let available = |f: &&fr_core::Feature| !self.doc().is_suppressed(f.id) && !self.session.built.errors.contains_key(&f.id) && self.session.built.components.contains_key(&f.owner) && ok(&f.kind);
                 let sources: Vec<_> = self.doc().features.iter().take(self.doc().active()).filter(available).collect();
                 let chosen = self.sel_feature.or(self.sel_body).filter(|id| sources.iter().any(|f| f.id == *id));
                 let source = chosen.or_else(|| sources.iter().rev().find(|f| f.owner == self.doc().active_component).map(|f| f.id));
                 match source {
                     Some(_) => self.dialog = Dialog::Pattern(PatternDlg::new(source)),
-                    None => self.toast("There is no extrusion, revolve, primitive, standalone text or imported mesh to repeat yet."),
+                    None => self.toast("There is no extrusion, revolve, sweep, primitive, standalone text or imported mesh to repeat yet."),
                 }
             }
             Action::Section => self.show_section = !self.show_section,

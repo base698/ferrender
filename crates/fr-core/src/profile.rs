@@ -42,7 +42,7 @@ pub enum Seg {
 }
 
 impl Seg {
-    fn reversed(self) -> Seg {
+    pub(crate) fn reversed(self) -> Seg {
         match self {
             Seg::Line(a, b) => Seg::Line(b, a),
             Seg::Arc(a, m, b) => Seg::Arc(b, m, a),
@@ -50,6 +50,96 @@ impl Seg {
             c => c,
         }
     }
+
+    /// Where the piece starts and ends; a circle gives its centre twice.
+    pub fn ends(&self) -> (DVec2, DVec2) {
+        match *self {
+            Seg::Line(a, b) | Seg::Arc(a, _, b) => (a, b),
+            Seg::Spline(p) => (p[0], p[3]),
+            Seg::Circle(c, _) => (c, c),
+        }
+    }
+}
+
+/// A run of sketch entities joined end to end: the path of a sweep.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chain {
+    /// The pieces in order, each starting where the one before ended.
+    pub segs: Vec<Seg>,
+    /// The sketch entity each piece came from, aligned with `segs`.
+    pub ids: Vec<Id>,
+    /// The last piece ends where the first began (or the path is one circle).
+    pub closed: bool,
+}
+
+/// Orders sketch entities into one path. `pick` names the entities to use, in
+/// any order; empty means every non-construction entity of the sketch. An open
+/// path starts at the free end of the first entity named (or of the lowest id).
+pub fn chain(sk: &Sketch, pick: &[Id]) -> Result<Chain, String> {
+    let mut wanted: Vec<Id> = if pick.is_empty() {
+        sk.entities.iter().filter(|(_, e)| !e.construction).map(|(id, _)| *id).collect()
+    } else {
+        pick.to_vec()
+    };
+    let before = wanted.len();
+    let mut seen = std::collections::BTreeSet::new();
+    wanted.retain(|id| seen.insert(*id));
+    if wanted.len() != before { return Err("the path names an entity twice".into()); }
+    if wanted.is_empty() { return Err("the path sketch has no lines, arcs or splines to follow".into()); }
+    let nodes = point_nodes(sk);
+    struct Piece { id: Id, a: Id, b: Id, seg: Seg }
+    let mut pieces = Vec::new();
+    for id in &wanted {
+        let e = sk.entities.get(id).ok_or(format!("the path's entity {id} is no longer in its sketch"))?;
+        let (a, b, seg) = match e.geom {
+            Geom::Circle { c, r } => {
+                if wanted.len() > 1 { return Err("a circle is a whole path by itself; it cannot be joined to other entities".into()); }
+                if r < 1e-9 { return Err("the path circle has no radius".into()); }
+                return Ok(Chain { segs: vec![Seg::Circle(sk.pos(c), r)], ids: vec![*id], closed: true });
+            }
+            Geom::Line { a, b } => (a, b, Seg::Line(sk.pos(a), sk.pos(b))),
+            Geom::Arc { s, e, .. } => { let pts = sk.polyline(*id); (s, e, Seg::Arc(sk.pos(s), pts[pts.len() / 2], sk.pos(e))) }
+            Geom::Spline { a, b, c, d } => (a, d, Seg::Spline([a, b, c, d].map(|p| sk.pos(p)))),
+        };
+        let (a, b) = (nodes[&a], nodes[&b]);
+        if a == b { return Err(format!("the path's entity {id} starts and ends at the same point")); }
+        pieces.push(Piece { id: *id, a, b, seg });
+    }
+    let mut degree: BTreeMap<Id, usize> = BTreeMap::new();
+    for p in &pieces { *degree.entry(p.a).or_insert(0) += 1; *degree.entry(p.b).or_insert(0) += 1; }
+    if degree.values().any(|d| *d > 2) { return Err("the path branches; pick one run of entities joined end to end".into()); }
+    let free: Vec<Id> = degree.iter().filter(|(_, d)| **d == 1).map(|(n, _)| *n).collect();
+    let closed = free.is_empty();
+    // Start at a free end: the first named entity's if it has one.
+    let mut at = if closed { pieces[0].a } else {
+        let first = &pieces[0];
+        if free.contains(&first.a) { first.a } else if free.contains(&first.b) { first.b } else { free[0] }
+    };
+    let mut used = vec![false; pieces.len()];
+    let (mut segs, mut ids) = (Vec::new(), Vec::new());
+    // A closed path walks its first entity forwards.
+    let mut next = if closed { Some(0) } else { pieces.iter().position(|p| p.a == at || p.b == at) };
+    while let Some(i) = next {
+        used[i] = true;
+        let p = &pieces[i];
+        let forward = p.a == at;
+        segs.push(if forward { p.seg } else { p.seg.reversed() });
+        ids.push(p.id);
+        at = if forward { p.b } else { p.a };
+        next = pieces.iter().enumerate().position(|(j, q)| !used[j] && (q.a == at || q.b == at));
+    }
+    if used.iter().any(|u| !u) { return Err("the path is in separate pieces; pick one run of entities joined end to end".into()); }
+    // Neighbours share a solved node, but their own end points can differ by the
+    // solver's tolerance. Make each piece start exactly where the last one ended.
+    for i in 1..segs.len() {
+        let join = segs[i - 1].ends().1;
+        match &mut segs[i] { Seg::Line(a, _) | Seg::Arc(a, _, _) => *a = join, Seg::Spline(p) => p[0] = join, Seg::Circle(..) => {} }
+    }
+    if closed {
+        let join = segs[0].ends().0;
+        match segs.last_mut().unwrap() { Seg::Line(_, b) | Seg::Arc(_, _, b) => *b = join, Seg::Spline(p) => p[3] = join, Seg::Circle(..) => {} }
+    }
+    Ok(Chain { segs, ids, closed })
 }
 
 pub fn signed_area(p: &[DVec2]) -> f64 {

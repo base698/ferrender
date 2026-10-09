@@ -263,6 +263,140 @@ fn line_tool_constraints_and_revolve() {
     save(&mut h, "revolve.png");
 }
 
+#[test]
+fn sweep_picks_its_profile_and_path_previews_and_edits() {
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    let newest = |h: &H| h.state().doc().sketches().last().unwrap().0.id;
+    // An L-shaped path, a second sketch that could also be a path, and a square profile across the start of the L.
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let path = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": path, "items": [{"type": "polyline", "points": [[0, 0], [30, 0], [30, 30]]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let other = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": other, "items": [{"type": "line", "from": [0, 0], "to": [-30, 0]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "YZ"}));
+    let profile = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": profile, "items": [{"type": "rect", "from": [-3, -3], "to": [3, 3]}]}));
+    h.state_mut().fit();
+    h.run_steps(3);
+
+    run(&mut h, Action::Sweep);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the sweep dialog should open") };
+    let w = f.sweep.clone().expect("it is the sweep dialog");
+    assert_eq!(f.sketch, Some(profile), "the newest sketch with a closed region is the profile");
+    assert_eq!(f.profiles.len(), 1);
+    assert_eq!(w.path_sketch, Some(other), "the newest other sketch that is one run is offered as the path");
+    assert_eq!(w.orient, fr_core::doc::SweepOrient::Follow);
+    // The dialog is Sweep's own: no distance arrow, and its own title and rows.
+    h.run_steps(2);
+    h.get_by_label("Follow path");
+    h.get_by_label("Orientation");
+    // Clicking a leg of the L in the viewport makes that sketch the path.
+    let on_leg = at(&h, 30.0, 15.0);
+    click(&mut h, on_leg);
+    let Dialog::Feature(f) = h.state().dialog.clone() else { panic!("the dialog stays open") };
+    assert_eq!(f.sweep.as_ref().unwrap().path_sketch, Some(path));
+    assert!(f.sweep.as_ref().unwrap().path.is_empty(), "a plain click follows the whole sketch");
+    assert_eq!(f.sketch, Some(profile), "picking the path leaves the profile alone");
+    // The preview shows the mitred bar before OK.
+    h.run_steps(3);
+    let preview = h.state().preview.as_ref().expect("the dialog previews the sweep");
+    assert_eq!(preview.2, None, "the preview builds");
+    assert_eq!(preview.1.bodies.len(), 1);
+    save(&mut h, "sweep-preview.png");
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None, "the sweep should apply cleanly");
+    let app = h.state();
+    assert_eq!(app.dialog, Dialog::None);
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    let body = &app.session.built.bodies[0];
+    assert!(body.is_exact());
+    let volume: f64 = body.solids.iter().map(|s| s.volume()).sum();
+    assert!((volume - 36.0 * 60.0).abs() < 1e-6, "a 6 x 6 bar along two legs of 30, mitred: {volume}");
+    assert_eq!(body.mesh.open_edges(), 0);
+    let id = app.doc().features.last().unwrap().id;
+    assert!(matches!(app.doc().features.last().unwrap().kind, fr_core::FeatureKind::Sweep(_)));
+    assert!(!app.doc().sketch(profile).unwrap().visible && !app.doc().sketch(path).unwrap().visible, "the sketches it used are put away");
+    assert!(app.doc().sketch(other).unwrap().visible, "the sketch it did not use stays");
+    h.state_mut().fit();
+    save(&mut h, "sweep.png");
+
+    // Editing reopens the same dialog with what the feature holds; a fixed orientation is refused on this path.
+    h.state_mut().edit_feature(id);
+    let Dialog::Feature(mut f) = h.state().dialog.clone() else { panic!("editing a sweep opens its dialog") };
+    assert_eq!((f.editing, f.sketch, f.sweep.as_ref().unwrap().path_sketch), (Some(id), Some(profile), Some(path)));
+    f.sweep.as_mut().unwrap().orient = fr_core::doc::SweepOrient::Fixed;
+    h.state_mut().dialog = Dialog::Feature(f);
+    h.run_steps(3);
+    let preview = h.state().preview.as_ref().expect("the edit previews");
+    assert!(preview.2.as_ref().is_some_and(|e| e.contains("fixed orientation")), "the preview says why: {:?}", preview.2);
+    h.state_mut().apply_dialog();
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains("fixed orientation")), "{:?}", h.state().toast);
+    assert!(matches!(h.state().dialog, Dialog::Feature(_)), "a refused edit keeps the dialog open");
+    // The applied feature hid its path sketch, but the edit still draws that
+    // path. Shift-clicking the visible first leg must select it for the edit.
+    assert!(!h.state().doc().sketch(path).unwrap().visible);
+    let first = *h.state().doc().sketch(path).unwrap().entities.keys().next().unwrap();
+    let on_first = at(&h, 15.0, 0.0);
+    h.event(Event::ModifiersChanged(Modifiers::SHIFT));
+    h.hover_at(on_first);
+    h.step();
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos: on_first, button: PointerButton::Primary, pressed, modifiers: Modifiers::SHIFT });
+        h.step();
+    }
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.step();
+    let Dialog::Feature(f) = &h.state().dialog else { panic!() };
+    assert_eq!(f.sweep.as_ref().unwrap().path, vec![first], "the highlighted hidden path remains pickable during editing");
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None);
+    let volume: f64 = h.state().session.built.bodies[0].solids.iter().map(|s| s.volume()).sum();
+    assert!((volume - 36.0 * 30.0).abs() < 1e-6, "one straight leg, fixed: {volume}");
+}
+
+#[test]
+fn sweep_can_correct_reversed_profile_and_closed_path_defaults() {
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap();
+    // Draw the profile first, then a closed path. Both contain regions, so the
+    // newest-region default initially assigns their roles the wrong way round.
+    exec(&mut h, json!({"op": "create_sketch", "plane": "YZ"}));
+    let profile = h.state().doc().sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "add_geometry", "sketch": profile, "items": [{"type": "rect", "from": [-3, -3], "to": [3, 3]}]}));
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let path = h.state().doc().sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "add_geometry", "sketch": path, "items": [{"type": "rect", "from": [-10, 0], "to": [20, 20]}]}));
+    h.state_mut().fit();
+    h.run_steps(3);
+    run(&mut h, Action::Sweep);
+    let Dialog::Feature(f) = &h.state().dialog else { panic!() };
+    assert_eq!(f.sketch, Some(path));
+    assert_eq!(f.sweep.as_ref().unwrap().path_sketch, Some(profile));
+    // Selecting the intended profile must clear its old path role so the two
+    // sketches can be assigned correctly without adding a third sketch.
+    let inside = crate::view::to_screen(h.state(), DVec3::new(0.0, 0.0, 1.0));
+    click(&mut h, inside);
+    let Dialog::Feature(f) = &h.state().dialog else { panic!() };
+    assert_eq!(f.sketch, Some(profile), "the former path can be selected as the profile");
+    assert_eq!(f.sweep.as_ref().unwrap().path_sketch, None);
+    let on_path = crate::view::to_screen(h.state(), DVec3::new(20.0, 10.0, 0.0));
+    click(&mut h, on_path);
+    let Dialog::Feature(f) = &h.state().dialog else { panic!() };
+    assert_eq!(f.sweep.as_ref().unwrap().path_sketch, Some(path));
+    h.run_steps(3);
+    assert_eq!(h.state().preview.as_ref().unwrap().2, None);
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    let body = &h.state().session.built.bodies[0];
+    assert_eq!(body.mesh.open_edges(), 0);
+    let volume: f64 = body.solids.iter().map(|s| s.volume()).sum();
+    assert!((volume - 36.0 * 100.0).abs() < 1e-6);
+}
+
 fn drag_with(h: &mut H, b: PointerButton, from: Pos2, by: egui::Vec2) {
     h.hover_at(from);
     h.step();

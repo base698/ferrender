@@ -2,7 +2,7 @@
 
 use egui::{Align, Align2, Color32, Context, FontId, Layout, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, vec2};
 use egui_phosphor::regular as icon;
-use fr_core::doc::{HoleFit, HoleShape};
+use fr_core::doc::{HoleFit, HoleShape, SweepOrient};
 use fr_core::{Axis, CKind, FeatureKind, Id, Kind, Op, Plane, Unit, threads};
 use serde_json::json;
 
@@ -105,6 +105,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             ui.separator();
             item(app, ui, "Extrude", "E", Action::Extrude);
             item(app, ui, "Revolve", "", Action::Revolve);
+            item(app, ui, "Sweep", "", Action::Sweep);
             item(app, ui, "Text / Emboss", "", Action::Text);
             ui.menu_button("Primitives", |ui| {
                 for (kind, name) in crate::primitives::NAMES.into_iter().enumerate() { item(app, ui, name, "", Action::Primitive(kind)); }
@@ -298,15 +299,18 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "CREATE", |ui| {
-                let (ex, rev) = match &app.dialog {
-                    Dialog::Feature(f) => (!f.revolve, f.revolve),
-                    _ => (false, false),
+                let (ex, rev, sweep) = match &app.dialog {
+                    Dialog::Feature(f) => (!f.revolve && f.sweep.is_none(), f.revolve, f.sweep.is_some()),
+                    _ => (false, false, false),
                 };
                 if big(ui, icon::ARROW_FAT_LINES_UP, "Extrude", ex, "Pull a sketch profile into a solid (E)").clicked() {
                     app.run(&ctx, Action::Extrude);
                 }
                 if big(ui, icon::ARROWS_CLOCKWISE, "Revolve", rev, "Turn a sketch profile around an axis, like a lathe").clicked() {
                     app.run(&ctx, Action::Revolve);
+                }
+                if big(ui, icon::PATH, "Sweep", sweep, "Carry a sketch profile along a path drawn in another sketch").clicked() {
+                    app.run(&ctx, Action::Sweep);
                 }
                 if big(ui, icon::CUBE, "Primitive", matches!(app.dialog, Dialog::Primitive(_)), "Create a box, cylinder, sphere, cone or torus").clicked() {
                     app.run(&ctx, Action::Primitive(0));
@@ -435,6 +439,7 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Primitive(_) => icon::CUBE,
         FeatureKind::Extrude(_) => icon::ARROW_FAT_LINES_UP,
         FeatureKind::Revolve(_) => icon::ARROWS_CLOCKWISE,
+        FeatureKind::Sweep(_) => icon::PATH,
         FeatureKind::Import(_) => icon::DOWNLOAD_SIMPLE,
         FeatureKind::Transform(_) => icon::ARROWS_OUT_CARDINAL,
         FeatureKind::Remove(_) => icon::MINUS_CIRCLE,
@@ -708,11 +713,13 @@ fn dialogs(app: &mut App, ctx: &Context) {
             });
         }
         Dialog::Feature(mut f) => {
-            let title = match (f.revolve, f.editing.is_some()) {
-                (false, false) => "Extrude",
-                (false, true) => "Edit Extrude",
-                (true, false) => "Revolve",
-                (true, true) => "Edit Revolve",
+            let title = match (f.revolve, f.sweep.is_some(), f.editing.is_some()) {
+                (_, true, false) => "Sweep",
+                (_, true, true) => "Edit Sweep",
+                (false, _, false) => "Extrude",
+                (false, _, true) => "Edit Extrude",
+                (true, _, false) => "Revolve",
+                (true, _, true) => "Edit Revolve",
             };
             dialog_window(app, title).show(ctx, |ui| {
                 egui::Grid::new("feature").num_columns(3).show(ui, |ui| {
@@ -723,7 +730,33 @@ fn dialogs(app: &mut App, ctx: &Context) {
                         (n, None) => RichText::new(format!("{n} selected")),
                     });
                     ui.end_row();
-                    if f.revolve {
+                    if let Some(w) = &mut f.sweep {
+                        ui.label("Path");
+                        let named = |id: Id| app.doc().feature(id).map_or_else(|| format!("sketch {id}"), |x| x.name.clone());
+                        // Any other sketch whose geometry is one run, or one that was picked a piece at a time.
+                        let choices: Vec<Id> = app.doc().sketches().filter(|(x, s)| Some(x.id) != f.sketch && !app.doc().is_suppressed(x.id) && (w.path_sketch == Some(x.id) || fr_core::profile::chain(s, &[]).is_ok())).map(|(x, _)| x.id).collect();
+                        egui::ComboBox::from_id_salt("sweep-path").selected_text(match w.path_sketch { Some(id) => RichText::new(named(id)), None => RichText::new("click a line or curve").color(colors.accent) }).show_ui(ui, |ui| {
+                            for id in choices {
+                                if ui.selectable_label(w.path_sketch == Some(id), named(id)).clicked() { w.path_sketch = Some(id); w.path.clear(); }
+                            }
+                        });
+                        ui.end_row();
+                        // What the path is, or why it cannot be followed.
+                        if let Some(sk) = w.path_sketch.and_then(|id| app.doc().sketch(id)) {
+                            ui.label("");
+                            ui.label(match fr_core::profile::chain(sk, &w.path) {
+                                Ok(chain) => RichText::new(format!("{} piece{}, {}", chain.ids.len(), if chain.ids.len() == 1 { "" } else { "s" }, if chain.closed { "closed" } else { "open" })).color(colors.muted),
+                                Err(e) => RichText::new(e).color(colors.accent),
+                            });
+                            ui.end_row();
+                        }
+                        ui.label("Orientation");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut w.orient, SweepOrient::Follow, "Follow path").on_hover_text("The profile turns with the path");
+                            ui.selectable_value(&mut w.orient, SweepOrient::Fixed, "Fixed").on_hover_text("The profile keeps the orientation it was drawn in");
+                        });
+                        ui.end_row();
+                    } else if f.revolve {
                         ui.label("Axis");
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut f.axis, Axis::X, "X");
@@ -757,7 +790,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     }
                     op_row(ui, &mut f.op, &Op::ALL);
                 });
-                ui.label(RichText::new("Click a region to select it. Shift-click to add or remove regions.").color(colors.muted));
+                ui.label(RichText::new(if f.sweep.is_some() { "Click a region for the profile and a line or curve of another sketch for the path. Sharp corners are mitred." } else { "Click a region to select it. Shift-click to add or remove regions." }).color(colors.muted));
                 if ui.small_button("Clear profiles").clicked() { f.profiles.clear(); f.face = None; }
                 if f.face.is_some() && f.op == Op::Join {
                     let inward = app.doc().value(&f.text, Kind::Length).is_ok_and(|v| v.v < 0.0);
@@ -895,7 +928,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 let owner = p.editing.and_then(|id| app.doc().feature(id).map(|f| f.owner));
                 let sources: Vec<(Id, String)> = app.doc().features.iter().take(before)
                     .filter(|f| !app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner) && owner.is_none_or(|owner| f.owner == owner))
-                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
+                    .filter(|f| matches!(f.kind, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Sweep(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(&f.kind, FeatureKind::Text(t) if t.op == Op::New))
                     .map(|f| (f.id, format!("{} · {}", f.name, app.doc().component_name(f.owner)))).collect();
                 let shown = sources.iter().find(|s| Some(s.0) == p.source).map_or("choose".to_owned(), |s| s.1.clone());
                 egui::Grid::new("pattern").num_columns(3).show(ui, |ui| {
