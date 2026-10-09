@@ -202,13 +202,22 @@ been tried against the live API.
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
 | **Components (0.3 test build)** | Nested ownership, activation, scoped modeling, subtree visibility, and rigid component placement |
 | **Construction planes (0.3 test build)** | Persistent Offset, Midplane, and Three Points references with attached sketches |
+| **Meshes (0.4)** | STL, OBJ and 3MF import of scans with millions of triangles; repair, decimate, smooth, subdivide, cut, mirror, offset / thicken, sculpt; relief from an image; mesh booleans that scale |
+| **Faces and edges (0.4)** | Picks named by how the face was made, so fillets, shells, threads, text and face planes follow upstream edits |
+| **Scripts (0.4)** | Rhai scripts with declared inputs, a Scripts menu, timeline chips that re-run, `ferrender run` and `check`, six samples |
 | **Inspect** | Measure, Section Analysis, degrees of freedom while sketching |
 | **Timeline** | Edit, rename, suppress, delete, roll back; undo and redo |
-| **Files** | `.ferr` documents; STL in and out; STEP out; recovery of unsaved work after a crash |
+| **Files** | `.ferr` documents, plain JSON or a container with images, meshes, a thumbnail and a geometry cache; STL, OBJ, 3MF in; STL and STEP out; recovery of unsaved work after a crash |
 | **AI** | MCP server, local command socket, built-in assistant |
 
 It is early, and smaller than what it imitates: no joints or linked component instances, no loft or sweep, no drawings, and the
 [limits](#limits) below are real. `TODO.md` has the list.
+
+## Additions in 0.4.0
+
+**Ferrender 0.4.0** makes meshes a first-class body kind: scans of millions of triangles import quickly and stay quick to orbit and pick, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans scale to large scans. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and a geometry cache that opens without a rebuild, and a file from a newer Ferrender can still be viewed. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline.
+
+See the [0.4.0 release notes](docs/releases/0.4.0.md), the [manual test plan](docs/TEST_PLAN_0.4.0.md), the [file format](docs/FILE_FORMAT.md), the [face relief tutorial](docs/tutorials/FACE_RELIEF_0.4.md) and the [0.4 plan with what shipped and what did not](docs/0.4-release.md).
 
 ## Modeling additions in 0.3.0
 
@@ -361,6 +370,22 @@ Choose **Model → Primitives → Box, Cylinder, Sphere, Cone or Torus**, or use
 Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](docs/PRIMITIVES_0.3.md) includes examples and limits.
 
 These are exact solids that support subsequent sketches, fillets, holes, transforms, patterns, Combine and STEP export. New Body is the default, so touching primitives stay separate until you choose Join or Combine.
+
+### Faces and edges
+
+Every face of an exact body carries a tag saying how it was made: swept from a
+particular sketch entity, the start or end cap of an extrude, or made by a
+fillet, hole, primitive or other feature, with split pieces and pattern copies
+numbered. Fillets, chamfers, shells, threads, text on a face and face-based
+construction planes store the tag beside the picked point and look for the
+face by tag first, by tag family second, and by position only when the body
+has no tags at all. So a fillet stays on the far edge of a block when the block
+grows, and a feature whose face has been cut away reports that it is gone
+rather than landing on the nearest thing. `get_object_info` on a body lists
+every face and edge with its tag, commands accept `{"tag": ...}` instead of a
+point, and a feature's info says whether its picks were resolved by tag, by
+family or by position. Designs from before 0.4 learn their tags when they are
+first opened.
 
 ### Exact and mesh bodies
 
