@@ -18,7 +18,9 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::doc::{Body, Document, FeatureKind};
+use crate::mesh::Mesh;
 use crate::units::Unit;
+use glam::DVec3;
 
 /// Written into every native file so other tools can recognise it.
 pub const FORMAT: &str = "ferrender";
@@ -452,40 +454,46 @@ pub fn save(doc: &Document, path: &Path) -> Result<Saved, String> {
     save_with(doc, path, &Extras::default())
 }
 
+/// Keeps the plain-JSON file at `path` as [`backup_path`] when a container is
+/// about to replace it, once; returns where the backup went. Scripts that
+/// write a design through a staged file apply the same rule when they commit.
+pub fn keep_backup(path: &Path, new_is_container: bool) -> Result<Option<PathBuf>, String> {
+    if !(new_is_container && path.is_file() && !is_container(path)) { return Ok(None); }
+    let to = backup_path(path);
+    // A predictable backup filename must never follow a symlink (including
+    // a dangling one), or a save could overwrite an unrelated file.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&to) {
+        Ok(mut destination) => {
+            let result = std::fs::File::open(path)
+                .and_then(|mut source| std::io::copy(&mut source, &mut destination))
+                .and_then(|_| destination.sync_all());
+            if let Err(e) = result {
+                let _ = std::fs::remove_file(&to);
+                return Err(format!("could not keep a backup of {} at {}: {e}", path.display(), to.display()));
+            }
+            Ok(Some(to))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !std::fs::symlink_metadata(&to).is_ok_and(|m| m.file_type().is_file()) {
+                return Err(format!("the backup path {} already exists and is not a regular file", to.display()));
+            }
+            Ok(None)
+        }
+        Err(e) => Err(format!("could not create the backup {}: {e}", to.display())),
+    }
+}
+
 /// Writes the document atomically. A plain file that becomes a container is first
 /// copied to [`backup_path`], once, so the pre-0.4 original is never lost.
 pub fn save_with(doc: &Document, path: &Path, extras: &Extras) -> Result<Saved, String> {
     let (bytes, container) = encode(doc, extras)?;
-    let mut backup = None;
-    if container && path.is_file() && !is_container(path) {
-        let to = backup_path(path);
-        // A predictable backup filename must never follow a symlink (including
-        // a dangling one), or a save could overwrite an unrelated file.
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)] {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        match options.open(&to) {
-            Ok(mut destination) => {
-                let result = std::fs::File::open(path)
-                    .and_then(|mut source| std::io::copy(&mut source, &mut destination))
-                    .and_then(|_| destination.sync_all());
-                if let Err(e) = result {
-                    let _ = std::fs::remove_file(&to);
-                    return Err(format!("could not keep a backup of {} at {}: {e}", path.display(), to.display()));
-                }
-                backup = Some(to);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !std::fs::symlink_metadata(&to).is_ok_and(|m| m.file_type().is_file()) {
-                    return Err(format!("the backup path {} already exists and is not a regular file", to.display()));
-                }
-            }
-            Err(e) => return Err(format!("could not create the backup {}: {e}", to.display())),
-        }
-    }
+    let backup = keep_backup(path, container)?;
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     // Never follow a predictable .ferr.tmp symlink or truncate another writer's file.
     let (tmp, mut file) = loop {
@@ -561,11 +569,20 @@ fn iso_now() -> String {
 pub fn stl_bytes<'a>(bodies: impl IntoIterator<Item = &'a Body>, unit: Unit) -> Vec<u8> {
     let bodies: Vec<&Body> = bodies.into_iter().collect();
     let count: usize = bodies.iter().map(|b| b.mesh.len()).sum();
+    stl_bytes_of(count, bodies.iter().flat_map(|b| b.mesh.tris()), unit)
+}
+
+/// One mesh as binary STL, as an exported script's sidecar file.
+pub fn mesh_stl_bytes(mesh: &Mesh, unit: Unit) -> Vec<u8> {
+    stl_bytes_of(mesh.len(), mesh.tris(), unit)
+}
+
+fn stl_bytes_of(count: usize, tris: impl Iterator<Item = [DVec3; 3]>, unit: Unit) -> Vec<u8> {
     let mut out = format!("Ferrender STL, units: {}", unit.name()).into_bytes();
     out.resize(80, b' ');
     out.reserve(count * 50 + 4);
     out.extend((count as u32).to_le_bytes());
-    for t in bodies.iter().flat_map(|b| b.mesh.tris()) {
+    for t in tris {
         let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
         for v in [n, t[0] / unit.mm(), t[1] / unit.mm(), t[2] / unit.mm()] {
             for c in v.to_array() {

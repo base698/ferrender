@@ -80,7 +80,7 @@ fn tools() -> Value {
         },
         {
             "name": "run_script",
-            "description": "Run a Rhai script against the document as one undo step. Give \"path\" (a file, or a sample name such as spur-gear.rhai), or \"source\" (the script text). \"inputs\" is an object of the script's declared inputs; \"allow\" lists extra folders the script may read and write (its own folder and the document's are always allowed). Returns the script's log, result, exported files and the features it made. Scripts call the same commands as execute_ferrender_commands as functions, e.g. extrude(#{sketch: s, distance: 10}); see the reference's Scripts section.",
+            "description": "Run a Rhai script against the document as one undo step. Give \"path\" (a file, or a sample name such as spur-gear.rhai), or \"source\" (the script text). \"inputs\" is an object of the script's declared inputs; \"allow\" lists extra folders the script may read and write (its own folder and the document's are always allowed); \"timeout\" is a limit in seconds, after which the run fails at its next operation. Files the script writes appear only when the run succeeds. Returns the script's log, result, exported files and the features it made. Scripts call the same commands as execute_ferrender_commands as functions, e.g. extrude(#{sketch: s, distance: 10}); see the reference's Scripts section.",
             "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "source": {"type": "string"}, "inputs": {"type": "object"}, "allow": {"type": "array", "items": {"type": "string"}}}}
         },
         {
