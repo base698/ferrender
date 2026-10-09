@@ -155,7 +155,7 @@ A plane reference is `{"origin": "XY"|"XZ"|"YZ"}`, `{"plane": id}`, `{"face": {b
 | 11 | 0.4.0 | `mesh_op` and `relief` features; the `free` plane reference. |
 | 12 | 0.4.0 | `script_run` features and `made_by` on features. |
 | 13 | 0.4.0 | Semantic/provenance topology tags (`schema: 2`), persistent script output identities (`script_key`) and `sweep` features. |
-| 14 | 0.5 (in development) | `loft` features. |
+| 14 | 0.4.0 | `loft` features. |
 
 The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". Older documents deserialize with absent fields taking their defaults. Legacy reference tags are upgraded only when the original pick has a unique verified match; ambiguous references remain errors for repair. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 
