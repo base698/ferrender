@@ -688,7 +688,7 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
     // Selecting a spline exposes its four interpolation points and their order.
     for (id, e) in &sk.entities {
         if let Geom::Spline { a, b, c, d } = e.geom
-            && (picked(*id) || [a,b,c,d].iter().any(|p| picked(*p)))
+            && (picked(*id) || hover == Hit::Entity(*id) || [a,b,c,d].iter().any(|p| picked(*p) || hover == Hit::Point(*p)))
         {
             let pts: Vec<Pos2> = [a,b,c,d].iter().map(|p| on_screen(app, sk, sk.pos(*p))).collect();
             painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0, colors.selected), 4.0, 4.0));
@@ -697,12 +697,17 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
             }
         }
     }
+    // A spline's fit points are its handles: drawn with a filled centre so they read as draggable.
+    let fit: std::collections::HashSet<Id> = sk.entities.values().filter_map(|e| if let Geom::Spline { a, b, c, d } = e.geom { Some([a, b, c, d]) } else { None }).flatten().collect();
     for (id, p) in &sk.points {
         let at = on_screen(app, sk, *p);
         let hot = picked(*id) || hover == Hit::Point(*id);
         if *id == ORIGIN {
             painter.circle(at, 5.0, colors.paper, Stroke::new(1.5, colors.ink));
             painter.circle_filled(at, 2.2, if hot { colors.selected } else { colors.ink });
+        } else if fit.contains(id) {
+            painter.circle(at, if hot { 5.0 } else { 4.0 }, if hot { colors.selected } else { colors.paper }, Stroke::new(1.3, if solved { colors.ink } else { colors.sketch }));
+            painter.circle_filled(at, 1.8, if hot { colors.paper } else if solved { colors.ink } else { colors.sketch });
         } else {
             painter.circle(at, if hot { 4.5 } else { 3.2 }, if hot { colors.selected } else { colors.paper }, Stroke::new(1.3, if solved { colors.ink } else { colors.sketch }));
         }

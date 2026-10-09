@@ -1773,6 +1773,11 @@ impl App {
                 self.dialog = Dialog::None;
                 self.sel_feature = Some(id);
                 self.refresh();
+                // A hollowed body looks the same from outside, so say what happened.
+                if let Dialog::Shell(sh) = &dlg {
+                    let faces = sh.faces.len();
+                    self.toast(format!("Hollowed to a {} wall, open at {faces} face{}. Look inside with Section Analysis.", sh.text.trim(), if faces == 1 { "" } else { "s" }));
+                }
             }
             Err(e) => self.toast(e),
         }
