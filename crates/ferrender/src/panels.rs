@@ -238,7 +238,14 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                     }
                 }
                 // Beside the drawing tools, since it decides what the next line, arc or spline is.
-                if big(ui, icon::LINE_SEGMENTS, "Construction", app.opts.construction, "Draw new geometry as construction (guide) lines; with a selection, toggle those instead (X)").clicked() {
+                // With entities selected it changes those instead, and shows their state.
+                let selected: Vec<bool> = app.sketch().map(|(_, sk)| app.sel.iter().filter_map(|id| sk.entities.get(id).map(|e| e.construction)).collect()).unwrap_or_default();
+                let (on, tip) = match selected.as_slice() {
+                    [] => (app.opts.construction, "Draw new geometry as construction (guide) lines; select lines first to change them instead (X)".to_owned()),
+                    all if all.iter().all(|c| *c) => (true, format!("The {} selected {} construction; click to make {} normal again (X)", all.len(), if all.len() == 1 { "line is" } else { "lines are" }, if all.len() == 1 { "it" } else { "them" })),
+                    some => (false, format!("Make the {} selected {} construction (guide) geometry (X)", some.len(), if some.len() == 1 { "line" } else { "lines" })),
+                };
+                if big(ui, icon::LINE_SEGMENTS, "Construction", on, &tip).clicked() {
                     app.run(&ctx, Action::Construction);
                 }
             });

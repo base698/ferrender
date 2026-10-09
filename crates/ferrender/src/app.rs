@@ -100,6 +100,8 @@ pub struct Snap {
     pub v: bool,
     /// The point landed on the sketch's X axis (y = 0) or Y axis (x = 0), and stays there.
     pub axis: [bool; 2],
+    /// The point is the midpoint of the entity in `on`, and stays there.
+    pub mid: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1165,7 +1167,7 @@ impl App {
         if tool == Tool::Spline && c.len() >= 2 && c.len() < 4 && c.last().is_some_and(|s| s.point.is_some()) {
             let (from, to) = (c[c.len() - 2].p, c[c.len() - 1].p);
             let missing = 4 - c.len();
-            let fill: Vec<Snap> = (1..=missing).map(|i| Snap { p: from.lerp(to, i as f64 / (missing + 1) as f64), point: None, on: None, h: false, v: false, axis: [false, false] }).collect();
+            let fill: Vec<Snap> = (1..=missing).map(|i| Snap { p: from.lerp(to, i as f64 / (missing + 1) as f64), point: None, on: None, h: false, v: false, axis: [false, false], mid: false }).collect();
             let at = c.len() - 1;
             c.splice(at..at, fill);
         }
@@ -1177,7 +1179,10 @@ impl App {
             None => {
                 let id = sk.add_point(s.p);
                 if let Some(e) = s.on {
-                    let _ = sk.add_constraint(CKind::Coincident, &[id, e], None);
+                    // A midpoint snap is held at the midpoint; otherwise the point stays on the entity.
+                    if !(s.mid && sk.add_constraint(CKind::Midpoint, &[id, e], None).is_ok()) {
+                        let _ = sk.add_constraint(CKind::Coincident, &[id, e], None);
+                    }
                 }
                 // A point snapped onto an axis is held there, level with or above the fixed origin.
                 if s.axis[0] { let _ = sk.add_constraint(CKind::Horizontal, &[id, 0], None); }
@@ -1301,7 +1306,7 @@ impl App {
         // shares the end point; it is not tangent to the last one.
         let continues = matches!(tool, Tool::Line | Tool::Spline);
         if let (true, true, Some(b), Some(end)) = (done, continues, last, c.get(tool.clicks() - 1).filter(|s| s.point.is_none())) {
-            self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false, axis: [false, false] });
+            self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false, axis: [false, false], mid: false });
         } else if !done && tool == Tool::Line {
             self.clicks.push(c[0]);
         }

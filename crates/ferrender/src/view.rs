@@ -164,17 +164,17 @@ fn grid_step(app: &App) -> f64 {
 pub fn snap(app: &App, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Snap> {
     let raw = sketch_pos(app, sk, pos)?;
     if let Some((id,p)) = crate::sketch_capture::nearest_point(sk,pos,|p|on_screen(app,sk,p)) {
-        return Some(Snap { p,point:Some(id),on:None,h:false,v:false,axis:[false,false] });
+        return Some(Snap { p,point:Some(id),on:None,h:false,v:false,axis:[false,false], mid:false });
     }
     if let Some(c) = sk.entities.keys().filter_map(|id| crate::sketch_capture::project_entity(sk,*id,pos,|p|on_screen(app,sk,p)))
         .filter(|c|c.distance<=6.0).min_by(|a,b|a.distance.total_cmp(&b.distance)) {
-        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false,axis:[false,false] });
+        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false,axis:[false,false], mid:c.mid });
     }
     Some(free_snap(app,raw,from,false))
 }
 
 fn free_snap(app: &App, raw: DVec2, from: Option<DVec2>, bypass: bool) -> Snap {
-    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false, axis: [false, false] };
+    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false, axis: [false, false], mid: false };
     if bypass { return s; }
     if app.opts.snap_grid {
         let step = grid_step(app);
@@ -1158,7 +1158,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     }
     let hovered = resp.hover_pos().and_then(|p| captured_snap(app, ui, sk, p, from));
     // Over the boxes themselves the pointer is not over the sketch; the shape stays where it was.
-    let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false, axis: [false, false] });
+    let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false, axis: [false, false], mid: false });
     let Some(mut s) = hovered.or(kept) else { return };
     let attachment = s;
     if let Some(t) = &mut app.typed {
@@ -1299,6 +1299,12 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
         painter.rect_stroke(Rect::from_center_size(at, Vec2::splat(11.0)), 1.0, Stroke::new(1.6, colors.selected), StrokeKind::Outside);
     } else if let Some(entity) = s.on {
         painter.add(Shape::line(path(app,sk,entity),Stroke::new(2.4,colors.selected)));
+        if s.mid {
+            // A small triangle under the point says it is the midpoint.
+            let tri = vec![at + vec2(0.0, 5.0), at + vec2(-6.0, 13.0), at + vec2(6.0, 13.0)];
+            painter.add(Shape::convex_polygon(tri, colors.selected, Stroke::NONE));
+            painter.text(at + vec2(0.0, 21.0), Align2::CENTER_CENTER, "mid", FontId::proportional(11.0), colors.selected);
+        }
         if let Some(pointer) = resp.hover_pos().filter(|p|p.distance(at)>2.0) {
             painter.line_segment([pointer,at],Stroke::new(1.0,colors.selected));
         }
