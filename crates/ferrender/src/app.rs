@@ -39,6 +39,8 @@ pub enum Tool {
     Trim,
     /// Click a face of a body to copy its outline into the sketch.
     Project,
+    /// Like Select, but a drag from empty space moves the selection instead of box-selecting.
+    Move,
 }
 
 impl Tool {
@@ -49,13 +51,14 @@ impl Tool {
             Tool::Arc | Tool::Arc3 => 3,
             Tool::Spline => 4,
             Tool::Point => 1,
-            Tool::Select | Tool::Dimension | Tool::Trim | Tool::Project => 0,
+            Tool::Select | Tool::Move | Tool::Dimension | Tool::Trim | Tool::Project => 0,
         }
     }
 
     pub fn hint(self, placed: usize) -> &'static str {
         match (self, placed) {
             (Tool::Select, _) => "Click to select, drag to move. Shift-click adds to the selection.",
+            (Tool::Move, _) => "Drag a point or entity to move it, or select geometry and drag anywhere to move it all. Escape returns to Select.",
             (Tool::Line, 0) => "Click to start a line.",
             (Tool::Line, _) => "Click the next point. Hold Shift to lock the angle; Tab types an exact angle. Esc ends the line.",
             (Tool::Rect, 0) => "Click the first corner.",
@@ -468,7 +471,9 @@ pub struct Section {
     pub on: bool,
     /// The world axis the cutting plane faces: 0 = X, 1 = Y, 2 = Z.
     pub axis: usize,
-    /// Where the plane sits along that axis, in millimetres.
+    /// A construction plane to cut along instead of a world axis, when it is built.
+    pub plane: Option<Id>,
+    /// Where the plane sits along that axis or plane normal, in millimetres.
     pub offset: f64,
     pub flip: bool,
 }
@@ -906,7 +911,7 @@ impl App {
             show_about: false,
             show_params: false,
             show_section: false,
-            section: Section { on: false, axis: 1, offset: 0.0, flip: false },
+            section: Section { on: false, axis: 1, plane: None, offset: 0.0, flip: false },
             plane_offset: String::new(),
             param_new: Default::default(),
             param_edit: None,
@@ -1286,7 +1291,7 @@ impl App {
                     let centre = place(sk, &c[0]);
                     sk.add_polygon(centre, c[1].p, sides, construction);
                 }
-                Tool::Select | Tool::Dimension | Tool::Trim | Tool::Project => {}
+                Tool::Select | Tool::Move | Tool::Dimension | Tool::Trim | Tool::Project => {}
             }
             Ok(())
         });
@@ -1802,7 +1807,29 @@ impl App {
                 if (matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) || matches!(&self.dialog, Dialog::Plane(p) if p.editing.is_some()) || matches!(&self.dialog, Dialog::Primitive(p) if p.editing.is_some()) || crate::body_ops_ui::editing(&self.dialog).is_some())
                     && let Some(index) = doc.features.iter().position(|f| f.id == id)
                 { doc.roll_to(index + 1); }
-                let built = doc.rebuild();
+                let built = if matches!(&self.dialog, Dialog::Plane(_)) {
+                    // A plane never changes the bodies before it, and the preview shows the
+                    // timeline only up to the plane, so resolve the plane against what is
+                    // already built instead of rebuilding every body on each drag step.
+                    let mut built = self.modeling_source().clone();
+                    let resolved = match doc.feature(id).cloned() {
+                        Some(mut feature) => doc.resolve_plane(&mut feature, &built),
+                        None => Err("the plane no longer exists".to_owned()),
+                    };
+                    match resolved {
+                        Ok((mut plane, _)) => {
+                            let placement = built.component_placement(plane.component);
+                            plane.plane = plane.plane.transformed(placement);
+                            plane.corners = plane.corners.map(|p| placement.transform_point3(p));
+                            built.planes.insert(id, plane);
+                            built.errors.remove(&id);
+                        }
+                        Err(e) => { built.errors.insert(id, e); }
+                    }
+                    built
+                } else {
+                    doc.rebuild()
+                };
                 let e = built.errors.get(&id).cloned();
                 (if e.is_some() { self.modeling_source().clone() } else { built }, e)
             }
@@ -2162,6 +2189,12 @@ impl App {
             Action::Text => self.open_text_dialog(),
             Action::Transform => {
                 if let Some(component) = self.sel_component { self.move_component_dialog(component); return; }
+                // In a sketch, Move moves sketch geometry: drag the selection, or a point or entity.
+                if self.sketch().is_some() {
+                    self.run(ctx, Action::Tool(Tool::Move));
+                    if self.sel.is_empty() { self.toast("Drag a point or entity to move it, or select geometry and drag anywhere."); }
+                    return;
+                }
                 self.finish_sketch();
                 match self.target_body().or(self.session.built.bodies.first().map(|b| b.id).filter(|_| self.session.built.bodies.len() == 1)) {
                     Some(body) => {
@@ -2241,7 +2274,7 @@ impl App {
                     if t == Tool::Dimension {
                         let pos = self.ctx.input(|i| i.pointer.hover_pos()).filter(|p| self.vp.contains(*p)).unwrap_or(self.vp.center());
                         self.dimension_selection(self.sel.clone(), pos);
-                    } else if !matches!(t, Tool::Select | Tool::TangentArc) {
+                    } else if !matches!(t, Tool::Select | Tool::Move | Tool::TangentArc) {
                         self.sel.clear();
                     }
                 }

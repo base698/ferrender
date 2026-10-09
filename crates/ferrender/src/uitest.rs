@@ -339,6 +339,41 @@ fn points_near_an_axis_land_on_it_and_splines_carry_on() {
 }
 
 #[test]
+fn move_tool_moves_the_selection_in_a_sketch() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    run(&mut h, Action::Tool(Tool::Line));
+    for (x, y) in [(10.0, 10.0), (30.0, 10.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    run(&mut h, Action::Cancel);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let line = *sk.entities.keys().next().unwrap();
+    let before = sk.line(line).unwrap();
+    // Select the line, then Move: a drag from empty space carries the selection.
+    h.state_mut().sel = vec![line];
+    run(&mut h, Action::Transform);
+    assert_eq!(h.state().tool, Tool::Move, "Move in a sketch is the sketch move tool, not the body dialog");
+    assert!(matches!(h.state().dialog, Dialog::None));
+    let (from, to) = (at(&h, 40.0, 20.0), at(&h, 45.0, 28.0));
+    drag(&mut h, &[from, (from + to.to_vec2()) / 2.0, to]);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let after = sk.line(line).unwrap();
+    assert!((after.0 - before.0 - DVec2::new(5.0, 8.0)).length() < 0.2 && (after.1 - before.1 - DVec2::new(5.0, 8.0)).length() < 0.2, "{before:?} -> {after:?}");
+    assert_eq!(sk.entities.len(), 1, "moving draws nothing new");
+    // Dragging one end point with the Move tool moves only that point.
+    let end = at(&h, after.1.x, after.1.y);
+    drag(&mut h, &[end, end + egui::vec2(10.0, 0.0), end + egui::vec2(20.0, 0.0)]);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let moved = sk.line(line).unwrap();
+    assert!((moved.0 - after.0).length() < 1e-6 && (moved.1 - after.1).length() > 1.0, "{after:?} -> {moved:?}");
+    assert!(h.state().session.can_undo());
+}
+
+#[test]
 fn sweep_covers_the_parts_of_its_path_set_in_the_dialog() {
     let mut h = harness();
     let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
@@ -834,7 +869,7 @@ fn patterns_extents_and_section() {
     let whole = save(&mut h, "pattern.png");
 
     // Section through the holes: the near half disappears and the cut face is hatched.
-    h.state_mut().section = crate::app::Section { on: true, axis: 1, offset: 10.0, flip: false };
+    h.state_mut().section = crate::app::Section { on: true, axis: 1, plane: None, offset: 10.0, flip: false };
     let cut = save(&mut h, "section.png");
     let px = |img: &image::RgbaImage, p: Pos2| img.get_pixel(p.x as u32, p.y as u32).0;
     let near_edge = crate::view::to_screen(h.state(), DVec3::new(20.0, 0.0, 5.0));

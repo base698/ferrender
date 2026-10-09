@@ -401,10 +401,18 @@ fn draw_grid(app: &App, painter: &Painter) {
 /// The section view's plane as (normal, offset): everything with `normal . p > offset` is hidden.
 fn section_plane(app: &App) -> Option<(DVec3, f64)> {
     let s = app.section;
+    if !s.on { return None; }
+    let flip = if s.flip { -1.0 } else { 1.0 };
+    // A construction plane cuts along its own normal, offset from where it sits; a
+    // plane that is not built (suppressed, rolled back, in error) falls back to the axis.
+    if let Some(p) = s.plane.and_then(|id| app.shown().planes.get(&id)) {
+        let n = p.plane.normal() * flip;
+        return Some((n, n.dot(p.plane.origin) + s.offset * flip));
+    }
     // Unflipped, each plane hides the side the home view looks at.
-    let toward = [1.0, -1.0, 1.0][s.axis.min(2)] * if s.flip { -1.0 } else { 1.0 };
+    let toward = [1.0, -1.0, 1.0][s.axis.min(2)] * flip;
     let n = [DVec3::X, DVec3::Y, DVec3::Z][s.axis.min(2)] * toward;
-    s.on.then_some((n, s.offset * toward))
+    Some((n, s.offset * toward))
 }
 
 fn draw_bodies(app: &mut App, ui: &Ui, painter: &Painter) {
@@ -857,7 +865,9 @@ fn reference_select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, sid: Id,
     false
 }
 
-fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, sk: &Sketch, hover: Hit) {
+/// The Select tool, and the Move tool when `moving`: then a drag that starts on empty
+/// space moves the selection instead of drawing a selection box.
+fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, sk: &Sketch, hover: Hit, moving: bool) {
     if reference_select_tool(app, ui, resp, sid, sk, hover) { return; }
     let colors = ViewColors::new(painter.ctx());
     let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
@@ -879,6 +889,12 @@ fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
                         Drag::Move(pts.into_iter().map(|p| (p, sk.pos(p) - grab)).collect())
                     }
                 }
+            }
+            _ if moving && !app.sel.is_empty() => {
+                let mut pts: Vec<Id> = app.sel.iter().flat_map(|e| if sk.points.contains_key(e) { vec![*e] } else { sk.ent_points(*e) }).collect();
+                pts.sort();
+                pts.dedup();
+                Drag::Move(pts.into_iter().map(|p| (p, sk.pos(p) - grab)).collect())
             }
             _ => Drag::Box(origin),
         };
@@ -1479,7 +1495,7 @@ fn sketch_mode(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
         if resp.clicked() { app.commit_value(); }
     } else {
         match app.tool {
-            Tool::Select => if !reference_consumed { select_tool(app, ui, resp, painter, sid, &sk, hover); },
+            Tool::Select | Tool::Move => if !reference_consumed { select_tool(app, ui, resp, painter, sid, &sk, hover, app.tool == Tool::Move); },
             Tool::Dimension => dimension_tool(app, resp, &sk, hover),
             Tool::Trim => {
                 if let (true, Hit::Entity(e), Some(pos)) = (resp.clicked_by(PointerButton::Primary), hover, resp.interact_pointer_pos())

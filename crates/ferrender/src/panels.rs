@@ -321,7 +321,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 }
             });
             group(ui, "MODIFY", |ui| {
-                if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_) | Dialog::MoveComponent(_)), "Move the selected component, or move, rotate or scale a body (M)").clicked() {
+                if big(ui, icon::ARROWS_OUT_CARDINAL, "Move", matches!(app.dialog, Dialog::Transform(_) | Dialog::MoveComponent(_)) || (app.sketch().is_some() && app.tool == Tool::Move), if app.sketch().is_some() { "Move sketch geometry: drag a point or entity, or select geometry and drag anywhere (M)" } else { "Move the selected component, or move, rotate or scale a body (M)" }).clicked() {
                     app.run(&ctx, Action::Transform);
                 }
                 if big(ui, icon::SPLIT_HORIZONTAL, "Split", matches!(app.dialog, Dialog::Split(_)), "Split a body with a flat face or plane").clicked() { app.run(&ctx, Action::SplitBody); }
@@ -1359,12 +1359,23 @@ fn section(app: &mut App, ctx: &Context) {
     let mut open = true;
     let unit = app.doc().units;
     egui::Window::new("Section Analysis").open(&mut open).resizable(false).pivot(Align2::LEFT_BOTTOM).default_pos(app.vp.left_bottom() + vec2(14.0, -40.0)).show(ctx, |ui| {
+        // Construction planes that are built right now can be cut along too.
+        let planes: Vec<(fr_core::sketch::Id, String)> = app.doc().features.iter().filter(|f| matches!(f.kind, fr_core::doc::FeatureKind::Plane(_)) && app.shown().planes.contains_key(&f.id)).map(|f| (f.id, f.name.clone())).collect();
         let s = &mut app.section;
+        if s.plane.is_some_and(|id| !planes.iter().any(|(p, _)| *p == id)) { s.plane = None; }
         ui.checkbox(&mut s.on, "Cut the view open");
         ui.horizontal(|ui| {
             ui.label("Plane");
             for (i, label) in ["YZ", "XZ", "XY"].iter().enumerate() {
-                ui.selectable_value(&mut s.axis, i, *label);
+                if ui.selectable_value(&mut s.axis, i, *label).clicked() { s.plane = None; }
+            }
+            if !planes.is_empty() {
+                let chosen = s.plane.and_then(|id| planes.iter().find(|(p, _)| *p == id)).map_or("Construction plane…".to_owned(), |(_, name)| name.clone());
+                egui::ComboBox::from_id_salt("section-plane").selected_text(chosen).show_ui(ui, |ui| {
+                    for (id, name) in &planes {
+                        if ui.selectable_label(s.plane == Some(*id), name).clicked() { s.plane = Some(*id); }
+                    }
+                });
             }
         });
         ui.horizontal(|ui| {
