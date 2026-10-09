@@ -1273,6 +1273,53 @@ fn large_meshes_draw_through_the_indexed_path() {
 }
 
 #[test]
+fn the_mesh_menu_decimates_and_thickens_through_dialogs() {
+    let dir = out_dir().join("mesh-dialog");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = sphere_stl(&dir, 20_000);
+    let mut h = harness();
+    h.state_mut().import_stl(&path, fr_core::Unit::Mm);
+    h.run_steps(2);
+    let body = h.state().session.built.bodies[0].id;
+    let before = h.state().session.built.bodies[0].mesh.len();
+    // Decimate to a tenth through the dialog.
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, Action::Mesh(1));
+    let Dialog::Mesh(mut m) = h.state().dialog.clone() else { panic!("the Decimate dialog should open") };
+    assert_eq!(m.body, Some(body), "the only body is picked");
+    m.count = 2000;
+    h.state_mut().dialog = Dialog::Mesh(m);
+    h.state_mut().apply_dialog();
+    h.run_steps(2);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    assert_eq!(app.doc().features.last().unwrap().type_name(), "mesh_decimate");
+    let after = app.session.built.bodies[0].mesh.len();
+    assert!(after < before / 5 && after > 1500, "{before} -> {after}");
+    // Cut it in half (uncapped) and thicken the dome into a solid, 2 mm straight down.
+    h.state_mut().run(&ctx, Action::Mesh(4));
+    let Dialog::Mesh(mut m) = h.state().dialog.clone() else { panic!() };
+    m.choice = 1; // keep the positive side
+    m.flag = false; // no cap
+    h.state_mut().dialog = Dialog::Mesh(m);
+    h.state_mut().apply_dialog();
+    h.run_steps(1);
+    h.state_mut().run(&ctx, Action::Mesh(6));
+    let Dialog::Mesh(m) = h.state().dialog.clone() else { panic!() };
+    assert!(m.flag, "straight down is the default for thickening");
+    h.state_mut().apply_dialog();
+    h.run_steps(2);
+    let app = h.state();
+    assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
+    let b = &app.session.built.bodies[0];
+    assert_eq!(b.mesh.open_edges(), 0, "the thickened dome is closed");
+    assert!(b.mesh.bbox().unwrap().0.z < -1.9);
+    let kinds: Vec<&str> = app.doc().features.iter().map(|f| f.type_name()).collect();
+    assert_eq!(kinds, ["import", "mesh_decimate", "mesh_cut", "mesh_offset"]);
+    save(&mut h, "mesh-dialogs.png");
+}
+
+#[test]
 fn editing_extrusions_preserves_taper_and_through_all() {
     let mut h = state_harness();
     let app = h.state_mut();

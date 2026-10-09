@@ -509,7 +509,17 @@ dropped, neighbouring triangles turned to agree, closed shells turned
 outward) and the toast reports shells, open edges and non-manifold edges.
 Bodies above two million triangles draw a coarse copy while the view moves.
 Bodies can be moved, rotated and scaled, combined with each other, sketched
-on and cut. Export STL asks whether to write millimetres, centimetres or inches;
+on and cut. The Mesh menu edits meshes as timeline steps: Repair (with hole
+filling), Decimate (quadric, or clustering for huge scans), Smooth (Taubin, no
+shrink), Subdivide (Loop or midpoint), Cut by a plane (capped, one side or
+both), Mirror, and Offset / Thicken, which turns an open surface such as a
+relief into a closed printable solid or hollows a closed one to a wall. Relief
+from Image builds a height field from a photo or a depth map, bright pixels
+high, on a slab; inverted and thin it is a lithophane. Applying a mesh
+operation to an exact body makes it a mesh. Over the command API the same
+operations take regions (a sphere, box, plane side, normal cone or connected
+shell) and `mesh_measure` reports shells, open edges, watertightness, volume
+and wall thickness. Export STL asks whether to write millimetres, centimetres or inches;
 slicers read STL as millimetres. Export STEP writes the exact bodies as true
 surfaces for other CAD programs; mesh bodies are left out.
 

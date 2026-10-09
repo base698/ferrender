@@ -82,6 +82,8 @@ A dimension or feature value is `{"expr": "...", "v": 20.0}`: the expression as 
 | `primitive` | `shape` (`{"box": {width, depth, height}}`, `{"cylinder": {diameter, height}}`, `{"sphere": {diameter}}`, `{"cone": {bottom_diameter, top_diameter, height}}`, `{"torus": {major_radius, tube_radius}}`; all values), `position` [3 values], `rotate` [3 values], `op` | |
 | `import` | base64 string (plain form) or `{"blob": "meshes/N.mesh", "triangles": T}` (container) | The plain form is the little-endian `f32` triangle soup of versions 3–8, 36 bytes per triangle, at most 1 000 000 triangles; readers weld it on load. Meshes larger than that only exist in containers. |
 | `transform` | `body`, `translate` [3 values], `rotate` [3 values], `scale` value | Scale about the origin, rotate about X then Y then Z, then translate. |
+| `mesh_op` | `body`, `op`, `region` (optional) | `op` is one of `{"repair": {fill_holes}}`, `{"decimate": {target, method: "quadric"\|"cluster", preserve_boundary}}`, `{"smooth": {iterations, strength}}`, `{"subdivide": {levels, scheme: "loop"\|"midpoint"}}`, `{"cut": {plane, keep: "negative"\|"positive"\|"both", cap}}`, `{"mirror": {plane, weld}}`, `{"offset": {distance value, direction?}}`, `{"extrude_region": {distance value, direction?}}`. `region` is `{"sphere": {centre, radius}}`, `{"box": {lo, hi}}`, `{"side": {plane}}`, `{"normal": {direction, degrees}}` or `{"connected": {seed}}`. Applied to an exact body it makes the body a mesh. |
+| `relief` | `image` (as a sketch's `reference`), `plane`, `width`, `depth`, `base` (values), `resolution`, `invert`, `blur`, `gamma`, `op` | A height field from the image's luminance on the plane; `resolution` cells along the longer side (2–1200). |
 | `combine` | `target`, `tools` [body ids], `op`, `keep_tools` | |
 | `blend` | `body`, `edges` [[x,y,z]], `size` value, `chamfer` (bool), `frame` | A fillet when `chamfer` is false. Edges are named by a point on them; see References. |
 | `shell` | `body`, `faces` [[x,y,z]], `thickness` value, `frame` | |
@@ -113,6 +115,8 @@ Since format 10 a reference also carries a **tag** saying how the face was made,
 | `{"split": {"of": TAG, "n": N}}` | Piece `N` of an earlier face that a later operation cut up. |
 | `{"copy": {"of": TAG, "n": N}}` | The same face on copy `N` of a pattern. |
 
+A plane reference (`split.plane`, `plane.kind.offset.base`, midplane faces, `mesh_op` cuts and mirrors) is `{"origin": "XY"|"XZ"|"YZ"}`, `{"plane": id}`, `{"face": {body, at, frame, tag?}}` or, since format 11, `{"free": PLANE}` with a plane given outright in the owner component's frame.
+
 An edge tag is `{"faces": [TAG, TAG]}`, the two faces it separates, in sorted order. Tags are stored in `blend.tags` (one per entry of `edges`, `null` where the edge had none), `shell.tags` (one per `faces`), `thread.tag`, `text.tag` and the `tag` of a `{"face": ...}` plane reference. On rebuild a pick is resolved at one of three levels, which `get_object_info` reports as `resolved`: `tag` (a face or edge with the very tag; among equals, the nearest to the point), `origin` (one with the same tag ignoring split and copy ordinals, nearest to the point), `position` (the pre-0.4 search). A reference with no tag learns the tag of what it found on its first successful build, so files from before format 10 gain tags as they are opened, and are stamped 10 when next saved. A pick whose tagged face has been removed altogether fails with the usual "no longer there" error rather than relocating.
 
 ## Version table
@@ -129,6 +133,7 @@ An edge tag is `{"faces": [TAG, TAG]}`, the two faces it separates, in sorted or
 | 8 | 0.3.0 | `split` and `remove`. |
 | 9 | 0.4.0 | The ZIP container. A plain JSON file is never stamped 9; only `manifest.json`'s `min_reader` carries it. |
 | 10 | 0.4.0 | Face and edge tags on references (`blend.tags`, `shell.tags`, `thread.tag`, `text.tag`, plane `face.tag`). |
+| 11 | 0.4.0 | `mesh_op` and `relief` features; the `free` plane reference. |
 
 The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". There is no migration code: every version's documents deserialize directly, with absent fields taking their defaults. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 
