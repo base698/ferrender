@@ -595,7 +595,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_) | Dialog::Script(_))
+        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_))
     }
 }
 
@@ -2386,7 +2386,7 @@ impl App {
         let enter = ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::Enter));
         if typing {
             // Enter in one of a dialog's own boxes confirms the dialog.
-            if enter && self.dialog.has_preview() && self.value_edit.is_none() && !self.show_params && !self.ai.open && self.rename.is_none() {
+            if enter && (self.dialog.has_preview() || matches!(self.dialog, Dialog::Script(_))) && self.value_edit.is_none() && !self.show_params && !self.ai.open && self.rename.is_none() {
                 self.update_preview();
                 self.apply_dialog();
             }
@@ -2415,7 +2415,7 @@ impl App {
             self.run(ctx, Action::Delete);
         }
         if key(Key::Enter) {
-            if self.dialog.has_preview() {
+            if self.dialog.has_preview() || matches!(self.dialog, Dialog::Script(_)) {
                 self.apply_dialog();
             } else {
                 self.cancel_tool();

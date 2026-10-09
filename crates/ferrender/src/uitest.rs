@@ -1345,7 +1345,10 @@ fn scripts_run_from_the_menu_as_chips_that_rerun_detach_and_delete() {
     assert_eq!(d.fields.iter().map(|f| f.input.kind.as_str()).collect::<Vec<_>>(), ["integer", "length", "length", "length"]);
     d.fields[0].text = "12".into();
     h.state_mut().dialog = Dialog::Script(d);
-    h.state_mut().apply_dialog();
+    h.run_steps(3);
+    assert!(h.state().preview.is_none(), "scripts must not use modeling previews");
+    h.get_by_label("Run").click();
+    h.run_steps(1);
     assert!(h.state().scripts.busy(), "the run is on a worker thread");
     wait_for_script(&mut h);
     let app = h.state();
@@ -1371,7 +1374,9 @@ fn scripts_run_from_the_menu_as_chips_that_rerun_detach_and_delete() {
     assert_eq!(d.fields[0].text, "12", "the last inputs are remembered");
     d.fields[0].text = "30".into();
     h.state_mut().dialog = Dialog::Script(d);
-    h.state_mut().apply_dialog();
+    h.run_steps(3);
+    h.get_by_label("Run again").click();
+    h.run_steps(1);
     wait_for_script(&mut h);
     let app = h.state();
     assert!(app.session.built.errors.is_empty(), "{:?}", app.session.built.errors);
@@ -1399,7 +1404,8 @@ fn scripts_run_from_the_menu_as_chips_that_rerun_detach_and_delete() {
         let gear = app.scripts.entries.iter().position(|e| e.file_name == "spur-gear.rhai").unwrap();
         app.open_script(gear);
     }
-    h.state_mut().apply_dialog();
+    h.run_steps(3);
+    key(&mut h, Key::Enter);
     wait_for_script(&mut h);
     assert_eq!(h.state().doc().features.len(), 5);
     let chip3 = h.state().doc().features.iter().find(|f| matches!(f.kind, fr_core::FeatureKind::ScriptRun(_))).unwrap().id;
