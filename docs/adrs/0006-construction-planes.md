@@ -1,6 +1,32 @@
-# Construction planes in Ferrender 0.3
+# ADR 0006: Construction planes as features
 
-Status: **implemented in Ferrender 0.3.0**, alongside [components](COMPONENTS_0.3.md). The specification below describes behavior and test cases. The [0.3.0 manual test plan](TEST_PLAN_0.3.0.md) records the scope of manual acceptance; its checklist remains available for regression testing.
+| | |
+|---|---|
+| **Status** | Accepted; shipped in 0.3.0 |
+| **Date** | 2026-10-08 |
+| **Related** | [ADR 0005](0005-components.md) ships alongside |
+
+## Context
+
+A sketch could start only on an origin plane, a flat face, or a one-shot offset that forgot where it came from, so a plane between two faces or through three points had to be approximated by hand.
+
+## Decision
+
+Construction planes are features of three kinds: Offset from a face, origin plane or plane by a distance; Midplane between two flat faces; and Three Points through vertices, sketch points or typed coordinates. They are resolved during the rebuild in their component's frame, drawn as a rectangle sized to what they reference, and sketches attach to them and follow them. References to faces learn the tags of what they found.
+
+## Consequences
+
+Sketches follow the geometry that defines their plane. Planes are also the natural handle for sections and splits; 0.4.0 added them to Section Analysis. Resolving a plane for its preview was later made independent of rebuilding the bodies.
+
+---
+
+## Original document
+
+The design document as written for the release, kept in full. Headings are demoted one level; links were updated when the documents were reorganised on 9 October 2026.
+
+## Construction planes in Ferrender 0.3
+
+Status: **implemented in Ferrender 0.3.0**, alongside [components](0005-components.md). The specification below describes behavior and test cases. The [0.3.0 manual test plan](../releases/0.3/test-plan.md) records the scope of manual acceptance; its checklist remains available for regression testing.
 
 In 0.2.2 a sketch could only start on an origin plane, on a flat face, or on a one-shot offset of either (the **Offset** field in the New Sketch dialog copies the plane and forgets where it came from). A construction plane is a plane that is a feature in its own right: it is visible in the viewport, listed in the browser, built from references that it keeps, and re-evaluated on every rebuild. A sketch drawn on it follows it when the referenced face moves, a parameter changes, or the three points it passes through are edited.
 
@@ -12,9 +38,9 @@ Ferrender 0.3.0 includes three kinds:
 | **Midplane** | two flat faces | the plane halfway between parallel faces, or the bisecting plane of faces that meet at an angle |
 | **Three points** | three points: body vertices, sketch points or typed coordinates | the plane through them |
 
-## What the user sees
+### What the user sees
 
-### Creating a plane
+#### Creating a plane
 
 **Model → Construction Plane** (toolbar button beside New Sketch; shortcut unassigned) opens one dialog with a Kind selector: Offset, Midplane, Three Points. The dialog's prompt line in the viewport changes with the kind, like the Extrude dialog does.
 
@@ -26,7 +52,7 @@ Ferrender 0.3.0 includes three kinds:
 
 OK adds a `PlaneN` feature to the timeline. Enter confirms, Escape cancels, as in the other dialogs.
 
-### Using a plane
+#### Using a plane
 
 - **New Sketch** (the `PickPlane` dialog) says "Choose a plane, click a flat face, or click a construction plane." Clicking a plane in the viewport or in the browser's `Construction` folder starts the sketch on it. The existing Offset field stays as a quick, non-parametric shortcut for origin planes and faces. When selecting a construction plane it must be blank or zero, so the new sketch always retains its attachment. A nonzero value is refused with an instruction to clear it or create another Offset construction plane.
 - The plane is drawn as a translucent rectangle with an outline and a small name label. It is sized to its references (an offset of a face covers that face's outline with a margin; a midplane covers both faces; a three-point plane covers its triangle with a margin; a plane based on an origin plane is sized to the model's bounds, or 50 mm when the model is empty). The side its normal faces is shaded a little lighter, so Offset's sign and Midplane's Flip are legible.
@@ -34,11 +60,11 @@ OK adds a `PlaneN` feature to the timeline. Enter confirms, Escape cancels, as i
 - Double-click the chip to edit any of the inputs; right-click for rename, suppress and delete like other features.
 - Edges of a construction plane are not pickable for dimensions; a plane is not geometry.
 
-### What follows a plane
+#### What follows a plane
 
 A sketch created on a plane remembers it (`Sketch.on`). On rebuild the sketch's plane is replaced by the plane's current value before anything uses it, so extrudes, revolves and text on the sketch move with it. Face references inside a plane use the same point-and-bounds re-finding as fillets, shells and text (`exact::candidates`), so the plane survives the body changing size and reports an error when the face is gone.
 
-## Data model (`crates/fr-core`)
+### Data model (`crates/fr-core`)
 
 ```rust
 // doc.rs
@@ -93,7 +119,7 @@ pub enum FeatureKind {
 
 `Feature::type_name` returns `"plane"`, so auto-names are `Plane1`, `Plane2`. Icon: a square outline (`icon::SQUARE` or `icon::FRAME_CORNERS`).
 
-### Resolving each kind
+#### Resolving each kind
 
 All of this is in a new `crates/fr-core/src/planes.rs` with pure functions that take resolved inputs, plus `Document::resolve_plane(&self, f: &Feature, bodies: &[Body], planes: &BTreeMap<Id, Plane>) -> Result<Plane, String>` that looks the references up.
 
@@ -111,7 +137,7 @@ All of this is in a new `crates/fr-core/src/planes.rs` with pure functions that 
 
 Every result goes through `Sketch::new(plane).validate()`'s plane check (finite, unit, perpendicular axes) before it is published.
 
-### Display rectangle
+#### Display rectangle
 
 Computed once per rebuild and stored in `Built.planes`:
 
@@ -120,7 +146,7 @@ Computed once per rebuild and stored in `Built.planes`:
 - Midplane: both faces' outlines projected onto the result, bounding box, margin.
 - Three points: the triangle's bounding box in plane coordinates, margin, at least 10 mm.
 
-## Rebuild changes
+### Rebuild changes
 
 `Document::rebuild` currently evaluates values and solves every sketch in a first pass, then builds bodies in a second pass that skips sketches. Planes depend on bodies (a face) and sketches depend on planes, so plane resolution and sketch plane assignment have to happen **in timeline order inside the body pass**:
 
@@ -140,9 +166,9 @@ Value evaluation in the first pass covers `PlaneKind::Offset.distance` (`Kind::L
 
 Rollback and suppression work without special cases: a plane rolled past is not in `built.planes`, so a sketch on it errors with "its plane is rolled back or suppressed", and features on that sketch fail.
 
-With [components](COMPONENTS_0.3.md) in place, a plane is owned by a component like any feature, `PlaneRef::Origin` means the owning component's origin, and references into other components' bodies are allowed (the body is found by id). Resolution runs in local coordinates like every other feature.
+With [components](0005-components.md) in place, a plane is owned by a component like any feature, `PlaneRef::Origin` means the owning component's origin, and references into other components' bodies are allowed (the body is found by id). Resolution runs in local coordinates like every other feature.
 
-## App changes (`crates/ferrender`)
+### App changes (`crates/ferrender`)
 
 - `Dialog::Plane(PlaneDlg { editing, kind, base, faces, points, text (distance), pick_to, flip, error })`.
 - `Action::Plane`, menu item, toolbar button, `panels::dialogs` arm with the kind selector and per-kind rows; reuse `value_row` for Distance, `confirm` for OK/Cancel.
@@ -154,7 +180,7 @@ With [components](COMPONENTS_0.3.md) in place, a plane is owned by a component l
 - Status bar prompts for each dialog state, in `view::viewport`'s prompt table.
 - Edit: `App::edit_feature` for `Plane` opens the dialog prefilled; `FeatureKind::Plane` added to the edit-feature match in `app.rs`.
 
-## API and MCP (`api.rs`)
+### API and MCP (`api.rs`)
 
 ```
 {"op":"create_plane","kind":"offset","base":"XY","distance":"10 mm"}
@@ -175,13 +201,13 @@ With [components](COMPONENTS_0.3.md) in place, a plane is owned by a component l
 - Sketch query `plane` reports the resolved world frame; `local_plane` explicitly reports the owner-local frame. Both origins use document units; axes and normals are unit vectors. A plane feature query likewise reports its resolved world frame.
 - `REFERENCE` gains a short "Construction planes" block next to `create_sketch`.
 
-## File format
+### File format
 
 `io::FORMAT_VERSION` becomes 5 (shared with components). `to_json` writes 5 when any feature is a `Plane` or any sketch has `on` set. Old files have no planes and load unchanged.
 
 Validation (`validation.rs`): plane references must point at earlier features of the right type (face → any body-making feature id or pattern copy id; plane → an earlier `Plane`; sketch point → an earlier sketch and an existing point in it); `distance` expression length and finiteness; `at`/`frame` finiteness with valid bounds (reuse the text check); `Sketch.on` must name an earlier `Plane`. A dangling `on` is a loadable timeline error, not a load failure, consistent with other feature dependencies.
 
-## Tests
+### Tests
 
 Core (`crates/fr-core/tests/planes.rs`):
 
@@ -202,7 +228,7 @@ App (`uitest.rs`):
 - Three points by clicking three vertices; the plane is drawn and a sketch can start on it.
 - Eye in the `Construction` folder hides and shows the plane; finishing a sketch on a plane hides the plane unless its eye was toggled by hand.
 
-## Manual acceptance (to perform, not claims)
+### Manual acceptance (to perform, not claims)
 
 1. Make a 40 × 20 × 10 mm box. Construction Plane → Offset, click the top face, type `5 mm`, OK. The plane floats 5 mm above the box and is listed under Construction. New Sketch, click the plane, draw a 6 mm circle, Extrude 3 mm Join. The post stands on the plane and reaches down to nothing: it is a separate body unless it touches. Change the extrude to −5 mm: it joins to the box.
 2. Edit the box's extrude to 20 mm tall. The plane and the post move up with the top face.
@@ -214,19 +240,19 @@ App (`uitest.rs`):
 8. Save, reopen: planes, visibility and the sketches' attachments are preserved. Open the file in 0.2.2: it refuses with the "newer version" message.
 9. Over MCP: `create_plane` of each kind, then `create_sketch` on the result and an extrude, with a screenshot to confirm.
 
-## Work breakdown
+### Work breakdown
 
 1. **Core model and resolution.** `PlaneRef`, `PointRef`, `PlaneKind`, `ConstructionPlane`, `planes.rs` with the three resolvers and rectangle sizing, `Sketch.on`, rebuild reordering, sketch-error propagation into `tool()`, validation, version 5. Core tests.
 2. **API.** `create_plane`, `edit_feature`, `create_sketch` by plane id, object info, visibility, reference text. API tests.
 3. **Viewport and browser.** Draw planes, pick them in `PickPlane`, `Construction` folder with eyes and auto-hide, chip icon, feature menu.
 4. **Dialog.** `PlaneDlg` with the three kinds; shared distance arrow; face, vertex and sketch-point picking; To face; live preview. UI tests.
-5. **Docs.** README (Reference → a `Construction planes` entry under Model, and the `Faces` paragraph), tutorial touch-up if a step benefits, `docs/releases/0.3.0.md`, this plan updated to match what shipped.
+5. **Docs.** README (Reference → a `Construction planes` entry under Model, and the `Faces` paragraph), tutorial touch-up if a step benefits, `docs/releases/0.3/0.3.0-release-notes.md`, this plan updated to match what shipped.
 
-### Order relative to components
+#### Order relative to components
 
 Both plans change `Document::rebuild` and the New Sketch picker. Do planes first: step 1 here is the smaller rework of the rebuild loop, and the components work then adds owners and scoping to a loop that already walks planes and sketches in order. Nothing in the plane model depends on components; `PlaneRef::Origin` simply means "the owner's origin" once owners exist.
 
-## Follow-ups this enables (not 0.3.0)
+### Follow-ups this enables (not 0.3.0)
 
 - Extrude **To face** could accept a construction plane as the target.
 - Pattern **Mirror** across a construction plane, which is the open TODO item "Mirror a body across an arbitrary plane".

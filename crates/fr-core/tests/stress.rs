@@ -56,7 +56,7 @@ fn files() -> Vec<PathBuf> {
     }
 }
 
-/// Ceilings per million triangles, generous enough for CI machines; the real targets are in docs/0.4-release.md.
+/// Ceilings per million triangles, generous enough for CI machines; the real targets are in docs/releases/0.4/plan.md.
 const IMPORT_S_PER_M: f64 = 6.0;
 const PICK_MS_PER_M: f64 = 60.0;
 const SAVE_OPEN_S_PER_M: f64 = 8.0;

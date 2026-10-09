@@ -1,6 +1,6 @@
 # Native releases
 
-A version tag such as `v0.1.0` runs `.github/workflows/release.yml`. The tag must agree with the app's Cargo version and have matching notes in `docs/releases/`. The workflow publishes only after all three native builds, tests and packaging checks succeed.
+A version tag such as `v0.1.0` runs `.github/workflows/release.yml`. The tag must agree with the app's Cargo version and have matching notes at `docs/releases/<major.minor>/<version>-release-notes.md`. The workflow publishes only after all three native builds, tests and packaging checks succeed.
 
 Targets are Apple Silicon macOS, Intel macOS, and Linux x86-64 (Ubuntu 24.04 / glibc 2.39 baseline). The macOS runners are `macos-15` and `macos-15-intel`, as listed in [GitHub's runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners). macOS apps are ad-hoc signed; notarization requires separately configured Apple credentials.
 

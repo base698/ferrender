@@ -215,25 +215,25 @@ It is early, and smaller than what it imitates: no joints or linked component in
 
 ## Additions in 0.4.0
 
-**Ferrender 0.4.0** makes meshes a first-class body kind: indexed scans of millions of triangles support fast imports, BVH picking and a coarse display while orbiting, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans reject invalid inputs or results; complex scan intersections can still be refused. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and an authenticated local geometry cache that can skip rebuilding. Foreign or modified supported designs rebuild, while newer unsupported files are visibly unverified previews. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline. See the [0.4 review](docs/REVIEW_0.4.0.md) for measured test coverage, security boundaries and known limitations.
+**Ferrender 0.4.0** makes meshes a first-class body kind: indexed scans of millions of triangles support fast imports, BVH picking and a coarse display while orbiting, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans reject invalid inputs or results; complex scan intersections can still be refused. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and an authenticated local geometry cache that can skip rebuilding. Foreign or modified supported designs rebuild, while newer unsupported files are visibly unverified previews. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline. See the [0.4 review](docs/releases/0.4/review.md) for measured test coverage, security boundaries and known limitations.
 
 To walk through an exported STL in a browser or a WebXR headset, see the separate [walkthrough page](web/walkthrough/README.md).
 
-See the [0.4.0 release notes](docs/releases/0.4.0.md), the [manual test plan](docs/TEST_PLAN_0.4.0.md), the [file format](docs/FILE_FORMAT.md), the [face relief tutorial](docs/tutorials/FACE_RELIEF_0.4.md) and the [0.4 plan with what shipped and what did not](docs/0.4-release.md).
+See the [0.4.0 release notes](docs/releases/0.4/0.4.0-release-notes.md), the [manual test plan](docs/releases/0.4/test-plan.md), the [file format](docs/FILE_FORMAT.md), the [face relief tutorial](docs/tutorials/FACE_RELIEF_0.4.md) and the [0.4 plan with what shipped and what did not](docs/releases/0.4/plan.md).
 
 ## Modeling additions in 0.3.0
 
 **Ferrender 0.3.0** adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes. Native primitives add editable Box, Cylinder, Sphere, Cone and Torus features. Linear patterns support two directions for rectangular grids. It also adds Remove/Split/Join Bodies, graphical Move and primitive placement, pattern span handles, and sticky sketch capture.
 
-Use the [0.3.0 manual test plan](docs/TEST_PLAN_0.3.0.md) for numbered checks and the [release notes](docs/releases/0.3.0.md) for scope and validation status. The [components specification](docs/COMPONENTS_0.3.md) and [construction planes specification](docs/CONSTRUCTION_PLANES_0.3.md) describe the intended behavior and deferred work. The [primitive guide](docs/PRIMITIVES_0.3.md) explains dimensions, origins and placement. The [direct modeling guide](docs/DIRECT_MODELING_0.3.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require 0.3.0 or later. Check About for the exact version and source commit.
+Use the [0.3.0 manual test plan](docs/releases/0.3/test-plan.md) for numbered checks and the [release notes](docs/releases/0.3/0.3.0-release-notes.md) for scope and validation status. The [components specification](docs/adrs/0005-components.md) and [construction planes specification](docs/adrs/0006-construction-planes.md) describe the intended behavior and deferred work. The [primitive guide](docs/adrs/0004-solid-primitives.md) explains dimensions, origins and placement. The [direct modeling guide](docs/adrs/0007-direct-modeling.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require 0.3.0 or later. Check About for the exact version and source commit.
 
 ## Sketching improvements in 0.2
 
-The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](docs/SKETCHING_0.2.md) for the controls, limits, and checks. The [30 mm bishop tutorial](BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](docs/tutorials/BISHOP_0.1.md) is preserved.
+The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](docs/adrs/0001-sketching-tools.md) for the controls, limits, and checks. The [30 mm bishop tutorial](BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](docs/tutorials/BISHOP_0.1.md) is preserved.
 
-Version 0.2.2 improves three-point arc placement, dimensions on existing geometry, persistent Shift angle locks, and direct reference-image movement and scaling. See the [0.2.2 guide and focused retest plan](docs/SKETCHING_0.2.2.md).
+Version 0.2.2 improves three-point arc placement, dimensions on existing geometry, persistent Shift angle locks, and direct reference-image movement and scaling. See the [0.2.2 guide and focused retest plan](docs/adrs/0002-sketching-fixes.md).
 
-Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System follows the OS, and your selection is remembered across launches. See the [appearance guide and manual test plan](docs/APPEARANCE.md).
+Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System follows the OS, and your selection is remembered across launches. See the [appearance guide and manual test plan](docs/adrs/0003-appearance-follows-the-system.md).
 
 ## Get started
 
@@ -396,7 +396,7 @@ and the profile cannot twist or change size along the way.
 
 Choose **Model → Primitives → Box, Cylinder, Sphere, Cone or Torus**, or use the **Primitive** toolbar button. Set dimensions, position, optional rotation, and New Body / Join / Cut / Intersect. Dimensions and placement accept units and named parameters. Place in view chooses a position on an origin plane, flat face or construction plane; optional alignment and colored arrows/rings refine it. Placement captures numeric values once. Double-click the timeline feature to edit it; no sketch is required.
 
-Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](docs/PRIMITIVES_0.3.md) includes examples and limits.
+Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](docs/adrs/0004-solid-primitives.md) includes examples and limits.
 
 These are exact solids that support subsequent sketches, fillets, holes, transforms, patterns, Combine and STEP export. New Body is the default, so touching primitives stay separate until you choose Join or Combine.
 
@@ -410,7 +410,7 @@ or ambiguous reference reports an error instead of choosing an unrelated face.
 `get_object_info` lists these tags and how picks resolved. Old files learn modern
 tags when the saved pick uniquely identifies its original face. Geometry without
 unique provenance uses a conservative signature and may need reselection after
-its shape changes; see the [review](docs/REVIEW_0.4.0.md) for the remaining limits.
+its shape changes; see the [review](docs/releases/0.4/review.md) for the remaining limits.
 
 ### Exact and mesh bodies
 

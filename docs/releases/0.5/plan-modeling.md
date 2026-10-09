@@ -1,6 +1,6 @@
 # Modeling and rebuild cost in 0.5: what the 0.4.0 evaluation leaves open
 
-Status: **a note, not a plan.** Written 2026-10-09 against `main` at `1c77a50`, using the 0.4.0 build at `d546ca0`. It reads [the large-assembly evaluation](evaluating%200.4.0.md) together with two small headless probes run afterwards, and turns them into a list for 0.5 planning, with the few items that could instead be a 0.4.x patch marked as such. Nothing here is committed. The companion for scripting is [0.5-scripts.md](0.5-scripts.md).
+Status: **plan for 0.5, proposed; nothing here is committed.** Written 2026-10-09 against `main` at `1c77a50`, using the 0.4.0 build at `d546ca0`. It reads [the large-assembly evaluation](../0.4/evaluation.md) together with two small headless probes run afterwards, and turns them into a list for 0.5 planning, with the few items that could instead be a 0.4.x patch marked as such. Nothing here is committed. The companion for scripting is [0.5-scripts.md](plan-scripts.md).
 
 Probe evidence (scripts, designs, screenshots, logs) is in the private archive under `ferrender/testing/0.4-review/evidence/rebuild-and-pumpkin-probes/`, indexed from that folder's README. The reference photograph used for the pumpkin is personal and is not in the archive or the repository.
 
@@ -24,8 +24,8 @@ Rebuild is quadratic (about 4× per doubling). Script authoring is cubic (about 
 
 ### Where it is in the code
 
-- [doc.rs](../crates/fr-core/src/doc.rs), `Document::rebuild_with`: before applying each feature, `let mut bodies = built.bodies.clone();` copies every body built so far so that a failed feature can leave the list untouched. `Body` owns its OpenCascade solids, display mesh, edges and tags; cadrum's `Solid::clone` is an OCCT deep copy of the topology. So a rebuild performs features × bodies deep copies.
-- [doc.rs](../crates/fr-core/src/doc.rs), `Session::edit`: every edit snapshots the document for undo and then rebuilds everything. [api.rs](../crates/fr-core/src/api.rs) routes `set_visible`, `activate_component`, renaming and parameter deletion through it, so a visibility toggle costs a full rebuild.
+- [doc.rs](../../../crates/fr-core/src/doc.rs), `Document::rebuild_with`: before applying each feature, `let mut bodies = built.bodies.clone();` copies every body built so far so that a failed feature can leave the list untouched. `Body` owns its OpenCascade solids, display mesh, edges and tags; cadrum's `Solid::clone` is an OCCT deep copy of the topology. So a rebuild performs features × bodies deep copies.
+- [doc.rs](../../../crates/fr-core/src/doc.rs), `Session::edit`: every edit snapshots the document for undo and then rebuilds everything. [api.rs](../../../crates/fr-core/src/api.rs) routes `set_visible`, `activate_component`, renaming and parameter deletion through it, so a visibility toggle costs a full rebuild.
 - Scripts and the MCP batch go through the same path once per call.
 
 ### What closes it
@@ -36,7 +36,7 @@ Rebuild is quadratic (about 4× per doubling). Script authoring is cubic (about 
 
 **c. Incremental rebuild.** 0.5 work, the large item. Keep each feature's output keyed by the feature's serialized form plus the keys of the bodies it consumed; an edit at feature k reuses every stored output whose inputs are unchanged. Components make this natural, since most of the house is hundreds of independent small histories. Script re-runs and timeline rollback get it for free. This is what turns authoring from cubic to linear, and it should be designed together with (a), because (a) decides what a "body output" is.
 
-**d. Cache capture that explains itself and scales.** [cache.rs](../crates/fr-core/src/cache.rs) returns no cache above `MAX_CACHE_BYTES` (32 MiB) and the save response did not say so; it now does, and for the house it says "the geometry is over the 32 MiB cache limit", which confirms the evaluation's reading. Smallest fix: report the reason and the attempted size in the save result and the UI. Larger: a budget on disk rather than a fixed limit, keeping the existing CRC, authentication and foreign-file rules.
+**d. Cache capture that explains itself and scales.** [cache.rs](../../../crates/fr-core/src/cache.rs) returns no cache above `MAX_CACHE_BYTES` (32 MiB) and the save response did not say so; it now does, and for the house it says "the geometry is over the 32 MiB cache limit", which confirms the evaluation's reading. Smallest fix: report the reason and the attempted size in the save result and the UI. Larger: a budget on disk rather than a fixed limit, keeping the existing CRC, authentication and foreign-file rules.
 
 **Done in 0.4.0 (9 October, after this note was first written):** (a) as a journal in `rebuild_with` that copies a body only when a feature first changes or removes it: 400 boxes rebuild in 0.33 s instead of 3.64 s, generating them by script takes 31 s instead of 476 s, and `ferrender check --rebuild` on the house takes 5.3 s instead of 21.5 s on the same Mac; (b) for showing and hiding, activation, names, and undo/redo of those steps; and the reporting half of (d) as `cache_skipped` in the save result and the app's save message. The rebuild cost that remains is the genuine geometry work plus the per-call rebuild of the whole prefix, which is (c). (d)'s budget half belongs with (c).
 
@@ -64,7 +64,7 @@ With these, the pumpkin is three sections lofted, a helix-and-spline stem swept 
 
 ## 3. Materials and appearance
 
-Today the viewport draws every body in one grey with a half-Lambert light and a fixed 0.85 alpha ([gpu.rs](../crates/ferrender/src/gpu.rs)). The design has no colour field; [APPEARANCE.md](APPEARANCE.md) covers only the light/dark theme. The evaluation's medium item (large assemblies are hard to read in uniform grey) and the pumpkin's translucent mottled glass are the two ends of the same gap.
+Today the viewport draws every body in one grey with a half-Lambert light and a fixed 0.85 alpha ([gpu.rs](../../../crates/ferrender/src/gpu.rs)). The design has no colour field; [APPEARANCE.md](../../adrs/0003-appearance-follows-the-system.md) covers only the light/dark theme. The evaluation's medium item (large assemblies are hard to read in uniform grey) and the pumpkin's translucent mottled glass are the two ends of the same gap.
 
 A staged version that keeps geometry untouched:
 
@@ -86,7 +86,7 @@ cadrum's `color` feature (per-face colour map on a solid, on by default) is avai
 ## 5. Suggested order
 
 1. Done before 0.4.0 shipped: section 1 (a), (b), the cache reason, and the `"edges": "all"` bug (2.4). The evaluation's follow-up checks 1 and 2 on the house itself remain to be rerun on the release build.
-2. Decide incremental rebuild (1c) and cache budget (1d) with [the scripts isolation decision](0.5-scripts.md#1-isolation-the-one-that-changes-the-architecture); they share the question of what a feature's output is.
+2. Decide incremental rebuild (1c) and cache budget (1d) with [the scripts isolation decision](plan-scripts.md#1-isolation-the-one-that-changes-the-architecture); they share the question of what a feature's output is.
 3. Loft, then 3-D sweep paths with twist and scale, then n-point splines (section 2). The pumpkin script in the archive is the acceptance model: it should shrink to about five features and rebuild in well under a second.
 4. Per-component appearance (3.1), then the shading model (3.2).
 5. Section 4 as time allows, reparenting and body naming first.

@@ -1,8 +1,34 @@
-# Solid primitives in Ferrender 0.3
+# ADR 0004: Solid primitives as editable features
 
-Primitives are part of the **Ferrender 0.3.0 release**. They create an editable solid directly, without drawing a sketch first. Human acceptance checks are in [tests 18–25 of the manual test plan](TEST_PLAN_0.3.0.md#solid-primitives).
+| | |
+|---|---|
+| **Status** | Accepted; shipped in 0.3.0 |
+| **Date** | 2026-10-08 |
+| **Related** | [ADR 0007](0007-direct-modeling.md) places them in the view |
 
-## Create a solid
+## Context
+
+Every solid had to start as a sketch, even a plain block or a pin, and a model made of simple blocks was slow to build and hard to edit.
+
+## Decision
+
+Box, cylinder, sphere, cone or frustum and torus are features that create exact kernel solids directly, with sizes as expressions, a position and a rotation, and the usual New, Join, Cut and Intersect operations into the active component. Positions have fixed meanings per shape: a box's minimum corner, a cylinder's base centre, a sphere's centre. A primitive is edited from the timeline like any feature and can be patterned.
+
+## Consequences
+
+Blocks, pins and bosses need no sketch, and the house evaluation of 0.4.0 built most of its furniture from them. Dimensions are limited to 10 000 mm, which a building-scale floor exceeds; the 0.5 modeling plan records it.
+
+---
+
+## Original document
+
+The design document as written for the release, kept in full. Headings are demoted one level; links were updated when the documents were reorganised on 9 October 2026.
+
+## Solid primitives in Ferrender 0.3
+
+Primitives are part of the **Ferrender 0.3.0 release**. They create an editable solid directly, without drawing a sketch first. Human acceptance checks are in [tests 18–25 of the manual test plan](../releases/0.3/test-plan.md#solid-primitives).
+
+### Create a solid
 
 Choose **Model → Primitives → Box, Cylinder, Sphere, Cone, or Torus**. The **Primitive** toolbar button opens Box; the dialog's **Shape** list switches to another shape.
 
@@ -18,9 +44,9 @@ Enter the dimensions and Position X/Y/Z. The preview updates before you press **
 
 The torus's major radius runs from its center to the center of the tube. Its outside diameter is `2 × (major radius + tube radius)`, and its hole diameter is `2 × (major radius − tube radius)`. The default torus therefore has an outside diameter of 40 mm, a hole diameter of 20 mm, and a height of 10 mm.
 
-Position and rotation use the **active component's coordinates**. Rotation happens about the shape's origin, first X, then Y, then Z, followed by Position. Moving the whole component moves the primitive with it. Use **Place in view** to click a position on XY, XZ, YZ, a flat face, or a construction plane. **Align** points the shape's local +Z along the chosen plane's normal; turn it off to keep the current rotation. After placement, drag the colored X/Y/Z arrows or rotation rings to refine it. Face/plane placement captures numeric values once: it does not attach the primitive to that reference. See the [direct modeling guide](DIRECT_MODELING_0.3.md) for handle directions, fallback controls, and transaction behavior.
+Position and rotation use the **active component's coordinates**. Rotation happens about the shape's origin, first X, then Y, then Z, followed by Position. Moving the whole component moves the primitive with it. Use **Place in view** to click a position on XY, XZ, YZ, a flat face, or a construction plane. **Align** points the shape's local +Z along the chosen plane's normal; turn it off to keep the current rotation. After placement, drag the colored X/Y/Z arrows or rotation rings to refine it. Face/plane placement captures numeric values once: it does not attach the primitive to that reference. See the [direct modeling guide](0007-direct-modeling.md) for handle directions, fallback controls, and transaction behavior.
 
-## Choose the operation
+### Choose the operation
 
 **New Body** is the default and creates a separate body, even when it overlaps another body. **Join**, **Cut**, and **Intersect** operate on bodies in the active component. To combine bodies from different components, use the separate Combine tool.
 
@@ -28,7 +54,7 @@ For a simple cut, first create a 20 mm box. Add a cylinder with diameter `6 mm`,
 
 Dimensions must be between **0.001 and 10,000 mm**, except that one cone end may have diameter zero. Both cone ends cannot be zero; exactly equal diameters produce a cylinder. The torus's major radius must exceed its tube radius by at least **0.001 mm**. Each Position coordinate must stay within **−1,000,000 to +1,000,000 mm**. Invalid expressions or dimensions should show an error and leave the saved model unchanged until corrected.
 
-## Edit and reuse
+### Edit and reuse
 
 Each primitive adds one timeline feature. Double-click its chip to reopen its dimensions, placement and operation. Accepting an edit updates that same feature. Its shape type stays fixed; create a new primitive to use a different shape. Undo and Redo should restore the whole change, including any parameter defined while making it.
 

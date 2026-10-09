@@ -1,4 +1,29 @@
-# Appearance in Ferrender 0.2.1
+# ADR 0003: Appearance follows the system, with a remembered override
+
+| | |
+|---|---|
+| **Status** | Accepted; shipped in 0.2.1 |
+| **Date** | 2026-10-07 |
+
+## Context
+
+Ferrender drew one light theme. Users on dark desktops asked for the app to follow the operating system, and some wanted a fixed choice regardless of it.
+
+## Decision
+
+View › Appearance offers System, Light and Dark. System reads the macOS appearance directly and the desktop portal on Linux, and updates while the app is open; Light and Dark are explicit overrides. The choice is saved for the next launch. Appearance covers chrome, sketch drawing, the timeline and the viewport background, and never the document, images or exports.
+
+## Consequences
+
+Theme is a display concern separate from the design, which is the line later drawn again for per-component appearance and materials in the 0.5 modeling plan. Native OS-event delivery and file-picker appearance need desktop checks, which the record's manual plan lists.
+
+---
+
+## Original document
+
+The design document as written for the release, kept in full. Headings are demoted one level; links were updated when the documents were reorganised on 9 October 2026.
+
+## Appearance in Ferrender 0.2.1
 
 Choose **View → Appearance → System, Light, or Dark**.
 
@@ -10,7 +35,7 @@ The setting covers menus, panels, dialogs, sketch geometry and dimensions, the t
 
 System mode reads the macOS appearance directly and uses the desktop settings portal on Linux. Allow a few seconds for an OS change to appear. If the desktop does not provide an appearance preference, Ferrender uses Light. You can always select Light or Dark explicitly.
 
-## Manual test plan
+### Manual test plan
 
 Save any open work before restarting. Use **Help → About Ferrender → Copy build info** when reporting a failure. Check that the version is **0.2.1** and include its commit.
 

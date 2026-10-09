@@ -1,12 +1,38 @@
-# Sketching fixes in Ferrender 0.2.2
+# ADR 0002: Sketching fixes from the 0.2 manual tests
+
+| | |
+|---|---|
+| **Status** | Accepted; shipped in 0.2.2 |
+| **Date** | 2026-10-08 |
+| **Related** | Refines [ADR 0001](0001-sketching-tools.md) |
+
+## Context
+
+The 0.2.0 manual tests found four points of friction: the three-point arc asked for the bulge before the second endpoint, existing geometry could not be dimensioned after the fact, an angle lock vanished when Shift was released, and a reference image could only be moved through its dialog.
+
+## Decision
+
+Three-point arcs take their endpoints first and the bulge last. Dimension applies to an existing line, circle or arc, and to pairs for angles and spacing. Angle locks persist until the direction changes deliberately. A reference image is moved and scaled directly with the Select tool. A focused retest covers the four changes.
+
+## Consequences
+
+The sketch tools behave as the tutorial describes them. The macOS Open With follow-up in the record became the file association work in 0.3.0.
+
+---
+
+## Original document
+
+The design document as written for the release, kept in full. Headings are demoted one level; links were updated when the documents were reorganised on 9 October 2026.
+
+## Sketching fixes in Ferrender 0.2.2
 
 For 0.3.0, Select uses **V**; **S** opens command search. Other steps below retain their documented 0.2.2 behavior.
 
 Version 0.2.2 addresses feedback from the 0.2 manual tests: choose an arc's endpoints before its bulge, set dimensions on existing geometry, keep deliberate angle locks, and move or scale an imported reference directly in the sketch.
 
-Check **Help → About Ferrender → Copy build info** before testing. It should identify **0.2.2**; include its source commit with any report. The [full sketching guide](SKETCHING_0.2.md) still covers point coordinates, tangent arcs, splines, reference calibration, open-end highlighting, and expressions. The [bishop tutorial](../BISHOP_TUTORIAL.md) uses the revised arc click order.
+Check **Help → About Ferrender → Copy build info** before testing. It should identify **0.2.2**; include its source commit with any report. The [full sketching guide](0001-sketching-tools.md) still covers point coordinates, tangent arcs, splines, reference calibration, open-end highlighting, and expressions. The [bishop tutorial](../../BISHOP_TUTORIAL.md) uses the revised arc click order.
 
-## Three-point arcs: endpoints first
+### Three-point arcs: endpoints first
 
 Choose **Sketch → 3-Point Arc**. Click the **start**, then the **end**, then move the pointer to choose the **bulge**. The first two points stay at the ends of the preview. A third point above the chord produces an upper arc; a point below produces a lower arc. The third point lies on the arc, not at its center. Its position controls the curvature and hence the circle's diameter.
 
@@ -14,7 +40,7 @@ For a semicircle from `(0, 0)` to `(10, 0)`, use `(5, 5)` as the third point. Us
 
 In 0.2.0 and 0.2.1 the UI used start → through → end. Existing documents keep their geometry, and the command API's named `start`, `through`, and `end` fields keep their meanings.
 
-## Dimension an existing item
+### Dimension an existing item
 
 Select a line and press **D** or choose **Dimension** to set its length. You can also choose Dimension first, click the line, type a length, and press Enter. The editor opens immediately; a blank-space click is no longer required. The value becomes an editable dimension attached to the geometry, like the dimension shown in the manual test screenshot.
 
@@ -24,7 +50,7 @@ To dimension **between** two items, use Select and Shift-click them both before 
 
 A dimension can only move geometry as its other constraints allow. A line with fully positioned endpoints may reject a conflicting new length. Correct those positions or remove an unwanted constraint rather than adding conflicting dimensions.
 
-## Freeze a direction or an arc sweep
+### Freeze a direction or an arc sweep
 
 Ordinary snapping helps near horizontal, vertical, 45°, parallel, perpendicular, and tangent directions for lines, and near 45° sweep increments for tangent arcs. A snap stays engaged through small pointer movements; move farther away to leave it.
 
@@ -34,7 +60,7 @@ Type **Angle** for an exact line direction from sketch +X, including `0 deg` or 
 
 Saved line-direction and arc-sweep dimensions require **0.2.2 or later** (native file format 4). Existing older files still open. Keep separate copies if you also use an older build.
 
-## Move and scale a reference with Select
+### Move and scale a reference with Select
 
 While editing the image's sketch, choose **Select** (`S`). Drag an empty part of the image to move it. Clicking the image selects it and shows four square corner handles. Drag a corner to scale uniformly around the opposite corner; the image keeps its proportions and rotation.
 
@@ -42,7 +68,7 @@ Sketch points, edges, and dimension labels take priority over the image body, so
 
 Dragging previews the change. Releasing commits one undoable image edit. Escape cancels the current drag; a second Escape clears the image selection. Moving or scaling the image does not move the sketch geometry. The placement is saved in the `.ferr` file along with the embedded image.
 
-## Focused manual retest
+### Focused manual retest
 
 Allow about 30–40 minutes. Use fresh XY sketches for the independent geometry checks, save test designs, and report results by number. These are tests to perform, not a claim that a person has already completed them.
 
@@ -57,7 +83,7 @@ Allow about 30–40 minutes. Use fresh XY sketches for the independent geometry 
 9. **Image persistence and visibility.** Save the moved/scaled image in a `.ferr` file, rename or move the original image file, and reopen the design. Expect the image and placement to survive. Hide it using Visible: it should stop intercepting Select. Show it again; the placement should be unchanged. Finish Sketch and export a solid: the reference should not appear in STL or STEP.
 10. **Short regression checks.** In a fresh sketch draw three sides of a rectangle: expect two open-end rings, then zero when you close the fourth side. In a value box enter `1e1 mm`, then try `1 / 0`: expect 10 mm for the first and a visible error without geometry changes for the second. Check View → Appearance in Light and Dark: handles, angle feedback, labels, and geometry should remain readable. Reopen one existing bishop, rook, or pawn and confirm its shape and dimensions remain unchanged.
 
-## Follow-up: macOS Open With
+### Follow-up: macOS Open With
 
 The source update after the original 0.2.2 release adds Finder document-open handling. Check the commit in About: the original `c46e848` build does not include this fix. These checks apply to the updated build.
 
@@ -68,6 +94,6 @@ The source update after the original 0.2.2 release adds Finder document-open han
 
 Finder requests to open several documents together are refused with a message to open one at a time. STL files use the existing import dialog.
 
-## Reporting
+### Reporting
 
 Send results such as “1–3 pass; 4 fails after reopening.” Include copied build info, exact inputs, a screenshot for visual problems, and the smallest saved `.ferr` file that reproduces the issue. The already-passing open-end and invalid-input tests only need the short regression checks here; the rest of the original 0.2 test plan remains available when you are ready to continue.

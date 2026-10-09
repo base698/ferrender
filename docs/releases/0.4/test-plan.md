@@ -1,6 +1,6 @@
 # Ferrender 0.4.0 manual test plan
 
-This is the **Ferrender 0.4.0 regression and manual acceptance plan**: the full catalogue of checks. For the short ordered session that decides the release, use [ACCEPTANCE_0.4.0.md](ACCEPTANCE_0.4.0.md), which cites these checks by number. Report **Pass**, **Fail**, or **Unsure** by number. Allow about 90 minutes; you can stop between sections. The [review report](REVIEW_0.4.0.md) records automated coverage and its limits; this plan is for the things only a person at the screen can judge.
+This is the **Ferrender 0.4.0 regression and manual acceptance plan**: the full catalogue of checks. For the short ordered session that decides the release, use [ACCEPTANCE_0.4.0.md](acceptance.md), which cites these checks by number. Report **Pass**, **Fail**, or **Unsure** by number. Allow about 90 minutes; you can stop between sections. The [review report](review.md) records automated coverage and its limits; this plan is for the things only a person at the screen can judge.
 
 Save open work and open Ferrender 0.4.0. Use separate test files and keep your existing designs unchanged. Check **Help → About Ferrender → Copy build info**: it should say **0.4.0** with the commit matching the release bundle.
 
@@ -129,4 +129,4 @@ These are acceptance checks, not claims that every item has been hand-tested. Se
 
 ## Observations
 
-Record the build's commit, which checks passed, and anything unexpected. Known limits are listed in the [release notes](releases/0.4.0.md).
+Record the build's commit, which checks passed, and anything unexpected. Known limits are listed in the [release notes](0.4.0-release-notes.md).

@@ -1,8 +1,8 @@
 # Scripts in 0.5: what 0.4 left open
 
-Status: **a note, not a plan.** Written 2026-10-09 against `0.4-dev`. It collects everything about scripts that 0.4.0 defers, limits or leaves awkward, so 0.5 planning starts from one list. Each item says what is true in 0.4.0 and what closing it would take. Nothing here is committed.
+Status: **plan for 0.5, proposed; nothing here is committed.** Written 2026-10-09 against `0.4-dev`. It collects everything about scripts that 0.4.0 defers, limits or leaves awkward, so 0.5 planning starts from one list. Each item says what is true in 0.4.0 and what closing it would take. Nothing here is committed.
 
-Sources: [the 0.4 review](REVIEW_0.4.0.md) findings 3, 6, 7 and 9, [the 0.4 plan](0.4-release.md) and its "Not in 0.4" list, and a survey of the app for work that belongs in scripts.
+Sources: [the 0.4 review](../0.4/review.md) findings 3, 6, 7 and 9, [the 0.4 plan](../0.4/plan.md) and its "Not in 0.4" list, and a survey of the app for work that belongs in scripts.
 
 ## 1. Isolation: the one that changes the architecture
 

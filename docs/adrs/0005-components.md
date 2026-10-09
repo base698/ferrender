@@ -1,14 +1,40 @@
-# Components in Ferrender 0.3
+# ADR 0005: Components: nestable containers with one owner per feature
 
-Status: **implemented in Ferrender 0.3.0**, alongside [construction planes](CONSTRUCTION_PLANES_0.3.md). The specification below describes behavior and test cases. The [0.3.0 manual test plan](TEST_PLAN_0.3.0.md) records the scope of manual acceptance; its checklist remains available for regression testing.
+| | |
+|---|---|
+| **Status** | Accepted; shipped in 0.3.0 |
+| **Date** | 2026-10-08 |
+| **Related** | [ADR 0006](0006-construction-planes.md) ships alongside |
+
+## Context
+
+A document was one flat list of features and bodies. Assemblies of several parts could not be organised, moved as a unit, or hidden together, and Join and Cut reached every body in the document.
+
+## Decision
+
+A component is a feature that owns other features; the document starts with a root component and New Component nests another, which becomes active. Every feature has exactly one owner, bodies know their component, and Join and Cut touch only bodies in the component they are made in. A component has a placement (translate and rotate) applied to everything it owns, edited with Move. Fusion's single-timeline model is the reference. Joints, instances of one definition and linked external components are explicitly not included.
+
+## Consequences
+
+Large assemblies can be organised and revised piecewise, which the 0.4.0 house evaluation relied on. Reparenting a component and body naming per component are the open items that evaluation recorded; linked instances remain future work.
+
+---
+
+## Original document
+
+The design document as written for the release, kept in full. Headings are demoted one level; links were updated when the documents were reorganised on 9 October 2026.
+
+## Components in Ferrender 0.3
+
+Status: **implemented in Ferrender 0.3.0**, alongside [construction planes](0006-construction-planes.md). The specification below describes behavior and test cases. The [0.3.0 manual test plan](../releases/0.3/test-plan.md) records the scope of manual acceptance; its checklist remains available for regression testing.
 
 A component is a named, nestable container for sketches, bodies, construction planes and the features that make them. A document starts with one root component and gains more with **New Component**. Features go into the *active* component. Operations such as Join and Cut only touch bodies in the component they run in, so parts built side by side stay separate until you combine them on purpose. A component can be moved as a whole, and hidden as a whole.
 
 Fusion's model is the reference: one timeline for the whole document, a browser tree of components, each feature owned by exactly one component. Joints, component instances (one definition placed many times) and external (linked) components are **not** in 0.3.0; see [Not in 0.3.0](#not-in-030).
 
-## What the user sees
+### What the user sees
 
-### Browser
+#### Browser
 
 The browser becomes a tree. The document node at the top is the root component. Each component shows:
 
@@ -22,29 +48,29 @@ Right-click on a component: Activate, Rename, New Component (child), Move, Show/
 
 Clicking a body in the browser selects it as today. Bodies are named per component, so two components can each have a `Body1`; the status bar shows `Bracket › Body1`.
 
-### Toolbar and menus
+#### Toolbar and menus
 
 - **Model → New Component** (also a toolbar button next to New Sketch). Creates `ComponentN` as a child of the active component and activates it. Takes an optional name via the rename box.
 - **Model → Activate Root** (and the browser control) to get back out.
 - **Move** with a component selected (clicked in the browser) moves the component's placement rather than adding a Transform feature; see [Placement](#placement).
 
-### Timeline
+#### Timeline
 
 The timeline stays one row. A `New Component` chip appears where the component was created (icon: `icon::TREE_STRUCTURE` or similar). Hovering any chip adds `in Bracket` to its tooltip. A short coloured underline per component helps tell runs of features apart; the colours come from a small fixed palette cycled by component index and are not user-editable in 0.3.0.
 
 Rolling back before a component's chip removes that component, its bodies and its children from the model. New features go in at the marker as today, owned by the active component; if the active component does not exist at the marker, the root becomes active and a toast says so.
 
-### What changes about Join and Cut
+#### What changes about Join and Cut
 
 Today an extrude set to Join merges into **every** body whose bounds it overlaps, document-wide (`Document::merge` in `crates/fr-core/src/doc.rs`). With components, Join, Cut and Intersect only consider bodies in the same component as the feature. Combine is the explicit way to reach across: its target and tools may be in different components, and the result lives in the target's component (tools not kept are removed from theirs). Pattern copies land in the source feature's component. Hole, Thread, Fillet, Chamfer, Shell and Text act on the body they name, wherever it is.
 
 Through All measures its reach against bodies in the same component only.
 
-## Data model
+### Data model
 
 Everything below is in `crates/fr-core`.
 
-### A component is a feature
+#### A component is a feature
 
 ```rust
 // doc.rs
@@ -74,7 +100,7 @@ Making the component a `FeatureKind` rather than a separate list means it gets a
 
 The root is implicit: id `0`, never serialized, cannot be deleted or moved. `ORIGIN` is already id 0 for sketch points, which is a different id space; feature ids start at 1 (`validation::document` already enforces `f.id != 0`).
 
-### Every feature has an owner
+#### Every feature has an owner
 
 ```rust
 pub struct Feature {
@@ -90,7 +116,7 @@ pub struct Feature {
 
 `Document::add_feature` sets `owner = self.active_component`. A component feature's own `owner` is its parent (so `Component.parent` is redundant with `Feature.owner`; drop `parent` from the struct and use `owner`). Old files deserialize with every owner at 0 and behave exactly as before.
 
-### Which component is active
+#### Which component is active
 
 ```rust
 pub struct Document {
@@ -102,7 +128,7 @@ pub struct Document {
 
 It lives in the document rather than the app because the MCP server and the AI assistant drive `Session` without an `App`, and because reopening a file should land you where you were. It is therefore part of undo snapshots, which means undo can change the active component; that matches what a user expects after undoing "New Component".
 
-### Bodies know their component
+#### Bodies know their component
 
 ```rust
 pub struct Body {
@@ -115,11 +141,11 @@ pub struct Body {
 
 Body naming in `merge` changes from one global counter to a counter per component (`BTreeMap<Id, usize>` in `rebuild`), so each component numbers its own `Body1, Body2…`.
 
-### File format
+#### File format
 
 `io::FORMAT_VERSION` goes to 5. `to_json` writes version 5 only when the document has a component feature or any feature with a non-root owner, following the existing pattern that keeps plain designs readable by older apps. Older apps already refuse newer versions with a clear message.
 
-### Validation (`validation.rs`)
+#### Validation (`validation.rs`)
 
 - `owner` is 0 or the id of a `Component` feature that appears **earlier** in `features` (a feature cannot belong to a component made after it).
 - No cycles; depth at most 32 (a `Component` whose owner chain does not reach the root is rejected).
@@ -128,7 +154,7 @@ Body naming in `merge` changes from one global counter to a counter per componen
 
 Broken owners should fail loading the file (they are structural), unlike broken feature dependencies which remain loadable and show as timeline errors.
 
-## Rebuild
+### Rebuild
 
 `Document::rebuild` keeps its shape: evaluate values, solve sketches, then one ordered pass over the active, unsuppressed features. Changes:
 
@@ -141,7 +167,7 @@ Everything the loop does therefore happens in component-local coordinates, which
 
 `Built` gains `components: Vec<(Id, DAffine3, visible)>` so the app and API can draw origin triads and report placements without re-deriving them.
 
-## Placement
+### Placement
 
 A component's placement is a rigid move (rotate, then translate) of the whole subtree, edited with **Move** while a component is selected. It is stored on the component feature, not as a timeline item, and edits to it go through `Session::edit` so they are undoable. This is deliberately simpler than Fusion's capture-position dance.
 
@@ -155,17 +181,17 @@ Consequences that need code:
 
 A reasonable staging is to ship components with placement hidden behind identity in the first PRs, and switch Move on for components once the picking paths are converted.
 
-## Visibility
+### Visibility
 
 `Component.visible = false` hides the subtree. `Session::visible_bodies` checks `hidden_bodies` and the body's component chain. `set_visible` in the API accepts a component id. Hidden components are still built (unlike suppressed ones), so measurements and Combine still see their bodies.
 
-## Deleting and moving things
+### Deleting and moving things
 
 - **Delete component**: removes the component feature and every feature it owns, recursively. `App::delete_feature` already confirms when dependents exist; extend that confirmation to list counts ("Delete Bracket and its 7 features and 2 bodies?"). Undoable.
 - **Move a body to another component** (browser context menu): re-owns the feature that made the body and every later feature that references that body id or its sketches. Useful but easy to get wrong; schedule it last and ship only if the dependency walk is solid. Otherwise defer to 0.3.1.
 - **Reparent a component** (drag in the browser): changes the component's `owner`; refused if the new parent comes later in the timeline. Low priority.
 
-## API and MCP (`api.rs`)
+### API and MCP (`api.rs`)
 
 New commands:
 
@@ -193,7 +219,7 @@ Existing commands change as little as possible:
 
 The AI assistant (`crates/ferrender/src/ai.rs`) needs no change beyond the reference text.
 
-## App changes (`crates/ferrender`)
+### App changes (`crates/ferrender`)
 
 - `panels::browser` becomes recursive over components. Keep the flat per-component sections (`Origin`, `Construction`, `Sketches`, `Bodies`) so the root view looks like today's browser when there are no components.
 - `App` gains `sel_component: Option<Id>` alongside `sel_body` and `sel_face`; `Action::NewComponent`, `Action::ActivateRoot`; Move (`Action::Transform`) checks `sel_component` first.
@@ -204,7 +230,7 @@ The AI assistant (`crates/ferrender/src/ai.rs`) needs no change beyond the refer
 - `recovery.rs` and file dialogs: no change; they store the document JSON.
 - `uitest.rs`: new tests below.
 
-## Tests
+### Tests
 
 Core (`crates/fr-core/tests/components.rs`):
 
@@ -224,7 +250,7 @@ App (`uitest.rs`):
 - Move a component with the dialog; clicking its face afterwards starts a sketch whose extrude lands on the moved face (regression for the local-coordinate mapping).
 - Timeline rollback before the component chip removes it.
 
-## Work breakdown
+### Work breakdown
 
 Each step is a PR that leaves `main` releasable.
 
@@ -232,11 +258,11 @@ Each step is a PR that leaves `main` releasable.
 2. **API.** `create_component`, `activate_component`, scene info and object info, `set_visible`, `delete_feature` subtree, export filters. Reference text. API tests.
 3. **Browser and timeline.** Tree browser with activation and visibility, New Component action and toolbar button, chip and tooltips, status bar. UI tests for creation and hiding.
 4. **Placement.** `Placement` on the component, Move dialog on a selected component, placement pass in rebuild, `Built.components`, origin triad. `Body::to_local` and the picker conversions. Placement tests.
-5. **Deletion with confirmation, docs, release notes.** README sections (Browser, Model, Timeline, Reference), `docs/releases/0.3.0.md`, this plan updated to describe what shipped. Optionally the move-body-to-component command.
+5. **Deletion with confirmation, docs, release notes.** README sections (Browser, Model, Timeline, Reference), `docs/releases/0.3/0.3.0-release-notes.md`, this plan updated to describe what shipped. Optionally the move-body-to-component command.
 
 Construction planes touch the same rebuild loop and the New Sketch picker. Build planes first (they are the smaller change) and then components, so step 1 extends a loop that already handles plane features; see the ordering note in the planes plan.
 
-## Risks and open questions
+### Risks and open questions
 
 - **Semantics change for existing files?** No: with no components, owner is 0 for everything and `merge` filters to the root, which is every body. Behaviour is identical.
 - **Pattern body ids** are `feature_id * 1000 + k`. Feature allocation must reserve each pattern's synthetic-ID range, and loading must reject collisions with ordinary feature IDs. Document-wide feature numbering alone does not prevent a later ordinary feature from entering that range.
@@ -245,6 +271,6 @@ Construction planes touch the same rebuild loop and the New Sketch picker. Build
 - **Active component in undo history** is a judgement call noted above; revisit if it feels wrong in use.
 - **Instances.** The flat "feature owned by one component" model does not give two placements of one definition. That needs either copy-on-create (cheap, breaks the link) or a definition/occurrence split (the Fusion way). Out of scope; the data model above does not preclude a later `Component.definition: Option<Id>`.
 
-## Not in 0.3.0
+### Not in 0.3.0
 
 Joints and joint limits, grounding (placement is always explicit), component instances and external components, STEP assembly structure, per-component colours or appearances, dragging to reparent in the browser, and free dragging of component geometry outside Move. The Move dialog includes graphical translation arrows and rotation handles for whole components.

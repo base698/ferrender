@@ -180,4 +180,4 @@ Unsaved work is copied to `<config dir>/recovery/*.ferr-recovery` in a bounded m
 
 ## Related
 
-`docs/0.4-release.md` for the geometry cache, tags and mesh blobs planned on top of this; `README.md` › Files for the user-facing description.
+`docs/releases/0.4/plan.md` for the geometry cache, tags and mesh blobs planned on top of this; `README.md` › Files for the user-facing description.

@@ -1,8 +1,8 @@
 # Ferrender 0.4.0 release acceptance run
 
-This is the short, ordered session that decides whether `0.4-dev` becomes 0.4.0. It takes about two hours at one Mac. [TEST_PLAN_0.4.0.md](TEST_PLAN_0.4.0.md) stays the full catalogue; the numbers in brackets below point at its checks. [REVIEW_0.4.0.md](REVIEW_0.4.0.md) records what automated tests already cover.
+This is the short, ordered session that decides whether `0.4-dev` becomes 0.4.0. It takes about two hours at one Mac. [TEST_PLAN_0.4.0.md](test-plan.md) stays the full catalogue; the numbers in brackets below point at its checks. [REVIEW_0.4.0.md](review.md) records what automated tests already cover.
 
-The run is ordered by what would stop the release. Part A is the gate: any failure there is a no-go. Parts B and C walk the five planned features and Sweep against the targets in [the plan](0.4-release.md). Part D is the handful of judgments no test can make. Stop at the first failure in Part A; elsewhere note it and carry on.
+The run is ordered by what would stop the release. Part A is the gate: any failure there is a no-go. Parts B and C walk the five planned features and Sweep against the targets in [the plan](plan.md). Part D is the handful of judgments no test can make. Stop at the first failure in Part A; elsewhere note it and carry on.
 
 Mark each step **Pass**, **Fail** or **Unsure**. A step passes only if every "Expect" holds.
 
@@ -177,4 +177,4 @@ Record: the result, or "not tested". Only automated builds and tests have run on
 | C1 to C6 | | |
 | D1 to D6 | | |
 
-**Go** needs every Part A step to pass, no Fail in Parts B and C, and a decision written down for D1, D2 and D5. After that, follow [RELEASING.md](../RELEASING.md).
+**Go** needs every Part A step to pass, no Fail in Parts B and C, and a decision written down for D1, D2 and D5. After that, follow [RELEASING.md](../../../RELEASING.md).
