@@ -208,6 +208,11 @@ impl App {
                 let doc = self.doc();
                 let at = doc.features.iter().position(|f| f.id == chip).unwrap_or(doc.features.len());
                 let previous: Vec<_> = doc.features.iter().filter(|f| f.made_by == Some(chip)).cloned().collect();
+                if previous.iter().any(|f| f.script_key.is_none())
+                    && doc.features.iter().skip(at + 1).any(|f| f.made_by != Some(chip)) {
+                    self.toast("This earlier script run has no stable output identities. Re-run it before adding dependent features, or detach it and edit its existing features; Ferrender will not guess which new output your later features meant.");
+                    return;
+                }
                 let owner = doc.feature(chip).map_or(doc.active_component, |f| f.owner);
                 let mut s = self.session.fork();
                 s.doc.features.retain(|f| f.id != chip && f.made_by != Some(chip));
@@ -288,7 +293,7 @@ impl App {
                     d.next_id = d.next_id.max(chip + 1);
                     let hash = crc32fast::hash(source.as_bytes());
                     let at = d.features.iter().position(|f| made.contains(&f.id)).unwrap_or(insert_at.min(d.features.len()));
-                    d.features.insert(at, fr_core::Feature { id: chip, name: script_name.clone(), suppressed: false, owner: run.owner, made_by: None, kind: FeatureKind::ScriptRun(fr_core::doc::ScriptRun { script_name: script_name.clone(), source: source.clone(), source_hash: hash, inputs: inputs.clone() }) });
+                    d.features.insert(at, fr_core::Feature { id: chip, name: script_name.clone(), suppressed: false, owner: run.owner, made_by: None, script_key: None, kind: FeatureKind::ScriptRun(fr_core::doc::ScriptRun { script_name: script_name.clone(), source: source.clone(), source_hash: hash, inputs: inputs.clone() }) });
                     for f in &mut d.features { if made.contains(&f.id) { f.made_by = Some(chip); } }
                     fr_core::validation::document(d)?;
                     Ok(())

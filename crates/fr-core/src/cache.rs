@@ -2,12 +2,11 @@
 //! opens without a rebuild, `ferrender check` can read many files quickly,
 //! and an older application can still show a design that uses a newer feature.
 //!
-//! The cache is only ever a shortcut. It is trusted when the design it was
-//! saved with is byte-for-byte the design being opened (a CRC of the plain
-//! JSON), the kernel version matches, and every body's volume and bounds
-//! agree with what the index says after the shape is read back. Anything
-//! else discards the whole cache and the design rebuilds as if there were
-//! none, which is never wrong, only slower.
+//! Editable sessions adopt a cache only after the entire native container is
+//! authenticated with this installation's private key. CRC, algorithm revision,
+//! volume and bounds are additional consistency checks, not authentication.
+//! Foreign/unsigned compatible files rebuild. Unsupported newer timelines can
+//! only show an explicitly unverified read-only preview of their saved geometry.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -27,7 +26,7 @@ pub const KERNEL: &str = "cadrum 0.8.20";
 /// Bump whenever Ferrender changes feature evaluation or mesh geometry. Kernel
 /// version alone cannot invalidate results from an older application algorithm.
 /// Revision 0 (a missing field) denotes the original 0.4 development caches.
-pub const GEOMETRY_REVISION: u32 = 1;
+pub const GEOMETRY_REVISION: u32 = 2;
 /// A cache larger than this is not written; the design rebuilds instead.
 pub const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
 /// Designs that rebuild faster than this are not worth caching unless the file is a container anyway.
@@ -85,6 +84,9 @@ pub struct Cache {
     pub index: Index,
     /// Entry name to bytes: BRep text for exact bodies, the mesh blob for mesh bodies.
     pub blobs: HashMap<String, Vec<u8>>,
+    /// Set only for freshly evaluated geometry or a locally authenticated file.
+    /// Untrusted previews can be restored for display, never adopted or signed.
+    pub(crate) trusted: bool,
 }
 
 /// What a cache restores, ready to stand in for a rebuild's results.
@@ -138,13 +140,13 @@ impl Cache {
         }
         let planes = built.planes.iter().map(|(id, p)| PlaneEntry { id: *id, component: p.component, plane: p.plane, corners: p.corners }).collect();
         let index = Index { design_crc: design_crc(doc), kernel: KERNEL.into(), geometry_revision: GEOMETRY_REVISION, bodies, planes, errors: built.errors.clone(), resolutions: built.resolutions.clone() };
-        Ok(Some(Cache { index, blobs }))
+        Ok(Some(Cache { index, blobs, trusted: true }))
     }
 
     /// Whether this cache was made from exactly this design by this kernel and
     /// this revision of Ferrender's geometry algorithms.
     pub fn matches(&self, doc: &Document) -> bool {
-        self.index.kernel == KERNEL && self.index.geometry_revision == GEOMETRY_REVISION && self.index.design_crc == design_crc(doc)
+        self.trusted && self.index.kernel == KERNEL && self.index.geometry_revision == GEOMETRY_REVISION && self.index.design_crc == design_crc(doc)
     }
 
     /// Reads the shapes back and checks them against the index. An error means

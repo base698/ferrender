@@ -32,6 +32,8 @@ jobs:
       - name: Verify pinned OpenCascade build dependency
         run: |
           python3 scripts/test_prepare_occt.py
+          python3 scripts/test_dependency_notices.py
+          python3 scripts/bundle-dependency-notices.py
           python3 scripts/prepare-occt.py --github-env
       - name: Install Linux build and offscreen rendering prerequisites
         if: runner.os == 'Linux'

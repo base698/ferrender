@@ -36,7 +36,7 @@ fn run(inputs) {
     let sk = create_sketch(#{ plane: "XY", name: "Gear" }).sketch;
     add_geometry(#{ sketch: sk, items: [#{ type: "polygon", points: pts }, #{ type: "circle", center: [0, 0], radius: inputs.bore / 2.0 }] });
     progress(0.6, "extruding");
-    let made = extrude(#{ sketch: sk, distance: inputs.expr.thickness, operation: "new" });
+    let made = extrude(#{ output_key: "gear-solid", sketch: sk, distance: inputs.expr.thickness, operation: "new" });
     let body = made.changed_bodies[0].id;
     edit_feature(#{ feature: made.feature, name: "Gear " + n + "T m" + m });
     log("gear: " + n + " teeth, pitch diameter " + (2.0 * pitch_r) + " mm, outer " + (2.0 * outer_r) + " mm");

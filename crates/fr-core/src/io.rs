@@ -24,7 +24,7 @@ use crate::units::Unit;
 pub const FORMAT: &str = "ferrender";
 /// The newest version this build reads. 9 is the ZIP container; the JSON inside
 /// a container keeps its own, lower version, computed as for a plain file.
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 pub const CONTAINER_VERSION: u32 = 9;
 pub const CONTAINER_FORMAT: &str = "ferrender-container";
 
@@ -85,9 +85,9 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::ScriptRun(_)) || f.made_by.is_some()) { 12 }
+    if doc.features.iter().any(|f| has_tags(&f.kind) || f.script_key.is_some()) { 13 }
+    else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::ScriptRun(_)) || f.made_by.is_some()) { 12 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::MeshOp(_) | FeatureKind::Relief(_))) { 11 }
-    else if doc.features.iter().any(|f| has_tags(&f.kind)) { 10 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Remove(_) | FeatureKind::Split(_))) { 8 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Primitive(_))) { 7 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Pattern(crate::doc::Pattern { kind: crate::doc::PatternKind::Linear { second: Some(_), .. }, .. }))) { 6 }
@@ -106,7 +106,7 @@ pub fn design_version(doc: &Document) -> u32 {
     else { 1 }
 }
 
-/// Whether a feature stores face or edge tags (format 10).
+/// Whether a feature stores face or edge tags (semantic tag schema, format 13).
 fn has_tags(kind: &FeatureKind) -> bool {
     use crate::planes::{PlaneKind, PlaneRef};
     let tagged_ref = |r: &PlaneRef| matches!(r, PlaneRef::Face { tag: Some(_), .. });
@@ -227,6 +227,10 @@ fn attach_blobs(v: &mut Value, mut read: impl FnMut(&str, usize) -> Result<Vec<u
 /// Validates and encodes the document: plain JSON, or a container when it has payloads.
 /// Returns the bytes and whether they are a container.
 pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String> {
+    encode_using(doc, extras, crate::cache_auth::Store::local().as_ref())
+}
+
+fn encode_using(doc: &Document, extras: &Extras, trust: Option<&crate::cache_auth::Store>) -> Result<(Vec<u8>, bool), String> {
     crate::validation::document(doc)?;
     let (mut v, meshes) = json_value_detached(doc);
     let blobs = detach_blobs(&mut v, meshes)?;
@@ -272,7 +276,12 @@ pub fn encode(doc: &Document, extras: &Extras) -> Result<(Vec<u8>, bool), String
     if let Some(t) = thumbnail {
         put(&mut zip, "thumbnail.png", t, store)?;
     }
-    let bytes = zip.finish().map_err(|e| format!("could not finish the container: {e}"))?.into_inner();
+    let mut bytes = zip.finish().map_err(|e| format!("could not finish the container: {e}"))?.into_inner();
+    // Never turn an untrusted imported preview into a signed cache by merely
+    // re-encoding it. Supported sessions rebuild before they can save one.
+    if extras.cache.as_ref().is_some_and(|c| c.matches(doc)) {
+        if let Some(trust) = trust { trust.seal(&mut bytes); }
+    }
     if bytes.len() > MAX_CONTAINER_BYTES { return Err("the Ferrender file exceeds 2 GiB".into()); }
     Ok((bytes, true))
 }
@@ -348,7 +357,7 @@ fn read_manifest(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Result<Value, Strin
 
 /// Reads a container's geometry cache, if it has one that is well formed. A damaged cache is
 /// simply absent: the design rebuilds.
-fn read_cache(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Option<crate::cache::Cache> {
+fn read_cache(archive: &mut ZipArchive<Cursor<&[u8]>>, trusted: bool) -> Option<crate::cache::Cache> {
     if archive.by_name("cache/index.json").is_err() { return None; }
     let index: crate::cache::Index = serde_json::from_slice(&read_entry(archive, "cache/index.json", MAX_CACHE_INDEX_BYTES).ok()?).ok()?;
     let mut blobs = std::collections::HashMap::new();
@@ -364,12 +373,16 @@ fn read_cache(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Option<crate::cache::C
             blobs.insert(name.clone(), bytes);
         }
     }
-    Some(crate::cache::Cache { index, blobs })
+    Some(crate::cache::Cache { index, blobs, trusted })
 }
 
 /// Opens a file fully: the design, its cache, and whether it is from a newer version.
 pub fn open(path: &Path) -> Result<Opened, String> {
     let bytes = read_bounded(path, MAX_CONTAINER_BYTES)?;
+    open_bytes_using(&bytes, crate::cache_auth::Store::local().as_ref())
+}
+
+fn open_bytes_using(bytes: &[u8], trust: Option<&crate::cache_auth::Store>) -> Result<Opened, String> {
     if !bytes.starts_with(b"PK") {
         let doc = from_json(std::str::from_utf8(&bytes).map_err(|_| "the Ferrender file is not UTF-8")?)?;
         return Ok(Opened { doc: Some(doc), cache: None, container: false, newer: false, app: None });
@@ -378,15 +391,21 @@ pub fn open(path: &Path) -> Result<Opened, String> {
     let mut archive = open_container(&bytes)?;
     let manifest = read_manifest(&mut archive)?;
     let app = manifest["app"].as_str().map(str::to_owned);
-    let cache = read_cache(&mut archive);
+    let authenticated = trust.is_some_and(|store| store.verify(bytes, archive.comment()));
     let design = read_entry(&mut archive, "design.json", MAX_NATIVE_BYTES)?;
     let mut v: Value = serde_json::from_slice(&design).map_err(|e| format!("the container's design is damaged: {e}"))?;
     if v["version"].as_u64().unwrap_or(0) > FORMAT_VERSION as u64 {
+        // Its timeline cannot be validated by this reader. Even a local MAC
+        // does not make a future-version preview authoritative here.
+        let cache = read_cache(&mut archive, false);
         if cache.is_some() {
             return Ok(Opened { doc: None, cache, container: true, newer: true, app });
         }
         return Err("this file was written by a newer version of Ferrender".into());
     }
+    // Discard foreign caches before parsing any cached BRep or mesh. Only the
+    // supported authoritative design and its referenced payloads are loaded.
+    let cache = authenticated.then(|| read_cache(&mut archive, true)).flatten();
     crate::mesh::BLOBS.with(|b| b.borrow_mut().incoming.clear());
     let result = attach_blobs(&mut v, |name, max| read_entry(&mut archive, name, max)).and_then(|_| from_value(v));
     crate::mesh::BLOBS.with(|b| b.borrow_mut().incoming.clear());
@@ -559,11 +578,212 @@ pub fn stl_bytes<'a>(bodies: impl IntoIterator<Item = &'a Body>, unit: Unit) -> 
 }
 
 pub fn write_stl<'a>(bodies: impl IntoIterator<Item = &'a Body>, unit: Unit, path: &Path) -> Result<usize, String> {
-    let bytes = stl_bytes(bodies, unit);
+    write_stl_with_provenance(bodies, unit, path, false)
+}
+
+/// Exported preview geometry keeps its unverified status in the STL header.
+pub fn write_stl_with_provenance<'a>(bodies: impl IntoIterator<Item = &'a Body>, unit: Unit, path: &Path, unverified: bool) -> Result<usize, String> {
+    let mut bytes = stl_bytes(bodies, unit);
+    if unverified {
+        let label = format!("Ferrender UNVERIFIED cached preview; units: {}", unit.name());
+        bytes[..80].fill(b' ');
+        bytes[..label.len()].copy_from_slice(label.as_bytes());
+    }
     let n = (bytes.len() - 84) / 50;
     if n == 0 {
         return Err("there are no bodies to export".into());
     }
     std::fs::write(path, bytes).map_err(|e| format!("could not write {}: {e}", path.display()))?;
     Ok(n)
+}
+
+/// STEP supports comments, so exported future previews retain their provenance
+/// without inventing geometry attributes or changing the kernel's entities.
+pub fn step_with_provenance<'a>(solids: impl IntoIterator<Item = &'a cadrum::Solid>, unverified: bool) -> Result<Vec<u8>, String> {
+    let mut bytes = crate::exact::step(solids)?;
+    if unverified {
+        let at = bytes.iter().position(|b| *b == b'\n').map_or(0, |n| n + 1);
+        bytes.splice(at..at, b"/* Ferrender UNVERIFIED cached preview: newer timeline was not rebuilt. */\n".iter().copied());
+    }
+    Ok(bytes)
+}
+
+#[cfg(all(test, unix))]
+mod cache_trust_tests {
+    use super::*;
+    use crate::{cache::Cache, cache_auth::Store, doc::Session};
+    use std::os::unix::fs::DirBuilderExt;
+
+    fn store(name: &str) -> (PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("ferrender-file-trust-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let store = Store::in_directory(dir.join("private"));
+        (dir, store)
+    }
+    fn box_session(width: f64) -> Session {
+        let mut s = Session::default();
+        crate::api::execute(&mut s, &json!({"op":"primitive", "type":"box", "width":width, "depth":10, "height":10}), None).unwrap();
+        s
+    }
+    fn extras(s: &Session) -> Extras { Extras { cache: Cache::capture(&s.doc, &s.built).unwrap(), ..Default::default() } }
+    fn rewrite(bytes: &[u8], edit: impl Fn(&str, Vec<u8>) -> Vec<u8>) -> Vec<u8> {
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut out = ZipWriter::new(Cursor::new(Vec::new()));
+        out.set_raw_comment(archive.comment().into()); // replay the original MAC, as an attacker could
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).unwrap();
+            let mut payload = Vec::new();
+            entry.read_to_end(&mut payload).unwrap();
+            out.start_file(entry.name(), SimpleFileOptions::default()).unwrap();
+            out.write_all(&edit(entry.name(), payload)).unwrap();
+        }
+        out.finish().unwrap().into_inner()
+    }
+    fn volume(s: &Session) -> f64 { s.built.bodies.iter().flat_map(|b| &b.solids).map(cadrum::Solid::volume).sum() }
+
+    #[test]
+    fn cache_auth_foreign_and_unsigned_files_rebuild_but_local_copy_stays_fast() {
+        let (a, local) = store("origin");
+        let (b, foreign) = store("destination");
+        let original = box_session(10.0);
+        let (bytes, _) = encode_using(&original.doc, &extras(&original), Some(&local)).unwrap();
+        let opened = open_bytes_using(&bytes, Some(&local)).unwrap();
+        let cached = Session::with_cache(opened.doc.unwrap(), opened.cache.as_ref());
+        assert!(cached.from_cache);
+        assert_eq!(cached.geometry_trust(), "local_authenticated_cache");
+        assert!((volume(&cached) - 1000.0).abs() < 1e-6);
+        for trust in [None, Some(&foreign)] {
+            let opened = open_bytes_using(&bytes, trust).unwrap();
+            assert!(opened.cache.is_none(), "foreign cache is discarded before BRep parsing");
+            let rebuilt = Session::with_cache(opened.doc.unwrap(), opened.cache.as_ref());
+            assert!(!rebuilt.from_cache);
+            assert!((volume(&rebuilt) - 1000.0).abs() < 1e-6);
+        }
+        let (unsigned, _) = encode_using(&original.doc, &extras(&original), None).unwrap();
+        assert!(open_bytes_using(&unsigned, Some(&local)).unwrap().cache.is_none());
+        assert_eq!(decode(&unsigned).unwrap(), original.doc, "legacy unsigned files remain editable");
+        std::fs::remove_dir_all(a).unwrap();
+        std::fs::remove_dir_all(b).unwrap();
+    }
+
+    #[test]
+    fn cache_auth_rejects_coordinated_geometry_index_forgery_before_adoption() {
+        let (dir, local) = store("forged");
+        let original = box_session(10.0);
+        let (bytes, _) = encode_using(&original.doc, &extras(&original), Some(&local)).unwrap();
+        let mut wrong = extras(&box_session(20.0)).cache.unwrap();
+        wrong.index.design_crc = crate::cache::design_crc(&original.doc);
+        let wrong_entries: std::collections::HashMap<_, _> = wrong.entries().into_iter().collect();
+        let forged = rewrite(&bytes, |name, data| wrong_entries.get(name).cloned().unwrap_or(data));
+        // Both the fake shape and its fake index agree: the previous CRC +
+        // volume/bounds checks alone would have accepted the wrong 2000mm³ box.
+        let mut archive = open_container(&forged).unwrap();
+        let untrusted = read_cache(&mut archive, false).unwrap();
+        let restored = untrusted.restore().unwrap();
+        let forged_volume: f64 = restored.bodies.iter().flat_map(|b| &b.solids).map(cadrum::Solid::volume).sum();
+        assert!((forged_volume - 2000.0).abs() < 1e-6);
+        assert!(!untrusted.matches(&original.doc));
+        let opened = open_bytes_using(&forged, Some(&local)).unwrap();
+        assert!(opened.cache.is_none());
+        let rebuilt = Session::with_cache(opened.doc.unwrap(), Some(&untrusted));
+        assert!(!rebuilt.from_cache);
+        assert!((volume(&rebuilt) - 1000.0).abs() < 1e-6);
+        // Re-encoding a parsed untrusted cache is not a signing oracle.
+        let bad_extras = Extras { cache: Some(untrusted), ..Default::default() };
+        let (resaved, _) = encode_using(&original.doc, &bad_extras, Some(&local)).unwrap();
+        assert!(open_bytes_using(&resaved, Some(&local)).unwrap().cache.is_none());
+        // A genuinely rebuilt document can produce a new trusted local cache.
+        let (fresh, _) = encode_using(&rebuilt.doc, &extras(&rebuilt), Some(&local)).unwrap();
+        assert!(open_bytes_using(&fresh, Some(&local)).unwrap().cache.is_some());
+        let broken = rewrite(&bytes, |name, data| if name.ends_with(".brep") { b"not even a BRep".to_vec() } else { data });
+        assert!(open_bytes_using(&broken, Some(&local)).unwrap().cache.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cache_auth_binds_design_images_and_mesh_payloads() {
+        use crate::{mesh::Mesh, reference::ReferenceImage, sketch::{Plane, Sketch}};
+        use glam::DVec3;
+        let (dir, local) = store("payloads");
+        let mut s = box_session(10.0);
+        let mesh = Mesh::from_indexed(vec![DVec3::ZERO, DVec3::X, DVec3::Y], vec![[0,1,2]], true).unwrap();
+        s.doc.add_feature(FeatureKind::Import(mesh.clone()));
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.write_header().unwrap().write_image_data(&[255,255,255,255]).unwrap();
+        }
+        let mut sketch = Sketch::new(Plane::XY);
+        sketch.reference = Some(ReferenceImage::from_bytes("image.png", &png, 10.0).unwrap());
+        s.doc.add_feature(FeatureKind::Sketch(sketch));
+        s.rebuild();
+        let (bytes, _) = encode_using(&s.doc, &extras(&s), Some(&local)).unwrap();
+        assert!(open_bytes_using(&bytes, Some(&local)).unwrap().cache.is_some());
+        for target in ["design.json", "meshes/2.mesh", "images/3.png"] {
+            let edited = rewrite(&bytes, |name, mut data| {
+                if name != target { return data; }
+                if name == "design.json" {
+                    let mut v: Value = serde_json::from_slice(&data).unwrap();
+                    v["features"][0]["name"] = json!("changed design");
+                    serde_json::to_vec(&v).unwrap()
+                } else if name.ends_with(".mesh") {
+                    let mut changed = mesh.clone(); changed.map(|p| p + DVec3::Z);
+                    crate::meshfile::encode_blob(&changed)
+                } else {
+                    // Trailing PNG bytes are tolerated by image decoding but
+                    // must still invalidate the file's authentication tag.
+                    data.extend_from_slice(b"changed image"); data
+                }
+            });
+            let opened = open_bytes_using(&edited, Some(&local)).unwrap();
+            assert!(opened.cache.is_none(), "{target} must be bound to the MAC");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cache_auth_future_preview_is_explicitly_unverified_even_with_a_local_mac() {
+        let (dir, local) = store("future");
+        let s = box_session(10.0);
+        let (bytes, _) = encode_using(&s.doc, &extras(&s), Some(&local)).unwrap();
+        let future = rewrite(&bytes, |name, data| if name == "design.json" {
+            let mut v: Value = serde_json::from_slice(&data).unwrap();
+            v["version"] = json!(FORMAT_VERSION + 1);
+            serde_json::to_vec(&v).unwrap()
+        } else { data });
+        let archive = open_container(&future).unwrap();
+        let comment_len = archive.comment().len();
+        drop(archive);
+        let mut authenticated_future = future[..future.len()-comment_len].to_vec();
+        let end = authenticated_future.len(); authenticated_future[end-2..].fill(0);
+        local.seal(&mut authenticated_future);
+        for bytes in [&future, &authenticated_future] {
+            let opened = open_bytes_using(bytes, Some(&local)).unwrap();
+            assert!(opened.newer && opened.doc.is_none());
+            assert!(!opened.cache.unwrap().trusted, "a newer timeline is never verified by this reader");
+            let path = dir.join("future.ferr");
+            std::fs::write(&path, bytes).unwrap();
+            let mut session = Session::open(&path).unwrap();
+            assert!(session.read_only);
+            assert_eq!(session.geometry_trust(), "unverified_preview");
+            let scene = crate::api::execute(&mut session, &json!({"op":"get_scene_info"}), None).unwrap();
+            assert_eq!(scene["geometry_trust"], "unverified_preview");
+            let replies = crate::api::execute(&mut session, &json!({"op":"batch", "commands":[{"op":"get_object_info", "id":1}]}), None).unwrap();
+            assert_eq!(replies[0]["geometry_trust"], "unverified_preview");
+            assert!(replies[0]["geometry_warning"].as_str().unwrap().contains("Unverified"));
+            let stl = dir.join("preview.stl");
+            let exported = crate::api::execute(&mut session, &json!({"op":"export_stl", "path":stl}), None).unwrap();
+            assert_eq!(exported["geometry_trust"], "unverified_preview");
+            assert!(String::from_utf8_lossy(&std::fs::read(stl).unwrap()[..80]).contains("UNVERIFIED"));
+            let step = dir.join("preview.step");
+            crate::api::execute(&mut session, &json!({"op":"export_step", "path":step}), None).unwrap();
+            let step_bytes = std::fs::read(step).unwrap();
+            assert!(String::from_utf8_lossy(&step_bytes).contains("UNVERIFIED cached preview"));
+            let exported_solids = cadrum::Solid::read_step(&mut step_bytes.as_slice()).unwrap();
+            assert!((exported_solids.iter().map(cadrum::Solid::volume).sum::<f64>() - 1000.0).abs() < 1e-6, "provenance comments retain a valid STEP file");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

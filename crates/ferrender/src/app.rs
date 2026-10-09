@@ -1860,7 +1860,7 @@ impl App {
             Ok(s) => {
                 self.replace_session(s);
                 if self.session.read_only {
-                    self.toast("This design was written by a newer Ferrender. Its saved geometry is shown read-only.");
+                    self.toast("Unverified preview: this design needs a newer Ferrender. Its saved geometry is shown read-only and has not been rebuilt.");
                 } else if self.session.from_cache {
                     self.toast(format!("Opened from the saved geometry: {} bodies without a rebuild.", self.session.built.bodies.len()));
                 }
@@ -1965,7 +1965,7 @@ impl App {
     }
 
     pub fn export_stl_path(&mut self, path: &Path, unit: Unit) {
-        match io::write_stl(self.session.visible_bodies(), unit, path) {
+        match io::write_stl_with_provenance(self.session.visible_bodies(), unit, path, self.session.read_only) {
             Ok(n) => {
                 self.file_error = None;
                 self.toast(format!("Exported {n} triangles in {} to {}", unit.name(), path.display()));
@@ -2316,7 +2316,7 @@ impl App {
                     self.toast("There are no exact bodies to write. STEP cannot hold meshes such as imported STL.");
                     return;
                 }
-                let bytes = fr_core::exact::step(exact.iter().flat_map(|b| &b.solids));
+                let bytes = io::step_with_provenance(exact.iter().flat_map(|b| &b.solids), self.session.read_only);
                 let Some(path) = rfd::FileDialog::new().add_filter("STEP", &["step", "stp"]).set_file_name(format!("{}.step", self.doc_name())).save_file() else { return };
                 match bytes.and_then(|b| std::fs::write(&path, b).map_err(|e| format!("Could not write {}: {e}", path.display()))) {
                     Ok(()) if skipped > 0 => self.toast(format!("Exported to {}. {skipped} mesh bod{} left out.", path.display(), if skipped == 1 { "y was" } else { "ies were" })),
@@ -2510,6 +2510,10 @@ impl eframe::App for App {
         let bar = egui::Frame::new().fill(colors.bar).inner_margin(egui::Margin::symmetric(10, 3));
         egui::Panel::bottom("status").frame(bar).show(ui, |ui| {
             panels::status(self, ui);
+            if self.session.read_only {
+                ui.colored_label(colors.error, "Unverified preview — newer design; read-only.")
+                    .on_hover_text("This Ferrender cannot rebuild the newer timeline. Saved geometry is unverified; exports retain that warning.");
+            }
             if let Some(error) = self.recovery.as_ref().and_then(Recovery::error) {
                 ui.colored_label(colors.error, "Recovery unavailable — save your work. Retrying…").on_hover_text(error);
             }

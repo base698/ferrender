@@ -1,294 +1,201 @@
-//! Mesh booleans with BSP trees, after Evan Wallace's csg.js. The trees
-//! leave T-junctions along the cuts, which are stitched closed afterwards.
+//! Solid mesh Boolean operations through the Manifold kernel.
+//!
+//! Indexed topology stays intact across the solver boundary. The native Rust
+//! port uses Manifold's symbolic perturbation algorithm on clean operands and
+//! exact rational arrangements for self-intersecting operands. There is no BSP
+//! or ray-parity fallback that can silently return a partially cut surface.
+
+use std::time::{Duration, Instant};
 
 use glam::DVec3;
+use manifold_rust::{
+    cancel::CancelToken,
+    manifold::Manifold,
+    types::{BooleanEngine, Error, MeshGL64, OpType},
+};
 
-use crate::mesh::Mesh;
-
-const EPS: f64 = 1e-6;
-
-#[derive(Clone)]
-struct Poly {
-    v: Vec<DVec3>,
-    n: DVec3,
-    w: f64,
-}
-
-impl Poly {
-    fn new(v: Vec<DVec3>) -> Option<Poly> {
-        let n = (v[1] - v[0]).cross(v[2] - v[0]);
-        (n.length_squared() > 1e-24).then(|| {
-            let n = n.normalize();
-            Poly { w: n.dot(v[0]), n, v }
-        })
-    }
-
-    fn flip(&mut self) {
-        self.v.reverse();
-        self.n = -self.n;
-        self.w = -self.w;
-    }
-}
-
-#[derive(Default)]
-struct Node {
-    plane: Option<(DVec3, f64)>,
-    front: Option<Box<Node>>,
-    back: Option<Box<Node>>,
-    polys: Vec<Poly>,
-}
-
-/// Sorts `p` against a plane into coplanar-front, coplanar-back, front and back parts.
-fn split(plane: (DVec3, f64), p: Poly, cf: &mut Vec<Poly>, cb: &mut Vec<Poly>, f: &mut Vec<Poly>, b: &mut Vec<Poly>) {
-    let (n, w) = plane;
-    let side: Vec<i8> = p.v.iter().map(|v| {
-        let t = n.dot(*v) - w;
-        if t < -EPS { -1 } else if t > EPS { 1 } else { 0 }
-    }).collect();
-    let (any_front, any_back) = (side.contains(&1), side.contains(&-1));
-    match (any_front, any_back) {
-        (false, false) => if n.dot(p.n) > 0.0 { cf.push(p) } else { cb.push(p) },
-        (true, false) => f.push(p),
-        (false, true) => b.push(p),
-        (true, true) => {
-            let (mut fv, mut bv) = (Vec::new(), Vec::new());
-            for i in 0..p.v.len() {
-                let j = (i + 1) % p.v.len();
-                let (vi, vj) = (p.v[i], p.v[j]);
-                if side[i] >= 0 {
-                    fv.push(vi);
-                }
-                if side[i] <= 0 {
-                    bv.push(vi);
-                }
-                if side[i] * side[j] < 0 {
-                    let t = (w - n.dot(vi)) / n.dot(vj - vi);
-                    let x = vi.lerp(vj, t);
-                    fv.push(x);
-                    bv.push(x);
-                }
-            }
-            let part = |v: Vec<DVec3>| (v.len() >= 3).then(|| Poly { v, n: p.n, w: p.w });
-            f.extend(part(fv));
-            b.extend(part(bv));
-        }
-    }
-}
-
-impl Node {
-    fn build(&mut self, polys: Vec<Poly>) {
-        if polys.is_empty() {
-            return;
-        }
-        let plane = *self.plane.get_or_insert((polys[0].n, polys[0].w));
-        let (mut f, mut b, mut same) = (Vec::new(), Vec::new(), Vec::new());
-        let mut same_back = Vec::new();
-        for p in polys {
-            split(plane, p, &mut same, &mut same_back, &mut f, &mut b);
-        }
-        self.polys.append(&mut same);
-        self.polys.append(&mut same_back);
-        if !f.is_empty() {
-            self.front.get_or_insert_default().build(f);
-        }
-        if !b.is_empty() {
-            self.back.get_or_insert_default().build(b);
-        }
-    }
-
-    fn invert(&mut self) {
-        self.polys.iter_mut().for_each(Poly::flip);
-        if let Some((n, w)) = &mut self.plane {
-            *n = -*n;
-            *w = -*w;
-        }
-        if let Some(f) = &mut self.front {
-            f.invert();
-        }
-        if let Some(b) = &mut self.back {
-            b.invert();
-        }
-        std::mem::swap(&mut self.front, &mut self.back);
-    }
-
-    /// Removes the parts of `polys` that are inside this tree's solid.
-    fn clip(&self, polys: Vec<Poly>) -> Vec<Poly> {
-        let Some(plane) = self.plane else { return polys };
-        let (mut f, mut b) = (Vec::new(), Vec::new());
-        let (mut cf, mut cb) = (Vec::new(), Vec::new());
-        for p in polys {
-            split(plane, p, &mut cf, &mut cb, &mut f, &mut b);
-        }
-        f.append(&mut cf);
-        b.append(&mut cb);
-        let mut f = match &self.front {
-            Some(n) => n.clip(f),
-            None => f,
-        };
-        if let Some(n) = &self.back {
-            f.extend(n.clip(b));
-        }
-        f
-    }
-
-    fn clip_to(&mut self, other: &Node) {
-        self.polys = other.clip(std::mem::take(&mut self.polys));
-        if let Some(f) = &mut self.front {
-            f.clip_to(other);
-        }
-        if let Some(b) = &mut self.back {
-            b.clip_to(other);
-        }
-    }
-
-    fn all(&self, out: &mut Vec<Poly>) {
-        out.extend(self.polys.iter().cloned());
-        if let Some(f) = &self.front {
-            f.all(out);
-        }
-        if let Some(b) = &self.back {
-            b.all(out);
-        }
-    }
-}
-
-fn tree(m: &Mesh) -> Node {
-    let mut n = Node::default();
-    n.build(m.tris().filter_map(|t| Poly::new(t.to_vec())).collect());
-    n
-}
-
-fn mesh(n: &Node) -> Mesh {
-    let mut polys = Vec::new();
-    n.all(&mut polys);
-    let mut m = Mesh::default();
-    for p in polys {
-        for i in 1..p.v.len() - 1 {
-            let t = [p.v[0], p.v[i], p.v[i + 1]];
-            if (t[1] - t[0]).cross(t[2] - t[0]).length_squared() > 1e-20 {
-                m.push(t);
-            }
-        }
-    }
-    m
-}
+use crate::mesh::{MAX_TRIANGLES, Mesh};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Bool {
-    Union,
-    Subtract,
-    Intersect,
+pub enum Bool { Union, Subtract, Intersect }
+
+/// Boolean working sets are larger than imported meshes. Larger meshes remain
+/// importable, but must be decimated before combining.
+pub const MAX_TRIS: usize = 8_000_000;
+const MAX_CROSS_PAIRS: usize = 2_000_000;
+const MAX_SELF_PAIRS: usize = 2_000_000;
+const MAX_PAIR_EXAMINATIONS: usize = 256_000_000;
+const TIME_LIMIT: Duration = Duration::from_secs(60);
+const BUDGET_ERROR: &str = "the mesh intersection exceeds the Boolean work budget; decimate the meshes or use a smaller tool before combining";
+
+fn check_time(start: Instant, limit: Duration) -> Result<(), String> {
+    if start.elapsed() >= limit { Err("the mesh Boolean reached its time limit; decimate the meshes or use a smaller tool before combining".into()) }
+    else { Ok(()) }
 }
 
-/// Booleans above this many triangles take long enough to be worth refusing.
-pub const MAX_TRIS: usize = 400_000;
-
-/// The triangles of `polys` cut along every plane of `cutter`'s triangles, as
-/// triangles: afterwards no piece crosses `cutter`'s surface, so each piece is
-/// wholly inside or outside it. The pieces are returned with `polys`' winding.
-pub fn fragments(cutter: &Mesh, polys: &Mesh) -> Result<Vec<[DVec3; 3]>, String> {
-    if cutter.len() + polys.len() > MAX_TRIS {
-        return Err(format!("mesh boolean fragments are limited to {MAX_TRIS} nearby triangles"));
-    }
-    // Convex scans make a BSP almost as deep as its triangle count. An arena
-    // and explicit work stack avoid both recursive traversal and recursive
-    // destruction overflowing the application thread's stack.
-    struct Branch { plane: (DVec3, f64), front: Option<usize>, back: Option<usize> }
-    const MAX_WORK: usize = 20_000_000;
-    const MAX_PIECES: usize = 2_000_000;
-    let mut work = 0usize;
-    let mut spend = |count: usize| -> Result<(), String> {
-        work = work.saturating_add(count);
-        if work > MAX_WORK { Err("the mesh intersection is too complex; decimate the meshes before combining them".into()) } else { Ok(()) }
-    };
-    let input: Vec<Poly> = cutter.tris().filter_map(|t| Poly::new(t.to_vec())).collect();
-    if input.is_empty() { return Ok(polys.tris().collect()); }
-    let mut nodes = vec![Branch { plane: (input[0].n, input[0].w), front: None, back: None }];
-    let mut stack = vec![(0usize, input)];
-    while let Some((at, input)) = stack.pop() {
-        spend(input.len())?;
-        let (mut f, mut b, mut cf, mut cb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for p in input { split(nodes[at].plane, p, &mut cf, &mut cb, &mut f, &mut b); }
-        for (front, part) in [(true, f), (false, b)] {
-            if part.is_empty() { continue; }
-            let next = nodes.len();
-            nodes.push(Branch { plane: (part[0].n, part[0].w), front: None, back: None });
-            if front { nodes[at].front = Some(next); } else { nodes[at].back = Some(next); }
-            stack.push((next, part));
+/// Bound overlapping triangle-box pairs before the solver allocates its
+/// intersection graph. A shared vertex is not an interior self-intersection.
+/// The cap applies to actual triangle bounds, not merely overlapping BVH leaves.
+fn check_pairs(a: &Mesh, b: &Mesh, same: bool, max: usize, max_examined: usize, start: Instant, limit: Duration) -> Result<usize, String> {
+    let bvh = b.bvh();
+    let mut count = 0usize;
+    let mut examined = 0usize;
+    for (i, t) in a.tris().enumerate() {
+        if i % 1024 == 0 { check_time(start, limit)?; }
+        let (lo, hi) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
+        for j in bvh.in_box(lo, hi) {
+            // High-valence fans can visit many pairs that are later skipped.
+            // Count/poll those too, so a single triangle cannot hide unbounded
+            // work between the outer-loop deadline checks.
+            examined += 1;
+            if examined > max_examined { return Err(BUDGET_ERROR.into()); }
+            if examined % 4096 == 0 { check_time(start, limit)?; }
+            if same && (j <= i || a.indices()[i].iter().any(|v| b.indices()[j].contains(v))) { continue; }
+            let u = b.tri(j);
+            if u[0].min(u[1]).min(u[2]).cmpgt(hi).any() || u[0].max(u[1]).max(u[2]).cmplt(lo).any() { continue; }
+            count += 1;
+            if count > max { return Err(BUDGET_ERROR.into()); }
         }
     }
-    let mut stack = vec![(Some(0usize), polys.tris().filter_map(|t| Poly::new(t.to_vec())).collect::<Vec<_>>())];
-    let mut tris = Vec::new();
-    while let Some((at, input)) = stack.pop() {
-        spend(input.len())?;
-        let Some(at) = at else {
-            for p in input {
-                for i in 1..p.v.len() - 1 {
-                    let t = [p.v[0], p.v[i], p.v[i + 1]];
-                    if (t[1] - t[0]).cross(t[2] - t[0]).length_squared() > 1e-20 {
-                        if tris.len() >= MAX_PIECES { return Err("the mesh intersection produces too many fragments; decimate the meshes first".into()); }
-                        tris.push(t);
-                    }
-                }
-            }
-            continue;
-        };
-        let (mut f, mut b, mut cf, mut cb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for p in input { split(nodes[at].plane, p, &mut cf, &mut cb, &mut f, &mut b); }
-        f.append(&mut cf); b.append(&mut cb);
-        if !f.is_empty() { stack.push((nodes[at].front, f)); }
-        if !b.is_empty() { stack.push((nodes[at].back, b)); }
+    Ok(count)
+}
+
+fn input(m: &Mesh) -> Result<Manifold, String> {
+    let gl = MeshGL64 {
+        num_prop: 3,
+        vert_properties: m.positions().iter().flat_map(|p| p.to_array()).collect(),
+        tri_verts: m.indices().iter().flatten().map(|i| *i as u64).collect(),
+        ..Default::default()
+    };
+    let solid = Manifold::from_mesh_gl64(&gl);
+    if solid.status() != Error::NoError {
+        return Err(format!("mesh booleans require closed, manifold inputs; Manifold rejected an operand ({:?}); use Mesh Repair before combining", solid.status()));
     }
-    Ok(tris)
+    // Collapse only redundant coplanar/collinear tessellation at the kernel's
+    // existing tolerance. This is topology cleanup, not mesh decimation: a
+    // densely subdivided planar face should enter the Boolean as that face.
+    Ok(solid.simplify(0.0))
+}
+
+fn output(solid: &Manifold) -> Result<Mesh, String> {
+    if solid.num_tri() > MAX_TRIANGLES { return Err(BUDGET_ERROR.into()); }
+    // A face-only contact can be represented as a closed zero-volume sheet by
+    // the kernel. Ferrender Booleans operate on solids, so it is empty.
+    if solid.is_empty() || solid.volume() == 0.0 { return Ok(Mesh::default()); }
+    let gl = solid.get_mesh_gl64(-1);
+    // Even without user properties, export may duplicate vertices at source
+    // face/run boundaries. Its merge vectors carry the authoritative topology.
+    let mut remap: Vec<u32> = (0..gl.num_vert() as u32).collect();
+    for (&from, &to) in gl.merge_from_vert.iter().zip(&gl.merge_to_vert) {
+        if from as usize >= remap.len() || to as usize >= remap.len() { return Err("the mesh Boolean returned invalid vertex links".into()); }
+        remap[from as usize] = to as u32;
+    }
+    let positions = gl.vert_properties.chunks_exact(gl.num_prop as usize).map(|p| DVec3::new(p[0], p[1], p[2])).collect();
+    let indices = gl.tri_verts.chunks_exact(3).map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]]).collect();
+    let mut out = Mesh::from_indexed(positions, indices, true)?;
+    // The container and STL formats use f32 coordinates. Check the actual
+    // representable result now; a watertight f64 result alone is insufficient.
+    out.snap();
+    // STL has no indices. Vertices identical at file precision must also be
+    // safe to merge, otherwise a nominally closed indexed result exports as
+    // non-manifold edges (the real relief/plaque regression exercises this).
+    out.weld_rounded_positions();
+    out.compact();
+    let report = out.inspect();
+    if !report.watertight || report.flipped != 0 {
+        return Err(format!("the mesh boolean could not store a closed, manifold result at file precision ({} open edges, {} non-manifold edges, {} collapsed triangles); move the model closer to the origin or increase its smallest details before combining", report.open_edges, report.non_manifold_edges, report.degenerate_removed));
+    }
+    // Exact coordinate welding can leave zero-area triangles (for example,
+    // two adjacent cut points round to one). Inspection already judged the
+    // surface after excluding those and duplicate faces. Apply precisely that
+    // cleanup only if it stays closed and needs no winding changes; never fill
+    // holes, move vertices, or flip a shell to force Boolean acceptance.
+    if report.degenerate_removed != 0 || report.duplicates_removed != 0 { out.repair(); }
+    // Check solid volume as well as connectivity. The allowance is bounded
+    // by the actual f32 coordinate quantum times surface area, not a user-
+    // invisible modeling tolerance or a percentage of the desired feature.
+    let (lo, hi) = out.bbox().ok_or("the mesh Boolean lost its solid bounds")?;
+    let quantum = lo.abs().max(hi.abs()).max_element() * f32::EPSILON as f64;
+    let volume = solid.volume().abs();
+    let rounding_bound = 2.0 * solid.surface_area() * quantum + volume * 1e-10;
+    if (out.volume() - volume).abs() > rounding_bound {
+        return Err("the mesh Boolean cannot preserve the solid's volume at file precision; move it closer to the origin or increase its smallest details before combining".into());
+    }
+    out.validate()?;
+    Ok(out)
 }
 
 pub fn boolean(a: &Mesh, b: &Mesh, op: Bool) -> Result<Mesh, String> {
-    if a.len() + b.len() > MAX_TRIS {
-        return Err(format!("the meshes have {} triangles; booleans are limited to {MAX_TRIS}", a.len() + b.len()));
+    boolean_with_limit(a, b, op, TIME_LIMIT)
+}
+
+fn boolean_with_limit(a: &Mesh, b: &Mesh, op: Bool, limit: Duration) -> Result<Mesh, String> {
+    let start = Instant::now();
+    a.validate()?; b.validate()?;
+    if a.len().saturating_add(b.len()) > MAX_TRIS { return Err(format!("mesh booleans support at most {MAX_TRIS} input triangles in total; decimate the meshes before combining")); }
+    if a.is_empty() || b.is_empty() { return Err("a boolean needs two meshes with triangles".into()); }
+    let (mut a, mut b) = (a.clone(), b.clone());
+    a.weld_exact(); b.weld_exact();
+    if !a.repair().watertight || !b.repair().watertight {
+        return Err("mesh booleans require closed, manifold inputs; use Mesh Repair to close holes and remove non-manifold edges before combining".into());
     }
-    // The trees recurse as deep as the mesh is convex, so give them room.
-    let (a, b) = (a.clone(), b.clone());
-    std::thread::Builder::new()
-        .stack_size(512 << 20)
-        .spawn(move || {
-            let (mut a, mut b) = (tree(&a), tree(&b));
-            let mut rest = Vec::new();
-            match op {
-                Bool::Union => {
-                    a.clip_to(&b);
-                    b.clip_to(&a);
-                    b.invert();
-                    b.clip_to(&a);
-                    b.invert();
-                    b.all(&mut rest);
-                    a.build(rest);
-                }
-                Bool::Subtract => {
-                    a.invert();
-                    a.clip_to(&b);
-                    b.clip_to(&a);
-                    b.invert();
-                    b.clip_to(&a);
-                    b.invert();
-                    b.all(&mut rest);
-                    a.build(rest);
-                    a.invert();
-                }
-                Bool::Intersect => {
-                    a.invert();
-                    b.clip_to(&a);
-                    b.invert();
-                    a.clip_to(&b);
-                    b.clip_to(&a);
-                    b.all(&mut rest);
-                    a.build(rest);
-                    a.invert();
-                }
+    check_time(start, limit)?;
+    check_pairs(&a, &a, true, MAX_SELF_PAIRS, MAX_PAIR_EXAMINATIONS, start, limit)?;
+    check_pairs(&b, &b, true, MAX_SELF_PAIRS, MAX_PAIR_EXAMINATIONS, start, limit)?;
+    let pairs = check_pairs(&a, &b, false, MAX_CROSS_PAIRS, MAX_PAIR_EXAMINATIONS, start, limit)?;
+    if a.len().saturating_add(b.len()).saturating_add(pairs.saturating_mul(4)) > MAX_TRIANGLES { return Err(BUDGET_ERROR.into()); }
+    let token = CancelToken::new();
+    let (done, completed) = std::sync::mpsc::channel::<()>();
+    let cancel = token.clone();
+    let remaining = limit.saturating_sub(start.elapsed());
+    let timer = std::thread::Builder::new().name("mesh-boolean-deadline".into()).spawn(move || {
+        if completed.recv_timeout(remaining) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) { cancel.cancel(); }
+    }).map_err(|e| format!("could not start the mesh Boolean deadline: {e}"))?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (a, b) = (input(&a)?, input(&b)?);
+        check_time(start, limit)?;
+        let op = match op { Bool::Union => OpType::Add, Bool::Subtract => OpType::Subtract, Bool::Intersect => OpType::Intersect };
+        let result = a.boolean_with_engine_and_token(&b, op, BooleanEngine::Auto, Some(&token));
+        check_time(start, limit)?;
+        if result.status() != Error::NoError { return Err(format!("the mesh Boolean could not complete ({:?}); repair or decimate the inputs before combining", result.status())); }
+        match output(&result) {
+            Ok(mesh) => Ok(mesh),
+            // Near-coincident tessellations can survive the fast symbolic
+            // path as microscopic sliver shells. Recompute from the original
+            // operands using exact rational arrangements, never patch a seam
+            // or relax the acceptance test on an already damaged result.
+            Err(error) if error.contains("file precision") => {
+                let exact = a.boolean_with_engine_and_token(&b, op, BooleanEngine::Robust, Some(&token));
+                check_time(start, limit)?;
+                if exact.status() != Error::NoError { return Err(format!("the exact mesh Boolean could not complete ({:?}); repair or decimate the inputs before combining",exact.status())); }
+                output(&exact)
             }
-            let mut out = mesh(&a);
-            out.stitch();
-            out
-        })
-        .and_then(|h| h.join().map_err(|_| std::io::Error::other("boolean failed")))
-        .map_err(|e| e.to_string())
+            Err(error) => Err(error),
+        }
+    })).unwrap_or_else(|_| Err("the mesh Boolean solver failed; the original bodies have been preserved".into()));
+    let result = result.and_then(|mesh| { check_time(start, limit)?; Ok(mesh) });
+    let _ = done.send(());
+    let _ = timer.join();
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn expired_deadline_refuses_without_running_solver() {
+        let solid = Manifold::cube(manifold_rust::linalg::Vec3::splat(1.0), true);
+        let mesh = output(&solid).unwrap();
+        assert!(boolean_with_limit(&mesh, &mesh, Bool::Union, Duration::ZERO).unwrap_err().contains("time limit"));
+    }
+    #[test]
+    fn skipped_shared_vertex_candidates_still_consume_work_budget() {
+        let mesh = Mesh::from_indexed(vec![DVec3::ZERO,DVec3::X,DVec3::Y],vec![[0,1,2];16],true).unwrap();
+        assert!(check_pairs(&mesh, &mesh, true, usize::MAX, 32, Instant::now(), TIME_LIMIT).unwrap_err().contains("work budget"));
+    }
+    #[test]
+    fn intersection_candidates_are_bounded_before_solver_allocation() {
+        let m = Mesh::from_tris(vec![[DVec3::ZERO, DVec3::X, DVec3::Y]; 16]);
+        assert!(check_pairs(&m, &m, false, 100, MAX_PAIR_EXAMINATIONS, Instant::now(), TIME_LIMIT).unwrap_err().contains("work budget"));
+    }
 }

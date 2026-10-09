@@ -39,7 +39,7 @@ DOCUMENT
 {"op":"set_parameter","name":"width","expr":"40 mm"}
 {"op":"delete_parameter","name":"width"}
 {"op":"undo"} {"op":"redo"}
-{"op":"save","path":"/abs/part.ferr"} {"op":"open","path":"/abs/part.ferr"}   save takes "cache":true|false to force or skip the geometry cache (by default it is written when the file is a container or the design is slow to rebuild); open uses a matching cache instead of rebuilding, and get_scene_info says "from_cache"
+{"op":"save","path":"/abs/part.ferr"} {"op":"open","path":"/abs/part.ferr"}   save takes "cache":true|false to force or skip the geometry cache (by default it is written when the file is a container or the design is slow to rebuild); open uses a matching locally authenticated cache; foreign/unsigned files rebuild. get_scene_info reports "from_cache" and "geometry_trust"; newer unsupported files are an "unverified_preview" and remain read-only
    A design with reference images or imported meshes is saved as a ZIP container (same JSON inside plus the blobs and a thumbnail); plain designs stay plain JSON. save returns "container" and, when it converted an older plain file, "backup" with the path of the kept original. open reads both forms.
    In the GUI, new and open refuse to discard unsaved work. Save first or set "discard_unsaved":true on that command to explicitly discard it, including inside a batch.
 {"op":"export_stl","path":"/abs/part.stl","units":"mm"}   units default to mm, which is what slicers expect
@@ -140,10 +140,10 @@ FEATURES
 {"op":"rollback","to":ID}                          shows the model as it was just after that feature ("start" = before any, "end" = everything); features added while rolled back are inserted at that point
 {"op":"transform","body":ID,"translate":[x,y,z],"rotate":[rx,ry,rz],"scale":1}   scale about the origin, rotate about X then Y then Z, then translate
 {"op":"combine","target":BODY,"tools":[BODY],"operation":"join","keep_tools":false}   join | cut | intersect between bodies, including imported meshes; a mesh boolean splits only the triangles near the other surface, so a small tool against a scan of millions of triangles is quick
-{"op":"fillet_edges","body":BODY,"edges":[[x,y,z],...],"radius":V}   rounds the edges nearest those points; "edges":"all" takes every edge. An entry can also be {"tag":EDGE_TAG} copied from get_object_info on the body: faces and edges carry tags saying how they were made (swept from a sketch entity, a cap, made by a feature), and a fillet, chamfer, shell, thread, text or face plane finds its faces by tag first when the body changes shape, by position only as a last resort. get_object_info on such a feature reports "resolved": "tag" | "origin" | "position".
+{"op":"fillet_edges","body":BODY,"edges":[[x,y,z],...],"radius":V}   rounds the edges nearest those points; "edges":"all" takes every edge. An entry can also be {"tag":EDGE_TAG} copied from get_object_info on the body: faces and edges carry tags saying how they were made (swept from a sketch entity, a cap, made by a feature), and a fillet, chamfer, shell, thread, text or face plane finds its faces by persistent tag when the body changes shape. Modern removed or ambiguous references fail rather than selecting an unrelated nearby face; untagged or legacy references learn a tag only from a unique saved-location match. get_object_info on such a feature reports "resolved": "tag" | "origin" | "position".
 {"op":"chamfer_edges","body":BODY,"edges":[[x,y,z],...],"distance":V}
 {"op":"shell","body":BODY,"open_faces":[[x,y,z],...],"thickness":V}   hollows the body, leaving the faces nearest those points open
-   get_object_info on an exact body lists its edges and faces under "topology", each with a "point" to use here. Edges and faces are found again by position on every rebuild (where they were, or the same place within the body's bounds), so they survive a body changing size but can be lost if an earlier feature reshapes that area; put fillets, chamfers and shells last.
+   get_object_info on an exact body lists its edges and faces under "topology", each with a "point" to use here. Edges and faces retain their semantic/source identity through supported size and topology edits. Deleted or indistinguishable references request reselection. Placing fillets, chamfers and shells late can still reduce downstream dependencies.
 {"op":"hole","body":BODY,"at":[x,y,z],"thread":"M3","fit":"normal","through":true}   drills a hole entering at that point on the body's surface
    at: one point or a list of points (one hole each). direction: [x,y,z] the way the drill goes; left out, it is straight into the flat face at the first point.
    depth: V, or "through":true. type: simple | counterbore | countersink. fit: plain (give "diameter") | close | normal | loose (clearance for the "thread" size) | tapped (drilled at the tap drill size).
@@ -491,6 +491,7 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
     let doc = &s.doc;
     let f = doc.feature(id).ok_or(format!("nothing has id {id}"))?;
     let mut o = json!({"id": f.id, "name": f.name, "type": f.type_name(), "component": f.owner});
+    if let Some(key) = &f.script_key { o["script_key"] = json!(key); }
     if let Some(level) = s.built.resolutions.get(&id) { o["resolved"] = json!(level.name()); }
     if f.suppressed {
         o["suppressed"] = json!(true);
@@ -650,6 +651,8 @@ fn scene_info(s: &Session) -> J {
         "container": s.container,
         "from_cache": s.from_cache,
         "read_only": s.read_only,
+        "geometry_trust": s.geometry_trust(),
+        "geometry_warning": if s.read_only { Some("Unverified cached preview: this newer timeline cannot be rebuilt by this Ferrender.") } else { None },
         "rebuild_ms": s.rebuild_ms,
         "parameters": doc.params.iter().map(|p| json!({"name": p.name, "expr": p.expr, "value": doc.show_param(&p.name)})).collect::<Vec<_>>(),
         "features": doc.features.iter().filter_map(|f| feature_info(s, f.id).ok()).collect::<Vec<_>>(),
@@ -922,7 +925,15 @@ fn zero(doc: &Document, kind: Kind) -> Value {
 /// Runs one command. `cam` is the app's current view, for screenshots.
 pub fn execute(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
     validate_request(c)?;
-    execute_validated(s, c, cam)
+    execute_validated(s, c, cam).map(|out| preview_provenance(s, out))
+}
+
+fn preview_provenance(s: &Session, mut out: J) -> J {
+    if s.read_only && out.is_object() {
+        out["geometry_trust"] = json!(s.geometry_trust());
+        out["geometry_warning"] = json!("Unverified cached preview: this newer timeline cannot be rebuilt by this Ferrender.");
+    }
+    out
 }
 
 /// Check a complete request before any command is applied, including headless batches.
@@ -1007,7 +1018,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let list = c["commands"].as_array().ok_or("batch needs \"commands\"")?;
             let mut out = Vec::new();
             for (i, cmd) in list.iter().enumerate() {
-                out.push(execute_validated(s, cmd, cam).map_err(|e| format!("command {i} ({}) failed: {e}. The {i} before it were applied.", cmd["op"].as_str().unwrap_or("?")))?);
+                out.push(execute_validated(s, cmd, cam).map(|out| preview_provenance(s, out)).map_err(|e| format!("command {i} ({}) failed: {e}. The {i} before it were applied.", cmd["op"].as_str().unwrap_or("?")))?);
             }
             Ok(json!(out))
         }
@@ -1058,11 +1069,11 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 mesh.extend(picked.iter().flat_map(|b| b.threads.iter().flat_map(|t| t.tris())));
                 mesh.face_ids.clear();
                 let merged = crate::doc::Body { id: 0, name: "union".into(), component:0, placement:glam::DAffine3::IDENTITY, local_bounds:None, mesh, solids: Vec::new(), tags: Vec::new(), edges: Vec::new(), threads: Vec::new(), plain: 0 };
-                let n = io::write_stl([&merged], unit, path.as_ref())?;
-                return Ok(json!({"path": path, "triangles": n, "units": unit.name(), "shells": all.len(), "open_edges": merged.mesh.open_edges()}));
+                let n = io::write_stl_with_provenance([&merged], unit, path.as_ref(), s.read_only)?;
+                return Ok(json!({"path": path, "triangles": n, "units": unit.name(), "shells": all.len(), "open_edges": merged.mesh.open_edges(), "geometry_trust": s.geometry_trust()}));
             }
-            let n = io::write_stl(picked, unit, path.as_ref())?;
-            Ok(json!({"path": path, "triangles": n, "units": unit.name()}))
+            let n = io::write_stl_with_provenance(picked, unit, path.as_ref(), s.read_only)?;
+            Ok(json!({"path": path, "triangles": n, "units": unit.name(), "geometry_trust": s.geometry_trust()}))
         }
         "export_step" => {
             let path = c["path"].as_str().ok_or("export_step needs a \"path\"")?;
@@ -1077,9 +1088,9 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             if solids.is_empty() {
                 return Err("there are no exact bodies to write; STEP cannot hold meshes".into());
             }
-            let bytes = exact::step(solids.iter().copied())?;
+            let bytes = io::step_with_provenance(solids.iter().copied(), s.read_only)?;
             std::fs::write(path, &bytes).map_err(|e| format!("could not write {path}: {e}"))?;
-            Ok(json!({"path": path, "solids": solids.len(), "bytes": bytes.len(), "skipped_mesh_bodies": skipped}))
+            Ok(json!({"path": path, "solids": solids.len(), "bytes": bytes.len(), "skipped_mesh_bodies": skipped, "geometry_trust": s.geometry_trust()}))
         }
         "get_reference" => Ok(json!(REFERENCE)),
         "text" => {

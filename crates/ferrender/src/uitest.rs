@@ -1978,7 +1978,7 @@ fn simple_script_dialog(source: &str) -> crate::scripts_ui::ScriptDlg {
 #[test]
 fn script_reruns_preserve_downstream_references_and_allocate_new_outputs_safely() {
     let mut h = state_harness();
-    let one = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{type: \"box\", width: 10, depth: 10, height: 10}); }";
+    let one = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{output_key: \"original\", type: \"box\", width: 10, depth: 10, height: 10}); }";
     h.state_mut().start_script(simple_script_dialog(one));
     wait_for_script(&mut h);
     let chip = h.state().doc().features[0].id;
@@ -1986,7 +1986,7 @@ fn script_reruns_preserve_downstream_references_and_allocate_new_outputs_safely(
     h.state_mut().execute(&json!({"op":"transform","body":body,"translate":[50,0,0]})).unwrap();
     let transform = h.state().doc().features.last().unwrap().id;
     let before = h.state().doc().clone();
-    let two = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{type: \"box\", width: 20, depth: 10, height: 10}); primitive(#{type: \"box\", width: 5, depth: 5, height: 5, position: [100,0,0]}); }";
+    let two = "const META = #{name: \"Review boxes\"}; fn run(i) { primitive(#{output_key: \"extra\", type: \"box\", width: 5, depth: 5, height: 5, position: [100,0,0]}); primitive(#{output_key: \"original\", type: \"box\", width: 20, depth: 10, height: 10}); }";
     let mut dlg = simple_script_dialog(two); dlg.rerun = Some(chip);
     h.state_mut().start_script(dlg); wait_for_script(&mut h);
     let app = h.state();

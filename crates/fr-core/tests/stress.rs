@@ -99,7 +99,7 @@ fn large_meshes_import_pick_and_round_trip_within_budget() {
         println!("  clustered to {} triangles in {:.2} s", coarse.len(), t.elapsed().as_secs_f64());
         assert!(coarse.len() < 400_000 && coarse.len() > 50_000, "clustering aimed at 200 k triangles and made {}", coarse.len());
 
-        // A boolean with a small tool: only the triangles near the tool are split.
+        // A robust Boolean with a small tool must succeed on a closed scan.
         let tool = {
             let rows = 60;
             let r = (hi - lo).max_element() * 0.08;
@@ -128,10 +128,15 @@ fn large_meshes_import_pick_and_round_trip_within_budget() {
             Ok(cut) => {
                 println!("  cut with a {}-triangle tool in {bool_s:.2} s: {} triangles, {} open edges", tool.len(), cut.len(), cut.open_edges());
                 assert!(report.watertight, "invalid input must be refused");
-                assert!(cut.inspect().watertight, "a successful solid boolean must stay closed and manifold");
+                let result = cut.inspect();
+                assert!(result.watertight, "a successful solid boolean must stay closed and manifold");
+                assert_eq!(result.degenerate_removed, 0);
+                assert_eq!(result.duplicates_removed, 0);
+                assert_eq!(result.flipped, 0);
                 assert!(cut.len() > mesh.len() / 2);
             }
             Err(error) => {
+                assert!(!report.watertight, "a valid closed scan must now combine successfully: {error}");
                 assert!(error.contains("closed, manifold"), "unexpected refusal: {error}");
                 println!("  cut safely refused in {bool_s:.2} s: {error}");
                 let mut check = Session::default();
@@ -145,7 +150,7 @@ fn large_meshes_import_pick_and_round_trip_within_budget() {
                 assert!(check.built.errors.is_empty());
             }
         }
-        assert!(bool_s < 10.0 * m.max(0.5), "the culled boolean took {bool_s:.1} s");
+        assert!(bool_s < 10.0 * m.max(0.5), "the robust boolean took {bool_s:.1} s");
 
         let mut s = Session::default();
         execute(&mut s, &json!({"op": "import_stl", "path": path.display().to_string(), "units": "mm"}), None).unwrap();

@@ -103,8 +103,8 @@ fn every_feature_kind_serializes_as_the_fixture_says() {
     let errors: Vec<_> = s.built.errors.iter().collect();
     assert!(errors.is_empty(), "the fixture document must build cleanly: {errors:?}");
     assert!(io::needs_container(&s.doc), "the import makes this a container design");
-    // The fillet, shell, thread and text learned face tags on their first build, which is format 10.
-    assert_eq!(io::design_version(&s.doc), 10);
+    // The fillet, shell, thread and text learned semantic face tags on their first build, which is format 13.
+    assert_eq!(io::design_version(&s.doc), 13);
     let _ = s.doc.features.iter().filter(|f| matches!(f.kind, FeatureKind::Import(_))).count();
 
     let text = io::to_json(&s.doc);
@@ -126,4 +126,19 @@ fn every_feature_kind_serializes_as_the_fixture_says() {
     let (bytes, container) = io::encode(&s.doc, &io::Extras::default()).unwrap();
     assert!(container);
     assert_eq!(io::decode(&bytes).unwrap(), s.doc);
+}
+
+#[test]
+fn early_v04_ordinal_tag_fixture_migrates_without_changing_its_geometry() {
+    let text=include_str!("fixtures/all-features-v10.ferr");
+    let old=io::from_json(text).unwrap();let features=old.features.len();
+    let s=Session::new(old);
+    assert!(s.built.errors.is_empty(), "legacy fixture failed: {:?}",s.built.errors);
+    assert_eq!(s.doc.features.len(),features);
+    for f in &s.doc.features {match &f.kind {
+        FeatureKind::Blend(b)=>assert!(b.tags.iter().flatten().all(|t|!t.legacy())),
+        FeatureKind::Shell(sh)=>assert!(sh.tags.iter().flatten().all(|t|!t.legacy())),
+        FeatureKind::Thread(t)=>assert!(t.tag.as_ref().is_none_or(|t|!t.legacy())),
+        _=>{},
+    }}
 }

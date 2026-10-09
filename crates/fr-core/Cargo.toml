@@ -10,9 +10,14 @@ cadrum = { version = "=0.8.20", default-features = false }
 earcutr = "0.5.0"
 glam = { version = "0.34.1", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+manifold-rust = { version = "=0.16.0", features = ["parallel"] }
 png = "0.18.1"
+ring = "=0.17.14"
 rhai = { version = "1.26", features = ["serde", "sync"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 ttf-parser = { version = "=0.25.1", default-features = false, features = ["std"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.190"

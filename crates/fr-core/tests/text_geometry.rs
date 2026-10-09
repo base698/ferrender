@@ -64,7 +64,7 @@ fn text_follows_face_when_upstream_thickness_changes() {
     assert!((hi.z-16.).abs()<1e-5);
     let encoded=io::to_json(&s.doc);
     // Text attached to a face learns the face's tag on its first build, which is format 10 (plain lettering stays 2).
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["version"],10);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["version"],13);
     let mut loaded=io::from_json(&encoded).unwrap();
     assert!(loaded.rebuild().errors.is_empty());
     assert!(matches!(loaded.feature(id).unwrap().kind,FeatureKind::Text(_)));
