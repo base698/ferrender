@@ -444,6 +444,69 @@ fn a_refused_constraint_says_what_holds_the_point() {
 }
 
 #[test]
+fn a_midpoint_constraint_moves_a_free_square_onto_the_point() {
+    // The user's square: 10 by 10, held square by horizontals, verticals and two sizes, free to
+    // move. A midpoint constraint between a fixed point and its bottom edge moves the square.
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    let out = exec(&mut h, json!({"op": "add_geometry", "sketch": sid, "items": [
+        {"type": "line", "from": [-100, 0], "to": [-100, 50]},
+        {"type": "rect", "from": [-105, 48], "to": [-95, 58]}]}));
+    let post = out["items"][0]["entities"][0].as_u64().unwrap() as u32;
+    let top = out["items"][0]["points"][1].as_u64().unwrap() as u32;
+    let sides: Vec<u32> = out["items"][1]["entities"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "vertical", "refs": [post]}));
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "distance", "refs": [post], "value": "50 mm"}));
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "fix", "refs": [out["items"][0]["points"][0].as_u64().unwrap()]}));
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let bottom = *sides.iter().find(|e| { let (a, b) = sk.line(**e).unwrap(); (a.y - 48.0).abs() < 1e-6 && (b.y - 48.0).abs() < 1e-6 }).expect("the bottom edge");
+    // A rect comes with its horizontal and vertical constraints.
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "distance", "refs": [bottom], "value": "10 mm"}));
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "distance", "refs": [sides.iter().copied().find(|e| *e != bottom && sk.line(*e).unwrap().0.x == sk.line(*e).unwrap().1.x).unwrap()], "value": "10 mm"}));
+
+    h.state_mut().toast = None;
+    h.state_mut().sel = vec![top, bottom];
+    run(&mut h, Action::Constrain(CKind::Midpoint));
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None, "nothing to refuse");
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    let (a, b) = sk.line(bottom).unwrap();
+    assert!(((a + b) / 2.0 - DVec2::new(-100.0, 50.0)).length() < 1e-6, "the square's bottom midpoint is on the point: {a:?} {b:?}");
+    assert!((a.distance(b) - 10.0).abs() < 1e-6, "and it kept its size");
+    assert!(sk.constraints.values().any(|c| c.kind == CKind::Midpoint));
+    assert_eq!(h.state().report.dof, 0, "the square is now fully placed");
+
+    // The other way round: click the constraint first, then the items. It waits, says what
+    // to click, and applies as soon as the clicks fit.
+    run(&mut h, Action::Undo);
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    assert!(!sk.constraints.values().any(|c| c.kind == CKind::Midpoint));
+    h.state_mut().sel = vec![top];
+    run(&mut h, Action::Constrain(CKind::Midpoint));
+    assert_eq!(h.state().pending_constraint, Some(CKind::Midpoint), "it waits for the line");
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains("now click a point and a line")));
+    assert_eq!(h.state().session.doc.sketch(sid).unwrap().constraints.len(), sk.constraints.len());
+    // Click the bottom edge away from its middle: the post's top is only 2 mm above that.
+    let (a, b) = sk.line(bottom).unwrap();
+    let on = a + (b - a) * 0.25;
+    let p = at(&h, on.x, on.y);
+    click(&mut h, p);
+    assert_eq!(h.state().pending_constraint, None, "the clicked line completed it");
+    let sk = h.state().session.doc.sketch(sid).unwrap().clone();
+    assert!(sk.constraints.values().any(|c| c.kind == CKind::Midpoint), "applied");
+    let (a, b) = sk.line(bottom).unwrap();
+    assert!(((a + b) / 2.0 - DVec2::new(-100.0, 50.0)).length() < 1e-6, "{a:?} {b:?}");
+    // Escape clears a waiting constraint.
+    h.state_mut().sel = vec![top];
+    run(&mut h, Action::Constrain(CKind::Coincident));
+    assert_eq!(h.state().pending_constraint, Some(CKind::Coincident));
+    run(&mut h, Action::Cancel);
+    assert_eq!(h.state().pending_constraint, None);
+}
+
+#[test]
 fn move_tool_moves_the_selection_in_a_sketch() {
     let mut h = harness();
     h.state_mut().create_sketch(Plane::XY);

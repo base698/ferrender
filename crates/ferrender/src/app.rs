@@ -829,6 +829,8 @@ pub struct App {
     /// Geometry immediately before an edited Text feature, keyed by document revision and feature.
     text_base: Option<(u64, Id, Built)>,
     pub(crate) construction_source: Option<(u64, Id, Built)>,
+    /// A constraint clicked before its items were selected: it applies as soon as the clicks fit it.
+    pub pending_constraint: Option<CKind>,
     /// Local exact source geometry is shared across unchanged Text preview frames.
     text_local: Option<((u64, Option<Id>, Id), fr_core::Body)>,
     pub value_edit: Option<ValueEdit>,
@@ -924,6 +926,7 @@ impl App {
             preview: None,
             text_base: None,
             construction_source: None,
+            pending_constraint: None,
             text_local: None,
             value_edit: None,
             typed: None,
@@ -1181,6 +1184,7 @@ impl App {
 
     /// Abandons whatever the current tool was in the middle of.
     pub fn cancel_tool(&mut self) {
+        self.pending_constraint = None;
         self.sketch_capture.clear();
         self.gizmo.clear();
         self.pattern_drag.clear();
@@ -1445,19 +1449,22 @@ impl App {
     /// Applies a constraint to the selection.
     pub fn constrain(&mut self, kind: CKind) {
         let Some((_, sk)) = self.sketch() else { return };
+        let sk = sk.clone();
         let refs: Vec<Id> = self.sel.iter().copied().filter(|i| sk.ref_kind(*i).is_some()).collect();
         // Several lines can be made horizontal or vertical at once.
         let each = matches!(kind, CKind::Horizontal | CKind::Vertical | CKind::Fix) && refs.len() > 1 && refs.iter().all(|r| sk.line(*r).is_some());
-        if let Err(e) = sk.normalize(kind, &refs)
-            && !each
-        {
-            self.toast(format!("Select {} first, then click the constraint. ({e})", kind.needs()));
+        if sk.normalize(kind, &refs).is_err() && !each {
+            // Clicked before its items: wait for them. The next clicks add to the selection,
+            // and the constraint applies as soon as they fit it.
+            self.pending_constraint = Some(kind);
+            let name = kind.name();
+            self.toast(format!("{}{}: now click {}.", name[..1].to_uppercase(), &name[1..], kind.needs()));
             return;
         }
+        self.pending_constraint = None;
         // A constraint the solver cannot satisfy is refused with what already holds the
         // points involved, since "conflicts" alone leaves nothing to act on.
         if !each {
-            let sk = sk.clone();
             let mut trial = sk.clone();
             let dry = trial.add_constraint(kind, &refs, None).and_then(|_| if solver::solve(&mut trial, &[]).ok { Ok(()) } else { Err("it conflicts with the sketch's other constraints".to_owned()) });
             if let Err(e) = dry {
@@ -2567,6 +2574,8 @@ impl App {
                     self.value_edit = None;
                 } else if self.dialog != Dialog::None {
                     self.dialog = Dialog::None;
+                } else if self.pending_constraint.is_some() {
+                    self.pending_constraint = None;
                 } else if !self.clicks.is_empty() || !self.dim_refs.is_empty() {
                     self.cancel_tool();
                 } else if self.tool != Tool::Select {

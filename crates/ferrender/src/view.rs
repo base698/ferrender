@@ -875,7 +875,8 @@ fn reference_select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, sid: Id,
 fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, sid: Id, sk: &Sketch, hover: Hit, moving: bool) {
     if reference_select_tool(app, ui, resp, sid, sk, hover) { return; }
     let colors = ViewColors::new(painter.ctx());
-    let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+    // While a constraint waits for its items, every click adds to the selection.
+    let add = ui.input(|i| i.modifiers.shift || i.modifiers.command) || app.pending_constraint.is_some();
     if resp.drag_started_by(PointerButton::Primary) && !ui.input(|i| i.modifiers.alt || i.key_down(egui::Key::Space)) {
         let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or_default();
         let grab = sketch_pos(app, sk, origin).unwrap_or_default();
@@ -972,6 +973,13 @@ fn select_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter,
             Hit::None if !add => app.sel.clear(),
             Hit::None => {}
             Hit::Point(id) | Hit::Entity(id) | Hit::Label(id) => toggle(&mut app.sel, id, add),
+        }
+        if let Some(kind) = app.pending_constraint {
+            let refs: Vec<Id> = app.sel.iter().copied().filter(|i| sk.ref_kind(*i).is_some()).collect();
+            if sk.normalize(kind, &refs).is_ok() {
+                app.pending_constraint = None;
+                app.constrain(kind);
+            }
         }
     }
     if resp.double_clicked_by(PointerButton::Primary) {
@@ -1669,6 +1677,25 @@ fn pick_sketch_point(app: &App, doc: &Document, pos: Pos2, also: &[Id]) -> Optio
         .map(|(sid, id, _)| (sid, id))
 }
 
+/// What to click for a constraint chosen before its items.
+fn pending_hint(kind: CKind) -> &'static str {
+    match kind {
+        CKind::Coincident => "Coincident: click two points, or a point and a line or curve. Escape cancels.",
+        CKind::Midpoint => "Midpoint: click a point and a line. Escape cancels.",
+        CKind::Horizontal => "Horizontal: click a line, or two points. Escape cancels.",
+        CKind::Vertical => "Vertical: click a line, or two points. Escape cancels.",
+        CKind::Parallel => "Parallel: click two lines. Escape cancels.",
+        CKind::Perpendicular => "Perpendicular: click two lines. Escape cancels.",
+        CKind::Collinear => "Collinear: click two lines. Escape cancels.",
+        CKind::Tangent => "Tangent: click a line and a curve, or two curves. Escape cancels.",
+        CKind::Equal => "Equal: click two lines, or two circles or arcs. Escape cancels.",
+        CKind::Concentric => "Concentric: click two circles or arcs. Escape cancels.",
+        CKind::Symmetric => "Symmetric: click two points, then the mirror line. Escape cancels.",
+        CKind::Fix => "Fix: click a point or a line. Escape cancels.",
+        _ => "Click what the constraint needs. Escape cancels.",
+    }
+}
+
 fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed: bool) {
     let colors = ViewColors::new(painter.ctx());
     let mut doc = app.session.doc.clone();
@@ -2203,6 +2230,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Transform(_), _) => "Drag colored arrows or rotation rings. Shift gives fine moves or 15° rotations. Click another body to move it.",
         (Dialog::Combine(c), _) if c.target.is_none() => "Click the body to keep.",
         (Dialog::Combine(_), _) => "Click the bodies to combine with it.",
+        (_, Mode::Sketch(_)) if app.pending_constraint.is_some() => pending_hint(app.pending_constraint.unwrap()),
         (_, Mode::Sketch(_)) => app.tool.hint(app.clicks.len()),
         _ => "Drag to orbit, Shift-drag or middle-drag to pan, scroll to zoom. Click a face to select it.",
     };

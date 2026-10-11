@@ -202,9 +202,18 @@ fn constraint_button(app: &mut App, ui: &mut Ui, kind: CKind) {
     if resp.hovered() {
         ui.painter().rect_filled(rect, 4.0, colors.hover);
     }
-    view::constraint_icon(ui.painter(), rect.shrink(3.0), kind, colors.ink);
+    // Dimmed when the selection is not what this constraint takes, with the selection named,
+    // so that the wrong pick is seen before the click rather than in a passing toast.
+    let selected: Vec<fr_core::Id> = app.sketch().map(|(_, sk)| app.sel.iter().copied().filter(|i| sk.ref_kind(*i).is_some()).collect()).unwrap_or_default();
+    let fits = app.sketch().is_some_and(|(_, sk)| {
+        let each = matches!(kind, CKind::Horizontal | CKind::Vertical | CKind::Fix) && selected.len() > 1 && selected.iter().all(|r| sk.line(*r).is_some());
+        each || sk.normalize(kind, &selected).is_ok()
+    });
+    view::constraint_icon(ui.painter(), rect.shrink(3.0), kind, if fits || selected.is_empty() { colors.ink } else { colors.muted });
     let name = kind.name();
-    if resp.on_hover_text(format!("{}{}: select {}, then click.", name[..1].to_uppercase(), &name[1..], kind.needs())).clicked() {
+    let have = app.sketch().map(|(_, sk)| selected.iter().map(|i| if sk.points.contains_key(i) { "a point" } else if sk.line(*i).is_some() { "a line" } else { "a curve" }).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    let tip = if selected.is_empty() || fits { format!("{}{}: select {}, then click.", name[..1].to_uppercase(), &name[1..], kind.needs()) } else { format!("{}{} needs {}; selected now: {have}.", name[..1].to_uppercase(), &name[1..], kind.needs(), ) };
+    if resp.on_hover_text(tip).clicked() {
         let ctx = ui.ctx().clone();
         app.run(&ctx, Action::Constrain(kind));
     }
