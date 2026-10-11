@@ -1012,7 +1012,10 @@ impl App {
     }
 
     pub fn toast(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), self.now + 4.0));
+        // Long enough to read: four seconds, plus time for a longer message, up to twelve.
+        let msg = msg.into();
+        let shown = (4.0 + msg.len() as f64 * 0.04).min(12.0);
+        self.toast = Some((msg, self.now + shown));
     }
 
     fn file_error(&mut self, title: &str, path: &Path, message: String, guidance: &'static str) {
@@ -1450,6 +1453,35 @@ impl App {
         {
             self.toast(format!("Select {} first, then click the constraint. ({e})", kind.needs()));
             return;
+        }
+        // A constraint the solver cannot satisfy is refused with what already holds the
+        // points involved, since "conflicts" alone leaves nothing to act on.
+        if !each {
+            let sk = sk.clone();
+            let mut trial = sk.clone();
+            let dry = trial.add_constraint(kind, &refs, None).and_then(|_| if solver::solve(&mut trial, &[]).ok { Ok(()) } else { Err("it conflicts with the sketch's other constraints".to_owned()) });
+            if let Err(e) = dry {
+                let unit = self.doc().units;
+                let name = |r: &Id| if sk.points.contains_key(r) { format!("point {r}") } else { format!("line {r}") };
+                let points: Vec<Id> = refs.iter().copied().filter(|r| sk.points.contains_key(r)).collect();
+                let mut msg = format!("{} was not added: {e}.", { let n = kind.name(); n[..1].to_uppercase() + &n[1..] });
+                if kind == CKind::Midpoint && let ([p], Some(line)) = (points.as_slice(), refs.iter().find(|r| sk.line(**r).is_some()).copied()) && let Some((a, b)) = sk.line(line) {
+                    let m = (a + b) / 2.0;
+                    msg.push_str(&format!(" It would move point {p} to the middle of line {line}, at ({}, {}) {}.", fr_core::units::fmt_len(m.x, unit), fr_core::units::fmt_len(m.y, unit), unit.name()));
+                }
+                for p in &points {
+                    let through: Vec<Id> = sk.entities.keys().copied().filter(|e| sk.ent_points(*e).contains(p)).collect();
+                    let holders: Vec<String> = sk.constraints.values().filter(|c| c.refs.contains(p) || c.refs.iter().any(|r| through.contains(r))).map(|c| {
+                        let value = c.value.as_ref().map(|v| format!(" {}", v.expr)).unwrap_or_default();
+                        format!("{}{} on {}", c.kind.name(), value, c.refs.iter().map(name).collect::<Vec<_>>().join(" and "))
+                    }).collect();
+                    if !holders.is_empty() {
+                        msg.push_str(&format!(" Point {p} is held by {}; remove one of those, or choose another point.", holders.join(", ")));
+                    }
+                }
+                self.toast(msg);
+                return;
+            }
         }
         let ok = self.sketch_edit(|sk, _| {
             if each {

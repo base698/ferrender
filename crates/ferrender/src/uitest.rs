@@ -419,6 +419,31 @@ fn loft_offers_a_lone_sketch_point_as_its_tip() {
 }
 
 #[test]
+fn a_refused_constraint_says_what_holds_the_point() {
+    // The user's case: the top of a vertical 50 mm line asked to be the midpoint of a bottom line.
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    let out = exec(&mut h, json!({"op": "add_geometry", "sketch": sid, "items": [{"type": "line", "from": [0, 0], "to": [-100, 0]}, {"type": "line", "from": [-100, 0], "to": [-100, 50]}]}));
+    let bottom = out["items"][0]["entities"][0].as_u64().unwrap() as u32;
+    let left = out["items"][1]["entities"][0].as_u64().unwrap() as u32;
+    let top = out["items"][1]["points"][1].as_u64().unwrap() as u32;
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "horizontal", "refs": [bottom]}));
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "distance", "refs": [bottom], "value": "100 mm"}));
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "vertical", "refs": [left]}));
+    exec(&mut h, json!({"op": "add_constraint", "sketch": sid, "kind": "distance", "refs": [left], "value": "50 mm"}));
+    let before = h.state().session.doc.sketch(sid).unwrap().clone();
+    h.state_mut().sel = vec![top, bottom];
+    run(&mut h, Action::Constrain(CKind::Midpoint));
+    let toast = h.state().toast.as_ref().map(|t| t.0.clone()).expect("the refusal is shown");
+    assert!(toast.contains("Midpoint was not added") && toast.contains(&format!("move point {top} to the middle of line {bottom}")) && toast.contains("vertical on line") && toast.contains("distance 50 mm"), "{toast}");
+    assert_eq!(h.state().session.doc.sketch(sid).unwrap().constraints.len(), before.constraints.len(), "nothing was added");
+    assert!(!h.state().session.can_undo() || h.state().session.doc.sketch(sid).unwrap() == &before, "and no undo step was left behind");
+}
+
+#[test]
 fn move_tool_moves_the_selection_in_a_sketch() {
     let mut h = harness();
     h.state_mut().create_sketch(Plane::XY);
