@@ -1,8 +1,10 @@
 //! Finds the closed regions of a sketch that can be extruded or revolved.
 //!
 //! Lines and arcs that meet at their ends are traced into faces, so a
-//! rectangle split by a line gives two regions. Shapes that cross without
-//! sharing a point are not split where they cross.
+//! rectangle split by a line gives two regions. Lines are also split where a
+//! sketch point lies along them and where they cross another line, so a
+//! rectangle drawn against another's edge, or a line drawn across a shape,
+//! bounds regions the way it looks. Arcs and splines split only at their ends.
 
 use std::collections::BTreeMap;
 
@@ -241,35 +243,92 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
     let node = |id: Id| index[&nodes[&id]];
 
     struct Edge {
+        /// The entity the piece is named by, and every entity it lies on.
         id: Id,
+        ids: Vec<Id>,
         a: usize,
         b: usize,
         pts: Vec<DVec2>,
         seg: Seg,
     }
-    let mut edges = Vec::new();
+    let mut edges: Vec<Edge> = Vec::new();
     let mut faces: Vec<Face> = Vec::new();
     // Each closed curve is a face and a component of its own.
     let mut hulls: Vec<(usize, Vec<DVec2>, Vec<Seg>, Vec<Id>)> = Vec::new();
-    let mut next_comp = ids.len();
-    for (id, e) in sk.entities.iter().filter(|(_, e)| !e.construction) {
+    // Node positions: the sketch's points first, then where lines cross each other.
+    let mut pos: Vec<DVec2> = ids.iter().map(|id| sk.points[id]).collect();
+    let representative: Vec<usize> = (0..ids.len()).filter(|n| index[&nodes[&ids[*n]]] == *n).collect();
+    const NEAR: f64 = 1e-6;
+
+    // Lines: split where a point lies along them and where they cross another line, then
+    // pieces that lie on two entities (a square's side drawn along a rectangle's edge) are one piece.
+    let lines: Vec<(Id, usize, usize)> = sk.entities.iter().filter(|(_, e)| !e.construction).filter_map(|(id, e)| {
+        let Geom::Line { a, b } = e.geom else { return None };
+        let (a, b) = (node(a), node(b));
+        (a != b && pos[a].distance(pos[b]) > NEAR).then_some((*id, a, b))
+    }).collect();
+    let mut cuts: Vec<Vec<(f64, usize)>> = vec![Vec::new(); lines.len()];
+    for (i, &(_, a, b)) in lines.iter().enumerate() {
+        let (pa, pb) = (pos[a], pos[b]);
+        let d = pb - pa;
+        let len2 = d.length_squared();
+        for &n in &representative {
+            if n == a || n == b { continue; }
+            let t = (pos[n] - pa).dot(d) / len2;
+            if t > 1e-9 && t < 1.0 - 1e-9 && (pa + d * t).distance(pos[n]) < NEAR {
+                cuts[i].push((t, n));
+            }
+        }
+    }
+    for i in 0..lines.len() {
+        for j in i + 1..lines.len() {
+            let (pa, pb) = (pos[lines[i].1], pos[lines[i].2]);
+            let (qa, qb) = (pos[lines[j].1], pos[lines[j].2]);
+            let (d, e) = (pb - pa, qb - qa);
+            let cross = d.perp_dot(e);
+            if cross.abs() < 1e-12 * d.length() * e.length() { continue; }
+            let t = (qa - pa).perp_dot(e) / cross;
+            let u = (qa - pa).perp_dot(d) / cross;
+            if t <= 1e-9 || t >= 1.0 - 1e-9 || u <= 1e-9 || u >= 1.0 - 1e-9 { continue; }
+            let p = pa + d * t;
+            let n = match pos.iter().position(|q| q.distance(p) < NEAR) { Some(n) => n, None => { pos.push(p); pos.len() - 1 } };
+            if n != lines[i].1 && n != lines[i].2 { cuts[i].push((t, n)); }
+            if n != lines[j].1 && n != lines[j].2 { cuts[j].push((u, n)); }
+        }
+    }
+    for (i, &(id, a, b)) in lines.iter().enumerate() {
+        let mut along = std::mem::take(&mut cuts[i]);
+        along.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut run: Vec<usize> = vec![a];
+        for (_, n) in along { if !run.contains(&n) && n != b { run.push(n); } }
+        run.push(b);
+        for w in run.windows(2) {
+            let (u, v) = (w[0], w[1]);
+            if let Some(same) = edges.iter_mut().find(|e| matches!(e.seg, Seg::Line(..)) && ((e.a == u && e.b == v) || (e.a == v && e.b == u))) {
+                if !same.ids.contains(&id) { same.ids.push(id); }
+                continue;
+            }
+            edges.push(Edge { id, ids: vec![id], a: u, b: v, pts: vec![pos[u], pos[v]], seg: Seg::Line(pos[u], pos[v]) });
+        }
+    }
+
+    let mut next_comp = pos.len();
+    for (id, e) in sk.entities.iter().filter(|(_, e)| !e.construction && !matches!(e.geom, Geom::Line { .. })) {
         let (a, b) = match e.geom {
-            Geom::Line { a, b } => (node(a), node(b)),
             Geom::Arc { s, e, .. } => (node(s), node(e)),
             Geom::Spline { a,d,.. } => (node(a),node(d)),
-            Geom::Circle { .. } => (0, 0),
+            _ => (0, 0),
         };
         let mut pts = sk.polyline(*id);
         if pts.len() < 2 { continue; }
         if a != b {
             // Ends are taken from the shared node, so neighbouring pieces meet exactly.
             let seg = match e.geom {
-                Geom::Line { .. } => Seg::Line(sk.points[&ids[a]], sk.points[&ids[b]]),
                 Geom::Spline { b:fit_b,c:fit_c,.. } => Seg::Spline([sk.points[&ids[a]],sk.pos(fit_b),sk.pos(fit_c),sk.points[&ids[b]]]),
                 _ => Seg::Arc(sk.points[&ids[a]], pts[pts.len() / 2], sk.points[&ids[b]]),
             };
-            edges.push(Edge { id: *id, a, b, pts, seg });
-        } else if !matches!(e.geom, Geom::Line { .. }) {
+            edges.push(Edge { id: *id, ids: vec![*id], a, b, pts, seg });
+        } else {
             pts.pop();
             if signed_area(&pts).abs() > 1e-9 {
                 let seg = match e.geom {
@@ -312,7 +371,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
     for list in out.values_mut() {
         list.sort_by(|a, b| dir(*a).total_cmp(&dir(*b)));
     }
-    let mut cuf: Vec<usize> = (0..ids.len()).collect();
+    let mut cuf: Vec<usize> = (0..pos.len()).collect();
     for e in &edges {
         let (a, b) = (find(&mut cuf, e.a), find(&mut cuf, e.b));
         cuf[a] = b;
@@ -332,7 +391,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
             } else {
                 poly.extend(e.pts[1..].iter().rev());
             }
-            used.push(e.id);
+            used.extend(e.ids.iter().copied());
             path_ids.push(e.id);
             path.push(if h % 2 == 0 { e.seg } else { e.seg.reversed() });
             // Turn as far left as possible at the far end, keeping the face on the left.
