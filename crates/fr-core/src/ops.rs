@@ -352,6 +352,22 @@ impl Sketch {
                 out.push(id);
                 continue;
             }
+            // Seen edge-on, a flat outline falls along one line. That is one line from end to
+            // end, whose middle is the outline's middle, not every step of the outline along it.
+            if let Some(first) = pts.first() {
+                let far = |from: DVec2| pts.iter().copied().max_by(|a, b| a.distance(from).total_cmp(&b.distance(from))).unwrap_or(from);
+                let (a, b) = (far(*first), far(far(*first)));
+                let along = b - a;
+                if along.length() > 1e-6 && pts.iter().all(|p| (along.perp_dot(*p - a) / along.length()).abs() < 1e-6) {
+                    let (a, b) = (self.point_at(a, 1e-6), self.point_at(b, 1e-6));
+                    let exists = self.entities.values().any(|e| matches!(e.geom, Geom::Line { a: x, b: y } if (x, y) == (a, b) || (x, y) == (b, a)));
+                    if a != b && !exists {
+                        out.push(self.add_line(a, b));
+                        self.fixed.extend([a, b]);
+                    }
+                    continue;
+                }
+            }
             let ids: Vec<Id> = pts.iter().map(|p| self.point_at(*p, 1e-6)).collect();
             for i in 0..ids.len() {
                 let (a, b) = (ids[i], ids[(i + 1) % ids.len()]);

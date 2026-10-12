@@ -83,6 +83,28 @@ pub struct Chain {
     pub closed: bool,
 }
 
+/// The entities joined end to end with `through`, itself among them: the run that a click
+/// on one curve of a sketch means, when the sketch holds other things as well. A circle or
+/// ellipse is a run by itself; construction geometry is never part of one.
+pub fn run_through(sk: &Sketch, through: Id) -> Vec<Id> {
+    let nodes = point_nodes(sk);
+    let ends = |id: Id| match sk.entities.get(&id).filter(|e| !e.construction)?.geom {
+        Geom::Line { a, b } => Some([nodes[&a], nodes[&b]]),
+        Geom::Arc { s, e, .. } => Some([nodes[&s], nodes[&e]]),
+        Geom::Spline { a, d, .. } => Some([nodes[&a], nodes[&d]]),
+        Geom::Circle { .. } | Geom::Ellipse { .. } => None,
+    };
+    let Some(first) = ends(through) else { return vec![through] };
+    let (mut run, mut reached) = (vec![through], first.to_vec());
+    loop {
+        let more: Vec<(Id, [Id; 2])> = sk.entities.keys().filter(|id| !run.contains(id)).filter_map(|id| ends(*id).map(|e| (*id, e))).filter(|(_, e)| e.iter().any(|n| reached.contains(n))).collect();
+        if more.is_empty() { break; }
+        for (id, e) in more { run.push(id); reached.extend(e); }
+    }
+    run.sort();
+    run
+}
+
 /// Orders sketch entities into one path. `pick` names the entities to use, in
 /// any order; empty means every non-construction entity of the sketch. An open
 /// path starts at the free end of the first entity named (or of the lowest id).

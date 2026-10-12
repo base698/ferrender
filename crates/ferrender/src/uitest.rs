@@ -732,6 +732,47 @@ fn an_arc_drawn_onto_an_ellipse_closes_against_it() {
 }
 
 #[test]
+fn sweep_takes_the_run_joined_to_a_clicked_curve() {
+    // A path sketch that also holds other lines, as one does after projecting an outline into it.
+    let mut h = harness();
+    let exec = |h: &mut H, c: serde_json::Value| h.state_mut().execute(&c).unwrap_or_else(|e| panic!("{c}: {e}"));
+    let newest = |h: &H| h.state().doc().sketches().last().unwrap().0.id;
+    exec(&mut h, json!({"op": "create_sketch", "plane": "XY"}));
+    let path = newest(&h);
+    let out = exec(&mut h, json!({"op": "add_geometry", "sketch": path, "items": [
+        {"type": "spline", "points": [[0, 0], [8, 6], [16, 6], [24, 0]]},
+        {"type": "spline", "points": [[24, 0], [30, -6], [38, -6], [44, 0]]},
+        {"type": "line", "from": [0, 20], "to": [10, 20]},
+        {"type": "line", "from": [0, 25], "to": [10, 25]},
+    ]}));
+    let (first, second) = (out["items"][0]["entities"][0].as_u64().unwrap() as u32, out["items"][1]["entities"][0].as_u64().unwrap() as u32);
+    exec(&mut h, json!({"op": "create_sketch", "plane": "YZ"}));
+    let profile = newest(&h);
+    exec(&mut h, json!({"op": "add_geometry", "sketch": profile, "items": [{"type": "circle", "center": [0, 0], "radius": 1}]}));
+    h.state_mut().fit();
+    h.run_steps(3);
+    run(&mut h, Action::Sweep);
+    let sweep_of = |h: &H| match &h.state().dialog { Dialog::Feature(f) => f.sweep.clone().expect("the sweep dialog"), other => panic!("the sweep dialog should be open, not {other:?}") };
+    assert_eq!(sweep_of(&h).path_sketch, None, "a sketch that is not one run is not taken as the path by itself");
+    // Click on the second spline, away from its points and clear of the dialog.
+    let curve = h.state().doc().sketch(path).unwrap().polyline(second);
+    let on = curve[curve.len() * 2 / 3];
+    let p = crate::view::to_screen(h.state(), DVec3::new(on.x, on.y, 0.0));
+    h.hover_at(p);
+    h.run_steps(2);
+    click(&mut h, p);
+    let w = sweep_of(&h);
+    assert_eq!(w.path_sketch, Some(path));
+    assert_eq!(w.path, vec![first, second], "the two splines joined end to end, without the stray lines");
+    h.run_steps(3);
+    assert_eq!(h.state().preview.as_ref().and_then(|p| p.2.clone()), None, "and that path sweeps");
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None);
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+}
+
+#[test]
 fn move_tool_moves_the_selection_in_a_sketch() {
     let mut h = harness();
     h.state_mut().create_sketch(Plane::XY);

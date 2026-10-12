@@ -201,3 +201,54 @@ fn shapes_drawn_up_to_an_ellipse_close_against_it() {
     let got = exact_areas(&mut s, sid);
     assert!((got[0] + got[1] - PI * a * b).abs() < 1e-5, "{got:?} should make up {}", PI * a * b);
 }
+
+#[test]
+fn a_circle_seen_edge_on_projects_as_one_line() {
+    // The round top of a post, projected into a sketch that looks at it from the side.
+    let mut s = Session::default();
+    cmd(&mut s, json!({"op": "primitive", "type": "cylinder", "diameter": 4, "height": 14, "position": [5, 20, 0]}));
+    let body = s.built.bodies[0].id;
+    cmd(&mut s, json!({"op": "create_sketch", "plane": "XZ"}));
+    let sid = s.doc.sketches().last().unwrap().0.id;
+    let out = cmd(&mut s, json!({"op": "project", "sketch": sid, "body": body, "point": [5, 20, 14]}));
+    assert_eq!(out["new"].as_array().unwrap().len(), 1, "one line, not a row of short ones: {out}");
+    let sk = s.doc.sketch(sid).unwrap().clone();
+    let line = sk.line(out["new"][0].as_u64().unwrap() as Id).expect("a line");
+    let (lo, hi) = if line.0.x < line.1.x { line } else { (line.1, line.0) };
+    assert!((lo - glam::DVec2::new(3.0, 14.0)).length() < 1e-6 && (hi - glam::DVec2::new(7.0, 14.0)).length() < 1e-6, "{line:?}");
+    assert!((((lo + hi) / 2.0) - glam::DVec2::new(5.0, 14.0)).length() < 1e-6, "its middle is the circle's centre");
+    // Projecting it again adds nothing.
+    let again = cmd(&mut s, json!({"op": "project", "sketch": sid, "body": body, "point": [5, 20, 14]}));
+    assert!(again["new"].as_array().unwrap().is_empty());
+    // Seen from above it is still a circle.
+    cmd(&mut s, json!({"op": "create_sketch", "plane": "XY", "offset": 14}));
+    let top = s.doc.sketches().last().unwrap().0.id;
+    let out = cmd(&mut s, json!({"op": "project", "sketch": top, "body": body, "point": [5, 20, 14]}));
+    let made = out["new"][0].as_u64().unwrap() as Id;
+    assert!(s.doc.sketch(top).unwrap().curve(made).is_some_and(|c| (c.1 - 2.0).abs() < 1e-6));
+}
+
+#[test]
+fn a_click_on_a_curve_means_the_run_joined_to_it() {
+    use fr_core::profile::{chain, run_through};
+    let mut s = Session::default();
+    cmd(&mut s, json!({"op": "create_sketch", "plane": "XY"}));
+    let sid = s.doc.sketches().last().unwrap().0.id;
+    let out = cmd(&mut s, json!({"op": "add_geometry", "sketch": sid, "items": [
+        {"type": "spline", "points": [[0, 0], [8, 6], [16, 6], [24, 0]]},
+        {"type": "spline", "points": [[24, 0], [30, -6], [38, -6], [44, 0]]},
+        {"type": "line", "from": [0, 20], "to": [10, 20]},
+        {"type": "line", "from": [0, 25], "to": [10, 25]},
+        {"type": "circle", "center": [60, 0], "radius": 3},
+    ]}));
+    let id = |i: usize| out["items"][i]["entities"][0].as_u64().unwrap() as Id;
+    cmd(&mut s, json!({"op": "add_geometry", "sketch": sid, "construction": true, "items": [{"type": "line", "from": [44, 0], "to": [0, 20]}]}));
+    let sk = s.doc.sketch(sid).unwrap().clone();
+    assert!(chain(&sk, &[]).is_err(), "the whole sketch is not one path");
+    let run = run_through(&sk, id(0));
+    assert_eq!(run, vec![id(0), id(1)], "the two splines, joined; the construction line does not carry it on to the lines");
+    assert!(chain(&sk, &run).is_ok_and(|c| c.segs.len() == 2 && !c.closed));
+    assert_eq!(run_through(&sk, id(1)), vec![id(0), id(1)]);
+    assert_eq!(run_through(&sk, id(2)), vec![id(2)]);
+    assert_eq!(run_through(&sk, id(4)), vec![id(4)], "a circle is a run by itself");
+}

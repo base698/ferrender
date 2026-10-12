@@ -1911,7 +1911,15 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                             None => w.path.push(entity),
                         }
                     } else {
-                        w.path.clear();
+                        // The whole sketch when it is one run. Otherwise the run joined to the
+                        // clicked curve, so that other things in the sketch do not get in the way.
+                        w.path = match doc.sketch(sid) {
+                            Some(sk) if fr_core::profile::chain(sk, &[]).is_err() => {
+                                let run = fr_core::profile::run_through(sk, entity);
+                                if fr_core::profile::chain(sk, &run).is_ok() { run } else { vec![entity] }
+                            }
+                            _ => Vec::new(),
+                        };
                     }
                 } else if let Some((sid, p)) = over {
                     // Both sketches may be closed. Let a region click correct
