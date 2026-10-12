@@ -103,6 +103,43 @@ fn run(h: &mut H, a: Action) {
 }
 
 #[test]
+fn a_rectangle_drawn_from_its_centre_stays_about_it() {
+    let mut h = harness();
+    run(&mut h, Action::NewSketch);
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!("should be editing the new sketch") };
+    let sketch = |h: &H| h.state().session.doc.sketch(sid).unwrap().clone();
+
+    // Centre on the origin, then a corner.
+    run(&mut h, Action::Tool(Tool::CenterRect));
+    let (centre, corner) = (at(&h, 0.0, 0.0), at(&h, 20.0, 10.0));
+    click(&mut h, centre);
+    click(&mut h, corner);
+    let sk = sketch(&h);
+    assert_eq!(sk.entities.values().filter(|e| !e.construction).count(), 4);
+    assert_eq!(sk.entities.values().filter(|e| e.construction).count(), 1, "a construction diagonal ties the corners to the centre");
+    assert_eq!(sk.constraints.values().filter(|c| c.kind == CKind::Midpoint).count(), 1);
+    assert_eq!(h.state().report.dof, 2, "only its width and height are free");
+    let regions = fr_core::profile::profiles(&sk);
+    assert_eq!(regions.len(), 1, "the diagonal does not split the rectangle");
+    assert!((regions[0].area().abs() - 800.0).abs() < 1e-6, "40 by 20 about the origin: {}", regions[0].area());
+
+    // Dimension the top edge: the rectangle widens both ways.
+    run(&mut h, Action::Tool(Tool::Dimension));
+    let edge = at(&h, 5.0, 10.0);
+    click(&mut h, edge);
+    assert!(h.state().value_edit.is_some(), "the dimension box should open");
+    h.state_mut().value_edit.as_mut().unwrap().text = "60 mm".into();
+    assert!(h.state_mut().commit_value());
+    h.step();
+    let sk = sketch(&h);
+    let xs: Vec<f64> = sk.points.iter().filter(|(id, _)| **id != 0).map(|(_, p)| p.x).collect();
+    let (lo, hi) = xs.iter().fold((f64::MAX, f64::MIN), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+    assert!((lo + 30.0).abs() < 1e-6 && (hi - 30.0).abs() < 1e-6, "60 wide about the origin: {lo} to {hi}");
+}
+
+#[test]
 fn sketch_dimension_copy_paste_and_extrude() {
     let mut h = harness();
     assert!(h.state().gpu, "the test harness should give the app a GPU viewport");

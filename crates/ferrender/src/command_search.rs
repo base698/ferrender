@@ -78,6 +78,7 @@ pub fn commands(app: &App) -> Vec<Command> {
             ("Select",Tool::Select,"V","Select and drag sketch geometry."),
             ("Line",Tool::Line,"L","Draw connected straight lines."),
             ("Rectangle",Tool::Rect,"R","Draw a rectangle from opposite corners."),
+            ("Center Rectangle",Tool::CenterRect,"","Draw a rectangle from its center and one corner."),
             ("Circle",Tool::Circle,"C","Draw a circle from its center and radius."),
             ("Ellipse",Tool::Ellipse,"","Draw an ellipse from its center, the end of one axis, and its width."),
             ("Arc",Tool::Arc,"A","Draw an arc using its center and endpoints."),

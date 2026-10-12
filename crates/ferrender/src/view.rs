@@ -1270,7 +1270,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     let from = (matches!(tool, Tool::Line | Tool::Ellipse) && app.clicks.len() == 1).then(|| app.clicks[0].p);
     // Sizes can be typed for these once their first point is down.
     let names: &[&str] = match (tool, app.clicks.len()) {
-        (Tool::Rect, 1) => &["Width", "Height"],
+        (Tool::Rect | Tool::CenterRect, 1) => &["Width", "Height"],
         (Tool::Circle, 1) => &["Diameter"],
         (Tool::Line, 1) => &["Length", "Angle"],
         (Tool::Arc3, 2) => &["Diameter"],
@@ -1317,6 +1317,14 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
                     s.p.y = a.y + h * side(s.p.y - a.y);
                 }
             }
+            Tool::CenterRect => {
+                if let Some(w) = sizes[0] {
+                    s.p.x = a.x + w / 2.0 * side(s.p.x - a.x);
+                }
+                if let Some(h) = sizes[1] {
+                    s.p.y = a.y + h / 2.0 * side(s.p.y - a.y);
+                }
+            }
             Tool::Circle => s.p = a + (s.p - a).try_normalize().unwrap_or(DVec2::X) * sizes[0].unwrap_or(0.0) / 2.0,
             Tool::Line => if let Some(length) = sizes[0] { s.p = a + (s.p - a).normalize_or(DVec2::X) * length; },
             Tool::Arc3 => match arc_bulge_for_diameter(a, app.clicks[1].p, s.p, sizes[0].unwrap_or(0.0)) {
@@ -1347,6 +1355,13 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
             let pts = vec![px(a), px(DVec2::new(b.x, a.y)), px(b), px(DVec2::new(a.x, b.y))];
             painter.add(Shape::closed_line(pts, stroke));
             boxes = Some((px(DVec2::new((a.x + b.x) / 2.0, a.y.max(b.y))), vec![(b.x - a.x).abs(), (b.y - a.y).abs()]));
+        }
+        (Tool::CenterRect, 1) => {
+            let (a, b) = (c[0].p * 2.0 - s.p, s.p);
+            let pts = vec![px(a), px(DVec2::new(b.x, a.y)), px(b), px(DVec2::new(a.x, b.y))];
+            painter.add(Shape::closed_line(pts, stroke));
+            painter.extend(Shape::dashed_line(&[px(a), px(b)], stroke, 5.0, 4.0));
+            boxes = Some((px(DVec2::new(c[0].p.x, a.y.max(b.y))), vec![(b.x - a.x).abs(), (b.y - a.y).abs()]));
         }
         (Tool::Circle, 1) => {
             let r = c[0].p.distance(s.p);

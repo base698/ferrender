@@ -80,7 +80,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "New Sketch", "", Action::NewSketch);
             item(app, ui, "Finish Sketch", "", Action::FinishSketch);
             ui.separator();
-            for (label, key, tool) in [("Select", "V", Tool::Select), ("Line", "L", Tool::Line), ("Rectangle", "R", Tool::Rect), ("Circle", "C", Tool::Circle), ("Arc", "A", Tool::Arc), ("3-Point Arc", "", Tool::Arc3), ("Tangent Arc", "", Tool::TangentArc), ("Spline", "", Tool::Spline), ("Ellipse", "", Tool::Ellipse), ("Point", "P", Tool::Point), ("Dimension", "D", Tool::Dimension)] {
+            for (label, key, tool) in [("Select", "V", Tool::Select), ("Line", "L", Tool::Line), ("Rectangle", "R", Tool::Rect), ("Center Rectangle", "", Tool::CenterRect), ("Circle", "C", Tool::Circle), ("Arc", "A", Tool::Arc), ("3-Point Arc", "", Tool::Arc3), ("Tangent Arc", "", Tool::TangentArc), ("Spline", "", Tool::Spline), ("Ellipse", "", Tool::Ellipse), ("Point", "P", Tool::Point), ("Dimension", "D", Tool::Dimension)] {
                 item(app, ui, label, key, Action::Tool(tool));
             }
             item(app, ui, "Point Coordinates…", "", Action::PointCoordinates);
@@ -235,6 +235,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 for (glyph, label, tool, tip) in [
                     (icon::LINE_SEGMENT, "Line", Tool::Line, "Line (L)"),
                     (icon::RECTANGLE, "Rectangle", Tool::Rect, "Two-point rectangle (R)"),
+                    (icon::RECTANGLE_DASHED, "Center Rect", Tool::CenterRect, "Rectangle from its centre and one corner; it stays about its centre"),
                     (icon::CIRCLE, "Circle", Tool::Circle, "Centre and radius circle (C)"),
                     (icon::EGG, "Ellipse", Tool::Ellipse, "Ellipse: its centre, the end of one axis, then its width"),
                     (icon::CIRCLE_NOTCH, "Arc", Tool::Arc, "Centre, start and end arc (A)"),

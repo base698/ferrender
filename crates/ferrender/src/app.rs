@@ -27,6 +27,8 @@ pub enum Tool {
     Select,
     Line,
     Rect,
+    /// A rectangle from its centre and one corner; the centre stays its centre.
+    CenterRect,
     Circle,
     Arc,
     Arc3,
@@ -49,7 +51,7 @@ impl Tool {
     /// Clicks needed to place one of these.
     pub fn clicks(self) -> usize {
         match self {
-            Tool::Line | Tool::Rect | Tool::Circle | Tool::Polygon | Tool::TangentArc => 2,
+            Tool::Line | Tool::Rect | Tool::CenterRect | Tool::Circle | Tool::Polygon | Tool::TangentArc => 2,
             Tool::Arc | Tool::Arc3 | Tool::Ellipse => 3,
             Tool::Spline => 4,
             Tool::Point => 1,
@@ -65,6 +67,8 @@ impl Tool {
             (Tool::Line, _) => "Click the next point. Hold Shift to lock the angle; Tab types an exact angle. Esc ends the line.",
             (Tool::Rect, 0) => "Click the first corner.",
             (Tool::Rect, _) => "Click the opposite corner.",
+            (Tool::CenterRect, 0) => "Click the rectangle's centre.",
+            (Tool::CenterRect, _) => "Click a corner, or type the width and height.",
             (Tool::Circle, 0) => "Click the centre.",
             (Tool::Circle, _) => "Click to set the radius.",
             (Tool::Arc, 0) => "Click the arc's centre.",
@@ -1393,6 +1397,23 @@ impl App {
                     }
                     let (a, b) = (place(sk, &c[0]), place(sk, &c[1]));
                     let sides = sk.add_rect(a, b, construction);
+                    for i in 0..2 {
+                        if let Some(v) = size(d, i) {
+                            sk.add_constraint(CKind::Distance, &[sides[i]], Some(v))?;
+                        }
+                    }
+                }
+                Tool::CenterRect => {
+                    if (c[0].p.x - c[1].p.x).abs() < 1e-6 || (c[0].p.y - c[1].p.y).abs() < 1e-6 {
+                        return Err("A rectangle needs width and height.".into());
+                    }
+                    let centre = place(sk, &c[0]);
+                    let (a, b) = (sk.add_point(c[0].p * 2.0 - c[1].p), place(sk, &c[1]));
+                    let sides = sk.add_rect(a, b, construction);
+                    // A construction diagonal with the centre at its middle keeps the
+                    // rectangle about its centre when a side is dimensioned or dragged.
+                    let diagonal = sk.add(Geom::Line { a, b }, true);
+                    sk.add_constraint(CKind::Midpoint, &[centre, diagonal], None)?;
                     for i in 0..2 {
                         if let Some(v) = size(d, i) {
                             sk.add_constraint(CKind::Distance, &[sides[i]], Some(v))?;
