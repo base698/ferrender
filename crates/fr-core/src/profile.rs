@@ -4,7 +4,9 @@
 //! rectangle split by a line gives two regions. Lines are also split where a
 //! sketch point lies along them and where they cross another line, so a
 //! rectangle drawn against another's edge, or a line drawn across a shape,
-//! bounds regions the way it looks. Arcs and splines split only at their ends.
+//! bounds regions the way it looks. A circle, arc or ellipse is cut where other
+//! geometry ends at a sketch point on it, so a shape drawn up to a curve closes
+//! against it. Splines split only at their ends.
 
 use std::collections::BTreeMap;
 
@@ -43,6 +45,9 @@ pub enum Seg {
     Spline([DVec2; 4]),
     /// Centre and the two semi-axis vectors, the second a quarter turn anticlockwise from the first.
     Ellipse(DVec2, DVec2, DVec2),
+    /// Part of that ellipse, `centre + u cos t + v sin t`, from the first angle to the second:
+    /// anticlockwise when the second is the greater.
+    EllipseArc(DVec2, DVec2, DVec2, f64, f64),
 }
 
 impl Seg {
@@ -51,6 +56,7 @@ impl Seg {
             Seg::Line(a, b) => Seg::Line(b, a),
             Seg::Arc(a, m, b) => Seg::Arc(b, m, a),
             Seg::Spline([a,b,c,d]) => Seg::Spline([d,c,b,a]),
+            Seg::EllipseArc(c, u, v, t0, t1) => Seg::EllipseArc(c, u, v, t1, t0),
             c => c,
         }
     }
@@ -61,6 +67,7 @@ impl Seg {
             Seg::Line(a, b) | Seg::Arc(a, _, b) => (a, b),
             Seg::Spline(p) => (p[0], p[3]),
             Seg::Circle(c, _) | Seg::Ellipse(c, ..) => (c, c),
+            Seg::EllipseArc(c, u, v, t0, t1) => (c + u * t0.cos() + v * t0.sin(), c + u * t1.cos() + v * t1.sin()),
         }
     }
 }
@@ -142,11 +149,11 @@ pub fn chain(sk: &Sketch, pick: &[Id]) -> Result<Chain, String> {
     // solver's tolerance. Make each piece start exactly where the last one ended.
     for i in 1..segs.len() {
         let join = segs[i - 1].ends().1;
-        match &mut segs[i] { Seg::Line(a, _) | Seg::Arc(a, _, _) => *a = join, Seg::Spline(p) => p[0] = join, Seg::Circle(..) | Seg::Ellipse(..) => {} }
+        match &mut segs[i] { Seg::Line(a, _) | Seg::Arc(a, _, _) => *a = join, Seg::Spline(p) => p[0] = join, Seg::Circle(..) | Seg::Ellipse(..) | Seg::EllipseArc(..) => {} }
     }
     if closed {
         let join = segs[0].ends().0;
-        match segs.last_mut().unwrap() { Seg::Line(_, b) | Seg::Arc(_, _, b) => *b = join, Seg::Spline(p) => p[3] = join, Seg::Circle(..) | Seg::Ellipse(..) => {} }
+        match segs.last_mut().unwrap() { Seg::Line(_, b) | Seg::Arc(_, _, b) => *b = join, Seg::Spline(p) => p[3] = join, Seg::Circle(..) | Seg::Ellipse(..) | Seg::EllipseArc(..) => {} }
     }
     Ok(Chain { segs, ids, closed })
 }
@@ -218,6 +225,8 @@ struct Face {
     comp: usize,
     path: Vec<Seg>,
     path_ids: Vec<Id>,
+    /// The points at which this face's pieces of cut curves start, going anticlockwise round each curve.
+    marks: Vec<Id>,
 }
 
 pub(crate) fn point_nodes(sk: &Sketch) -> BTreeMap<Id, Id> {
@@ -249,6 +258,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
     let nodes = point_nodes(sk);
     let node = |id: Id| index[&nodes[&id]];
 
+    #[derive(Clone)]
     struct Edge {
         /// The entity the piece is named by, and every entity it lies on.
         id: Id,
@@ -257,6 +267,23 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
         b: usize,
         pts: Vec<DVec2>,
         seg: Seg,
+        /// A piece of a circle, arc or ellipse that was cut, running anticlockwise from `a`.
+        cut: bool,
+    }
+    // Edges that lead nowhere cannot bound a region.
+    fn prune(edges: &mut Vec<Edge>) {
+        loop {
+            let mut deg = BTreeMap::new();
+            for e in edges.iter() {
+                *deg.entry(e.a).or_insert(0) += 1;
+                *deg.entry(e.b).or_insert(0) += 1;
+            }
+            let before = edges.len();
+            edges.retain(|e| deg[&e.a] > 1 && deg[&e.b] > 1);
+            if edges.len() == before {
+                break;
+            }
+        }
     }
     let mut edges: Vec<Edge> = Vec::new();
     let mut faces: Vec<Face> = Vec::new();
@@ -315,12 +342,87 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                 if !same.ids.contains(&id) { same.ids.push(id); }
                 continue;
             }
-            edges.push(Edge { id, ids: vec![id], a: u, b: v, pts: vec![pos[u], pos[v]], seg: Seg::Line(pos[u], pos[v]) });
+            edges.push(Edge { id, ids: vec![id], a: u, b: v, pts: vec![pos[u], pos[v]], seg: Seg::Line(pos[u], pos[v]), cut: false });
         }
     }
 
+    // A circle, arc or ellipse is cut where other geometry ends at a sketch point on it.
+    // First every place it could be cut is found; a cut is then kept only where something
+    // other than the curve itself still ends there once dangling pieces are gone, so that
+    // a stray point on a circle leaves it one whole circle.
+    use std::f64::consts::TAU;
+    struct Round { id: Id, centre: DVec2, u: DVec2, v: DVec2, t0: f64, sweep: f64, ends: Option<(usize, usize)>, ellipse: bool, cuts: Vec<(f64, usize)> }
+    impl Round {
+        /// The point an angle `o` on from where the curve starts.
+        fn at(&self, o: f64) -> DVec2 { let t = self.t0 + o; self.centre + self.u * t.cos() + self.v * t.sin() }
+    }
+    let mut rounds: Vec<Round> = Vec::new();
+    for (id, e) in sk.entities.iter().filter(|(_, e)| !e.construction) {
+        let whole = |centre: DVec2, u: DVec2, v: DVec2, ellipse: bool| Round { id: *id, centre, u, v, t0: 0.0, sweep: TAU, ends: None, ellipse, cuts: Vec::new() };
+        let round = match e.geom {
+            Geom::Circle { c, r } if r > NEAR => Some(whole(sk.pos(c), DVec2::X * r, DVec2::Y * r, false)),
+            Geom::Ellipse { .. } => sk.ellipse(*id).filter(|(_, u, v)| u.length() > NEAR && v.length() > NEAR).map(|(c, u, v)| whole(c, u, v, true)),
+            Geom::Arc { c, s, e } if node(s) != node(e) => sk.arc_angles(*id).and_then(|(t0, sweep)| {
+                let r = sk.pos(c).distance(sk.pos(s));
+                (r > NEAR).then(|| Round { t0, sweep, ends: Some((node(s), node(e))), ..whole(sk.pos(c), DVec2::X * r, DVec2::Y * r, false) })
+            }),
+            _ => None,
+        };
+        let Some(mut round) = round else { continue };
+        for &n in &representative {
+            if round.ends.is_some_and(|(a, b)| n == a || n == b) { continue; }
+            let d = pos[n] - round.centre;
+            let (x, y) = (d.dot(round.u) / round.u.length_squared(), d.dot(round.v) / round.v.length_squared());
+            let k = (x * x + y * y).sqrt();
+            // How far the point is from the curve, along its own ray from the centre.
+            if k < 1e-9 || (d.length() * (1.0 - 1.0 / k)).abs() > NEAR { continue; }
+            let o = (y.atan2(x) - round.t0).rem_euclid(TAU);
+            if round.ends.is_some() && !(o > 1e-9 && o < round.sweep - 1e-9) { continue; }
+            round.cuts.push((o, n));
+        }
+        round.cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        rounds.push(round);
+    }
+    // The pieces of a curve between its cuts: none for a whole circle or ellipse with fewer
+    // than two, which stays a closed curve.
+    let pieces = |round: &Round| -> Vec<Edge> {
+        let stops: Vec<(f64, usize)> = match round.ends {
+            Some((a, b)) => std::iter::once((0.0, a)).chain(round.cuts.iter().copied()).chain(std::iter::once((round.sweep, b))).collect(),
+            None if round.cuts.len() >= 2 => round.cuts.iter().copied().chain(std::iter::once((round.cuts[0].0 + TAU, round.cuts[0].1))).collect(),
+            None => return Vec::new(),
+        };
+        stops.windows(2).filter(|w| w[0].1 != w[1].1).map(|w| {
+            let ((o0, a), (o1, b)) = (w[0], w[1]);
+            let n = (((o1 - o0) / TAU * crate::sketch::CIRCLE_SEGS as f64).ceil() as usize).max(2);
+            let mut pts: Vec<DVec2> = (0..=n).map(|i| round.at(o0 + (o1 - o0) * i as f64 / n as f64)).collect();
+            // Ends are taken from the shared node, so neighbouring pieces meet exactly.
+            (pts[0], pts[n]) = (pos[a], pos[b]);
+            let seg = if round.ellipse { Seg::EllipseArc(round.centre, round.u, round.v, round.t0 + o0, round.t0 + o1) } else { Seg::Arc(pos[a], round.at((o0 + o1) / 2.0), pos[b]) };
+            Edge { id: round.id, ids: vec![round.id], a, b, pts, seg, cut: true }
+        }).collect()
+    };
+    // Splines join the lines for the trial; an uncut arc is one piece from end to end.
+    let mut trial = edges.clone();
+    for (id, e) in sk.entities.iter().filter(|(_, e)| !e.construction) {
+        if let Geom::Spline { a, d, .. } = e.geom && node(a) != node(d) {
+            trial.push(Edge { id: *id, ids: vec![*id], a: node(a), b: node(d), pts: Vec::new(), seg: Seg::Line(DVec2::ZERO, DVec2::ZERO), cut: false });
+        }
+    }
+    for round in &rounds { trial.extend(pieces(round)); }
+    prune(&mut trial);
+    for round in &mut rounds {
+        let id = round.id;
+        round.cuts.retain(|(_, n)| trial.iter().any(|e| (e.a == *n || e.b == *n) && e.id != id));
+    }
+    // What is still cut is made of its pieces; the rest is handled whole, as it always was.
+    let mut cut: BTreeMap<Id, Vec<Edge>> = rounds.iter().filter(|r| !r.cuts.is_empty() && (r.ends.is_some() || r.cuts.len() >= 2)).map(|r| (r.id, pieces(r))).collect();
+
     let mut next_comp = pos.len();
     for (id, e) in sk.entities.iter().filter(|(_, e)| !e.construction && !matches!(e.geom, Geom::Line { .. })) {
+        if let Some(made) = cut.remove(id) {
+            edges.extend(made);
+            continue;
+        }
         let (a, b) = match e.geom {
             Geom::Arc { s, e, .. } => (node(s), node(e)),
             Geom::Spline { a,d,.. } => (node(a),node(d)),
@@ -334,7 +436,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                 Geom::Spline { b:fit_b,c:fit_c,.. } => Seg::Spline([sk.points[&ids[a]],sk.pos(fit_b),sk.pos(fit_c),sk.points[&ids[b]]]),
                 _ => Seg::Arc(sk.points[&ids[a]], pts[pts.len() / 2], sk.points[&ids[b]]),
             };
-            edges.push(Edge { id: *id, ids: vec![*id], a, b, pts, seg });
+            edges.push(Edge { id: *id, ids: vec![*id], a, b, pts, seg, cut: false });
         } else {
             pts.pop();
             if signed_area(&pts).abs() > 1e-9 {
@@ -344,26 +446,14 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                     _ => { let Some((c,r)) = sk.curve(*id) else { continue }; Seg::Circle(c,r) },
                 };
                 let path = vec![if signed_area(&pts) < 0.0 { pts.reverse(); seg.reversed() } else { seg }];
-                faces.push(Face { poly: pts.clone(), edges: vec![*id], comp: next_comp, path: path.clone(), path_ids: vec![*id] });
+                faces.push(Face { poly: pts.clone(), edges: vec![*id], comp: next_comp, path: path.clone(), path_ids: vec![*id], marks: Vec::new() });
                 hulls.push((next_comp, pts, path, vec![*id]));
                 next_comp += 1;
             }
         }
     }
 
-    // Edges that lead nowhere cannot bound a region.
-    loop {
-        let mut deg = BTreeMap::new();
-        for e in &edges {
-            *deg.entry(e.a).or_insert(0) += 1;
-            *deg.entry(e.b).or_insert(0) += 1;
-        }
-        let before = edges.len();
-        edges.retain(|e| deg[&e.a] > 1 && deg[&e.b] > 1);
-        if edges.len() == before {
-            break;
-        }
-    }
+    prune(&mut edges);
 
     // Half-edge 2i runs along edge i, 2i+1 runs back.
     let from = |h: usize| if h % 2 == 0 { edges[h / 2].a } else { edges[h / 2].b };
@@ -389,7 +479,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
         if seen[start] {
             continue;
         }
-        let (mut h, mut poly, mut used, mut path, mut path_ids) = (start, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut h, mut poly, mut used, mut path, mut path_ids, mut marks) = (start, Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         while !seen[h] {
             seen[h] = true;
             let e = &edges[h / 2];
@@ -400,6 +490,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
                 poly.extend(e.pts[1..].iter().rev());
             }
             used.extend(e.ids.iter().copied());
+            if e.cut { marks.push(ids[e.a]); }
             path_ids.push(e.id);
             path.push(if h % 2 == 0 { e.seg } else { e.seg.reversed() });
             // Turn as far left as possible at the far end, keeping the face on the left.
@@ -413,10 +504,21 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
         if area > 1e-9 {
             used.sort();
             used.dedup();
-            faces.push(Face { poly, edges: used, comp, path, path_ids });
+            faces.push(Face { poly, edges: used, comp, path, path_ids, marks });
         } else if area < -1e-9 {
             poly.reverse();
             hulls.push((comp, poly, path, path_ids));
+        }
+    }
+    // A region is known by the entities around it. Where two are bounded by exactly the
+    // same ones, as the two sides of a chord across a circle are, each also names the
+    // points at which its pieces of the cut curves start.
+    let plain: Vec<Vec<Id>> = faces.iter().map(|f| f.edges.clone()).collect();
+    for (i, face) in faces.iter_mut().enumerate() {
+        if plain.iter().enumerate().any(|(j, other)| j != i && *other == plain[i]) {
+            face.edges.extend(face.marks.iter().copied());
+            face.edges.sort();
+            face.edges.dedup();
         }
     }
     // A component sitting inside a face of another component is a hole in it.

@@ -55,6 +55,10 @@ fn seg_edge(s: &Seg, plane: &Plane, z: f64) -> R<Edge> {
             let (o, n) = (plane.to_world(centre) + plane.normal() * z, plane.normal());
             return ellipse_edge(o, plane.to_world(centre + u) - plane.to_world(centre), plane.to_world(centre + v) - plane.to_world(centre), n);
         }
+        Seg::EllipseArc(centre, u, v, t0, t1) => {
+            let o = plane.to_world(centre) + plane.normal() * z;
+            return ellipse_arc_edge(o, plane.to_world(centre + u) - plane.to_world(centre), plane.to_world(centre + v) - plane.to_world(centre), t0, t1);
+        }
     };
     made.map_err(|e| e.to_string())
 }
@@ -96,18 +100,85 @@ fn unit_ellipse(ratio: f64) -> R<Edge> {
     Ok(edge)
 }
 
+/// Part of the exact unit ellipse of [`unit_ellipse`], anticlockwise from the angle `t0`
+/// to `t1` of `(ratio cos t, sin t)`. The same cut, made through a sector of the cylinder.
+fn unit_ellipse_arc(ratio: f64, t0: f64, t1: f64) -> R<Edge> {
+    use std::f64::consts::{PI, TAU};
+    type Made = Vec<([u64; 3], Edge)>;
+    thread_local! { static MADE: RefCell<Made> = const { RefCell::new(Vec::new()) }; }
+    let key = [ratio.to_bits(), t0.to_bits(), t1.to_bits()];
+    if let Some(edge) = MADE.with(|m| m.borrow().iter().find(|e| e.0 == key).map(|e| e.1.clone())) {
+        return Ok(edge);
+    }
+    let sweep = t1 - t0;
+    if !ratio.is_finite() || !(1.0..=1e6).contains(&ratio) {
+        return Err("the ellipse is too thin for the kernel; its long axis may be at most a million times its short one".into());
+    }
+    if !(sweep > 1e-9 && sweep < TAU - 1e-9) { return Err("that part of the ellipse has no length, or is the whole of it".into()); }
+    let fail = |e: cadrum::Error| format!("the kernel could not make part of the ellipse: {e}");
+    let tilt = (1.0 / ratio).acos();
+    let height = 2.0 * tilt.tan() + 2.0;
+    let (through, normal) = (DVec3::new(0.0, 0.0, height / 2.0), DVec3::new(-tilt.sin(), 0.0, tilt.cos()));
+    // The cylinder's seam is turned to the far side from the arc, so the arc is one edge.
+    let cylinder = Solid::cylinder(1.0, c(DVec3::Z * height)).rotate_z((t0 + t1) / 2.0 + PI);
+    // A sector around the arc, as a prism that reaches well past the cylinder.
+    let steps = (sweep / (PI / 3.0)).ceil().max(1.0) as usize;
+    let mut corners = vec![DVec3::new(0.0, 0.0, -1.0)];
+    corners.extend((0..=steps).map(|k| { let t = t0 + sweep * k as f64 / steps as f64; DVec3::new(3.0 * t.cos(), 3.0 * t.sin(), -1.0) }));
+    let sides: Vec<Edge> = (0..corners.len()).map(|k| Edge::line(c(corners[k]), c(corners[(k + 1) % corners.len()]))).collect::<Result<_, _>>().map_err(fail)?;
+    let sector = Solid::extrude(sides.iter(), c(DVec3::Z * (height + 2.0))).map_err(fail)?;
+    let whole: Boolean<Solid> = (&cylinder).into();
+    let wedge = (whole * &sector).build_vec().map_err(fail)?;
+    let Some(first) = wedge.first() else { return Err("the kernel made no part of the ellipse".into()) };
+    let mut cut: Boolean<Solid> = first.into();
+    for more in &wedge[1..] { cut = cut + more; }
+    let parts = (cut - &Solid::half_space(c(through), c(normal))).build_vec().map_err(fail)?;
+    // The arc is the edge of the cut that lies on the cylinder; the cut's other two edges run to its axis.
+    let on_arc = |e: &Edge| {
+        let pts = e.approximation_segments(FINE);
+        pts.len() > 2 && pts.iter().all(|p| { let p = g(*p); normal.dot(p - through).abs() < 1e-9 && (p.x * p.x + p.y * p.y - 1.0).abs() < 1e-9 })
+    };
+    let found: Vec<&Edge> = parts.iter().flat_map(|s| s.iter_edge()).filter(|e| on_arc(e)).collect();
+    let [edge] = found[..] else { return Err("the kernel did not make that part of the ellipse as one edge".into()) };
+    let edge = edge.clone().rotate(c(through), c(DVec3::Y), tilt).translate(c(-through));
+    let at = |t: f64| DVec3::new(ratio * t.cos(), t.sin(), 0.0);
+    if g(edge.start_point()).distance(at(t0)) > 1e-7 * ratio || g(edge.end_point()).distance(at(t1)) > 1e-7 * ratio {
+        return Err("the kernel made that part of the ellipse the wrong way round".into());
+    }
+    MADE.with(|m| { let mut m = m.borrow_mut(); if m.len() == 256 { m.remove(0); } m.push((key, edge.clone())); });
+    Ok(edge)
+}
+
+/// Puts an edge made about the unit ellipse (long axis X, short axis Y, in XY) where the
+/// ellipse with these long and short semi-axis vectors is.
+fn place_unit(edge: Edge, centre: DVec3, long: DVec3, short: DVec3) -> Edge {
+    let up = long.cross(short).normalize();
+    let turn = glam::DQuat::from_mat3(&glam::DMat3::from_cols(long.normalize(), short.normalize(), up));
+    let (axis, angle) = turn.to_axis_angle();
+    let mut edge = edge.scale(c(DVec3::ZERO), short.length());
+    if angle.abs() > 1e-12 { edge = edge.rotate(c(DVec3::ZERO), c(axis), angle); }
+    edge.translate(c(centre))
+}
+
 /// An ellipse as an exact kernel edge, from its centre and two perpendicular semi-axis
 /// vectors. It runs anticlockwise about `about` and starts at the end of its longer axis.
 fn ellipse_edge(centre: DVec3, u: DVec3, v: DVec3, about: DVec3) -> R<Edge> {
     let (long, short) = if u.length() >= v.length() { (u, v) } else { (v, -u) };
     if short.length() < 1e-9 { return Err("the ellipse has no width".into()); }
-    let up = long.cross(short).normalize();
-    let (short, up) = if up.dot(about) < 0.0 { (-short, -up) } else { (short, up) };
-    let turn = glam::DQuat::from_mat3(&glam::DMat3::from_cols(long.normalize(), short.normalize(), up));
-    let (axis, angle) = turn.to_axis_angle();
-    let mut edge = unit_ellipse(long.length() / short.length())?.scale(c(DVec3::ZERO), short.length());
-    if angle.abs() > 1e-12 { edge = edge.rotate(c(DVec3::ZERO), c(axis), angle); }
-    Ok(edge.translate(c(centre)))
+    let short = if long.cross(short).dot(about) < 0.0 { -short } else { short };
+    Ok(place_unit(unit_ellipse(long.length() / short.length())?, centre, long, short))
+}
+
+/// Part of an ellipse as an exact kernel edge: from the angle `t0` to `t1` of
+/// `centre + u cos t + v sin t`, whichever way round that is.
+fn ellipse_arc_edge(centre: DVec3, u: DVec3, v: DVec3, t0: f64, t1: f64) -> R<Edge> {
+    // The same angles measured from the longer axis, as the unit ellipse has them.
+    let (long, short, shift) = if u.length() >= v.length() { (u, v, 0.0) } else { (v, -u, -std::f64::consts::FRAC_PI_2) };
+    if short.length() < 1e-9 { return Err("the ellipse has no width".into()); }
+    let (ratio, a, b) = (long.length() / short.length(), t0 + shift, t1 + shift);
+    // Clockwise is the mirror image of the anticlockwise arc between the mirrored angles.
+    let edge = if b > a { unit_ellipse_arc(ratio, a, b)? } else { unit_ellipse_arc(ratio, -a, -b)?.mirror(c(DVec3::ZERO), c(DVec3::Y)) };
+    Ok(place_unit(edge, centre, long, short))
 }
 
 /// One closed boundary as kernel edges, `z` off the plane.
@@ -453,6 +524,7 @@ fn probe(seg: &Seg, plane: &Plane, lift: f64) -> DVec3 {
         Seg::Circle(centre, r) => centre + DVec2::X * r,
         Seg::Spline(points) => points[1],
         Seg::Ellipse(centre, u, _) => centre + u,
+        Seg::EllipseArc(centre, u, v, t0, t1) => { let t = (t0 + t1) / 2.0; centre + u * t.cos() + v * t.sin() }
     };
     plane.to_world(p) + plane.normal() * lift
 }

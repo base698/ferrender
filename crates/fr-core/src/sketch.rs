@@ -445,23 +445,30 @@ impl Sketch {
 
     /// The entity as a polyline; circles repeat their first point at the end.
     pub fn polyline(&self, id: Id) -> Vec<DVec2> {
+        self.polyline_fine(id, CIRCLE_SEGS)
+    }
+
+    /// [`polyline`](Self::polyline) with a chosen number of segments to a full turn of a
+    /// circle, arc or ellipse, for drawing one closely enough at high zoom.
+    pub fn polyline_fine(&self, id: Id, per_turn: usize) -> Vec<DVec2> {
+        let per_turn = per_turn.max(8);
         let Some(e) = self.entities.get(&id) else { return vec![] };
         match e.geom {
             Geom::Line { a, b } => vec![self.pos(a), self.pos(b)],
             Geom::Spline { a, b, c, d } => spline_polyline([a,b,c,d].map(|p| self.pos(p))),
             Geom::Ellipse { .. } => {
                 let Some((c, u, v)) = self.ellipse(id) else { return vec![] };
-                (0..=CIRCLE_SEGS).map(|i| { let t = (i % CIRCLE_SEGS) as f64 / CIRCLE_SEGS as f64 * std::f64::consts::TAU; c + u * t.cos() + v * t.sin() }).collect()
+                (0..=per_turn).map(|i| { let t = (i % per_turn) as f64 / per_turn as f64 * std::f64::consts::TAU; c + u * t.cos() + v * t.sin() }).collect()
             }
             Geom::Circle { c, r } => {
                 let c = self.pos(c);
-                (0..=CIRCLE_SEGS).map(|i| c + DVec2::from_angle((i % CIRCLE_SEGS) as f64 / CIRCLE_SEGS as f64 * std::f64::consts::TAU) * r).collect()
+                (0..=per_turn).map(|i| c + DVec2::from_angle((i % per_turn) as f64 / per_turn as f64 * std::f64::consts::TAU) * r).collect()
             }
             Geom::Arc { c, s, e } => {
                 let (a0, sweep) = self.arc_angles(id).unwrap();
                 let (c, s, e) = (self.pos(c), self.pos(s), self.pos(e));
                 let r = c.distance(s);
-                let n = ((sweep / std::f64::consts::TAU * CIRCLE_SEGS as f64).ceil() as usize).max(2);
+                let n = ((sweep / std::f64::consts::TAU * per_turn as f64).ceil() as usize).max(2);
                 (0..=n)
                     .map(|i| match i {
                         0 => s,
@@ -804,7 +811,34 @@ impl Sketch {
             };
             for p in pair { *degree.entry(nodes[&p]).or_default() += 1; endpoint_ids.insert(p); }
         }
-        endpoint_ids.into_iter().filter(|p| degree.get(&nodes[p]) == Some(&1)).collect()
+        endpoint_ids.into_iter().filter(|p| degree.get(&nodes[p]) == Some(&1) && !self.rests_on(*p)).collect()
+    }
+
+    /// Whether a point lies along a drawn line, or on a drawn circle, arc or ellipse, away
+    /// from that entity's own ends. An outline that ends there is closed against it.
+    fn rests_on(&self, point: Id) -> bool {
+        const NEAR: f64 = 1e-6;
+        let p = self.pos(point);
+        self.entities.iter().filter(|(_, e)| !e.construction).any(|(id, e)| match e.geom {
+            Geom::Line { a, b } => {
+                let (a, b) = (self.pos(a), self.pos(b));
+                let d = b - a;
+                let t = (p - a).dot(d) / d.length_squared().max(1e-18);
+                t > 1e-9 && t < 1.0 - 1e-9 && (a + d * t).distance(p) < NEAR
+            }
+            Geom::Circle { c, r } => (self.pos(c).distance(p) - r).abs() < NEAR,
+            Geom::Arc { c, s, e } => {
+                let (c, s, e) = (self.pos(c), self.pos(s), self.pos(e));
+                (c.distance(p) - c.distance(s)).abs() < NEAR && p.distance(s) > NEAR && p.distance(e) > NEAR
+                    && self.arc_angles(*id).is_some_and(|(t0, sweep)| ((p - c).to_angle() - t0).rem_euclid(std::f64::consts::TAU) < sweep)
+            }
+            Geom::Ellipse { .. } => self.ellipse(*id).is_some_and(|(c, u, v)| {
+                let d = p - c;
+                let k = ((d.dot(u) / u.length_squared()).powi(2) + (d.dot(v) / v.length_squared()).powi(2)).sqrt();
+                k > 1e-9 && (d.length() * (1.0 - 1.0 / k)).abs() < NEAR
+            }),
+            Geom::Spline { .. } => false,
+        })
     }
 }
 

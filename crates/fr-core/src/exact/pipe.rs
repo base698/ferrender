@@ -121,7 +121,7 @@ fn along_seg(seg: &Seg, t: f64) -> Option<DVec2> {
             let (centre, radius, start, sweep) = arc_of(a, m, b)?;
             Some(centre + DVec2::from_angle(start + sweep * t) * radius)
         }
-        Seg::Spline(_) | Seg::Ellipse(..) => None,
+        Seg::Spline(_) | Seg::Ellipse(..) | Seg::EllipseArc(..) => None,
     }
 }
 
@@ -144,7 +144,7 @@ fn seg_length(seg: &Seg) -> Option<f64> {
         Seg::Line(a, b) => Some(a.distance(b)),
         Seg::Circle(_, r) => Some(std::f64::consts::TAU * r),
         Seg::Arc(a, m, b) => arc_of(a, m, b).map(|(_, radius, _, sweep)| radius * sweep.abs()),
-        Seg::Spline(_) | Seg::Ellipse(..) => None,
+        Seg::Spline(_) | Seg::Ellipse(..) | Seg::EllipseArc(..) => None,
     }
 }
 

@@ -76,6 +76,8 @@ impl Face {
                     }
                     Seg::Circle(centre,r) => { let c=sk.point_at(centre,1e-7); sk.add(Geom::Circle{c,r},false) },
                     Seg::Spline(points) => { let ids=points.map(|p|sk.point_at(p,1e-7)); sk.add_spline(ids,false)? },
+                    // A sketch has no part-ellipse entity; faces never give one in any case.
+                    Seg::EllipseArc(..) => continue,
                     Seg::Ellipse(centre,u,v) => { let c=sk.point_at(centre,1e-7); let a=sk.point_at(centre+u,1e-7); sk.add_ellipse(c,a,v.length(),false)? },
                 };
                 sk.fixed.extend(sk.ent_points(id));

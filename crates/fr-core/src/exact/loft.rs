@@ -110,6 +110,7 @@ fn middle(s: &Seg) -> DVec2 {
         Seg::Line(a, b) => (a + b) / 2.0,
         Seg::Arc(_, m, _) => m,
         Seg::Circle(centre, _) | Seg::Ellipse(centre, ..) => centre,
+        Seg::EllipseArc(centre, u, v, t0, t1) => { let t = (t0 + t1) / 2.0; centre + u * t.cos() + v * t.sin() }
         Seg::Spline(points) => (points[1] + points[2]) / 2.0,
     }
 }

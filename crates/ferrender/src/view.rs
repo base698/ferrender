@@ -115,7 +115,7 @@ pub fn sketch_pos(app: &App, sk: &Sketch, pos: Pos2) -> Option<DVec2> {
     sk.plane.ray_hit(o, d)
 }
 
-fn on_screen(app: &App, sk: &Sketch, p: DVec2) -> Pos2 {
+pub(crate) fn on_screen(app: &App, sk: &Sketch, p: DVec2) -> Pos2 {
     to_screen(app, sk.plane.to_world(p))
 }
 
@@ -126,11 +126,19 @@ fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     (a + d * t).distance(p)
 }
 
-fn path(app: &App, sk: &Sketch, id: Id) -> Vec<Pos2> {
-    sk.polyline(id).into_iter().map(|p| on_screen(app, sk, p)).collect()
+pub(crate) fn path(app: &App, sk: &Sketch, id: Id) -> Vec<Pos2> {
+    // A circle, arc or ellipse is drawn with enough segments for the zoom that a point on
+    // the true curve also sits on the drawn one: the gap stays under a tenth of a pixel.
+    let radius = sk.curve(id).map(|c| c.1).or_else(|| sk.ellipse(id).map(|(_, u, v)| u.length().max(v.length())));
+    let per_turn = radius.map_or(fr_core::sketch::CIRCLE_SEGS, |r| {
+        let px = r * app.cam.scale;
+        if px <= 0.2 { return fr_core::sketch::CIRCLE_SEGS; }
+        ((std::f64::consts::PI / (1.0 - 0.1 / px).acos()).ceil() as usize).clamp(fr_core::sketch::CIRCLE_SEGS, 4096)
+    });
+    sk.polyline_fine(id, per_turn).into_iter().map(|p| on_screen(app, sk, p)).collect()
 }
 
-fn path_dist(pts: &[Pos2], p: Pos2) -> f32 {
+pub(crate) fn path_dist(pts: &[Pos2], p: Pos2) -> f32 {
     pts.windows(2).map(|w| seg_dist(p, w[0], w[1])).fold(f32::MAX, f32::min)
 }
 

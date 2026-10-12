@@ -667,6 +667,71 @@ fn a_spline_ends_where_it_lands_on_a_curve_and_escape_keeps_what_was_clicked() {
 }
 
 #[test]
+fn an_arc_drawn_onto_an_ellipse_closes_against_it() {
+    // The user's sketch: an ellipse, and a three-point arc standing on it with both ends
+    // clicked on the curve.
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    let sketch = |h: &H| h.state().session.doc.sketch(sid).unwrap().clone();
+    run(&mut h, Action::Tool(Tool::Ellipse));
+    for (x, y) in [(0.0, 0.0), (30.0, 0.0), (10.0, 18.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = sketch(&h);
+    let ellipse = *sk.entities.keys().next().unwrap();
+    let (centre, u, v) = sk.ellipse(ellipse).unwrap();
+    let on = |deg: f64| centre + u * deg.to_radians().cos() + v * deg.to_radians().sin();
+    run(&mut h, Action::Tool(Tool::Arc3));
+    for p in [on(110.0), on(70.0), DVec2::new(3.0, 27.0)] {
+        let p = at(&h, p.x, p.y);
+        click(&mut h, p);
+    }
+    let sk = sketch(&h);
+    let arc = *sk.entities.iter().find(|(_, e)| matches!(e.geom, Geom::Arc { .. })).expect("the arc").0;
+    assert_eq!(sk.constraints.values().filter(|k| k.kind == CKind::Coincident && k.refs.contains(&ellipse)).count(), 2, "both ends are tied to the ellipse");
+    assert!(sk.open_endpoints().is_empty(), "and neither is ringed as open: {:?}", sk.open_endpoints());
+    let regions = fr_core::profile::profiles(&sk);
+    assert_eq!(regions.len(), 2, "the ellipse, and the cap between the arc and the ellipse");
+    let cap = regions.iter().find(|p| p.edges.contains(&arc)).expect("the cap").clone();
+    assert!(cap.edges.contains(&ellipse), "the cap is closed by the ellipse itself");
+
+    // Zoomed far in, the drawn ellipse passes through the arc's end, which is on the true curve.
+    let end = sk.pos(sk.ent_points(arc)[1]);
+    let was = h.state().cam;
+    h.state_mut().cam.scale *= 400.0;
+    h.run_steps(1);
+    let drawn = crate::view::path(h.state(), &sk, ellipse);
+    assert!(drawn.len() > 500, "more segments at this zoom: {}", drawn.len());
+    let gap = crate::view::path_dist(&drawn, crate::view::on_screen(h.state(), &sk, end));
+    assert!(gap < 0.2, "the point looks {gap} px off the drawn curve");
+    h.state_mut().cam = was;
+    h.run_steps(1);
+
+    // Extrude offers the cap by itself, and both regions together make one body.
+    h.state_mut().finish_sketch();
+    run(&mut h, Action::Extrude);
+    let p = crate::view::to_screen(h.state(), DVec3::new(0.0, 22.0, 0.0));
+    click(&mut h, p);
+    let Dialog::Feature(mut f) = h.state().dialog.clone() else { panic!("the extrude dialog should be open") };
+    assert_eq!(f.profiles, vec![cap.edges.clone()], "a click in the cap chooses the cap");
+    f.profiles = regions.iter().map(|p| p.edges.clone()).collect();
+    f.text = "5 mm".into();
+    h.state_mut().dialog = Dialog::Feature(f);
+    h.run_steps(2);
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None);
+    assert_eq!(h.state().session.built.bodies.len(), 1);
+    let ellipse_alone = std::f64::consts::PI * u.length() * v.length() * 5.0;
+    let volume = h.state().session.built.bodies[0].solids.iter().map(|s| s.volume()).sum::<f64>();
+    assert!(volume > ellipse_alone + 50.0 && volume < ellipse_alone + 2000.0, "the ellipse and its cap: {volume} against {ellipse_alone} for the ellipse");
+    save(&mut h, "ellipse-cap.png");
+}
+
+#[test]
 fn move_tool_moves_the_selection_in_a_sketch() {
     let mut h = harness();
     h.state_mut().create_sketch(Plane::XY);
