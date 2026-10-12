@@ -32,6 +32,8 @@ pub enum Tool {
     Arc3,
     TangentArc,
     Spline,
+    /// Centre, the end of one axis, then a click that sets the width.
+    Ellipse,
     Point,
     Dimension,
     Polygon,
@@ -48,7 +50,7 @@ impl Tool {
     pub fn clicks(self) -> usize {
         match self {
             Tool::Line | Tool::Rect | Tool::Circle | Tool::Polygon | Tool::TangentArc => 2,
-            Tool::Arc | Tool::Arc3 => 3,
+            Tool::Arc | Tool::Arc3 | Tool::Ellipse => 3,
             Tool::Spline => 4,
             Tool::Point => 1,
             Tool::Select | Tool::Move | Tool::Dimension | Tool::Trim | Tool::Project => 0,
@@ -73,6 +75,9 @@ impl Tool {
             (Tool::Arc3, _) => "Move to choose the bulge, then click. Type a diameter for an exact size.",
             (Tool::TangentArc, 0) => "Click a line or arc endpoint. At a junction, select the source edge first.",
             (Tool::TangentArc, _) => "Click the new endpoint. Hold Shift to keep the sweep angle fixed; the join stays tangent.",
+            (Tool::Ellipse, 0) => "Click the ellipse's centre.",
+            (Tool::Ellipse, 1) => "Click the end of one axis: its direction and half its length.",
+            (Tool::Ellipse, _) => "Move away from that axis to set the width, then click.",
             (Tool::Spline, 0) => "Click the spline's start point.",
             (Tool::Spline, 1) => "Click the first interior fit point.",
             (Tool::Spline, 2) => "Click the second interior fit point.",
@@ -1358,6 +1363,22 @@ impl App {
                     let end = place(sk, &c[1]);
                     let arc = sk.add_tangent_arc(source, start, end, construction)?;
                     if let Some(v) = angle(d, 0)? { sk.add_constraint(CKind::Angle, &[arc], Some(v))?; }
+                }
+                Tool::Ellipse => {
+                    let axis = c[1].p - c[0].p;
+                    if axis.length() < 1e-6 {
+                        return Err("An ellipse needs its first axis to have some length.".into());
+                    }
+                    // The third click sets the other radius by how far it is from the first axis.
+                    let other = axis.perp().normalize().dot(c[2].p - c[0].p).abs();
+                    if other < 1e-6 {
+                        return Err("Click away from the first axis to give the ellipse some width.".into());
+                    }
+                    let (centre, end) = (place(sk, &c[0]), place(sk, &c[1]));
+                    sk.add_ellipse(centre, end, other, construction)?;
+                    if c[1].point.is_none() && (c[1].h || c[1].v) {
+                        let _ = sk.add_constraint(if c[1].h { CKind::Horizontal } else { CKind::Vertical }, &[centre, end], None);
+                    }
                 }
                 Tool::Spline => {
                     let ids = [place(sk, &c[0]), place(sk, &c[1]), place(sk, &c[2]), place(sk, &c[3])];

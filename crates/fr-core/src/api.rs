@@ -91,6 +91,7 @@ SKETCHES
           {"type":"polyline","points":[[x,y],...],"closed":true}
           {"type":"rect","from":[x,y],"to":[x,y]}          gets horizontal/vertical constraints; or "center":[x,y],"size":[w,h]
           {"type":"circle","center":[x,y],"radius":r}      or "diameter"
+          {"type":"ellipse","center":[x,y],"radii":[r1,r2],"rotation":0}   r1 lies along the direction "rotation" degrees from sketch +X, r2 square to it; its points are the centre and the end of each axis
           {"type":"arc","center":[x,y],"start":[x,y],"end":[x,y]}   counter-clockwise from start to end
           {"type":"arc3","start":[x,y],"through":[x,y],"end":[x,y]}   passes through three points, clockwise or counter-clockwise
           {"type":"tangent_arc","source":ENTITY,"start":POINT,"end":[x,y]}   extends a line or circular arc endpoint with a persistent tangent constraint
@@ -276,6 +277,7 @@ fn sketch_info(s: &Session, id: Id) -> J {
                 Geom::Circle { c, r } => json!({"type": "circle", "center": c, "radius": len_out(doc, r)}),
                 Geom::Arc { c, s, e } => json!({"type": "arc", "center": c, "start": s, "end": e, "radius": len_out(doc, sk.pos(c).distance(sk.pos(s)))}),
                 Geom::Spline { a,b,c,d } => json!({"type":"spline","points":[a,b,c,d]}),
+                Geom::Ellipse { c, a, b } => json!({"type": "ellipse", "center": c, "axis_points": [a, b], "radii": [len_out(doc, sk.pos(a).distance(sk.pos(c))), len_out(doc, sk.pos(b).distance(sk.pos(c)))], "rotation": trim_num((sk.pos(a) - sk.pos(c)).to_angle().to_degrees(), 6).parse::<f64>().unwrap_or(0.0)}),
             };
             if let Some(guide) = sk.arc_guides.get(eid) { o["arc_guide"] = json!(guide); }
             o["id"] = json!(eid);
@@ -770,6 +772,21 @@ fn add_item(doc: &mut Document, sid: Id, item: &J, construction: bool) -> R<J> {
             let sk = sk_mut(doc, sid);
             pts = vec![sk.point_at(c, TOL)];
             ents.push(sk.add(Geom::Circle { c: pts[0], r }, construction));
+        }
+        "ellipse" => {
+            let c = p(doc, "center")?;
+            let radii = item["radii"].as_array().filter(|r| r.len() == 2).ok_or("an ellipse needs \"radii\": [first, second]")?;
+            let (first, second) = (mm(doc, &radii[0])?, mm(doc, &radii[1])?);
+            if first <= TOL || second <= TOL {
+                return Err("both radii of an ellipse must be positive".into());
+            }
+            let turn = match &item["rotation"] { J::Null => 0.0, v => v.as_f64().ok_or("an ellipse's \"rotation\" is a number of degrees")?.to_radians() };
+            let sk = sk_mut(doc, sid);
+            let centre = sk.point_at(c, TOL);
+            let axis = sk.point_at(c + DVec2::from_angle(turn) * first, TOL);
+            let id = sk.add_ellipse(centre, axis, second, construction)?;
+            pts = sk.ent_points(id);
+            ents.push(id);
         }
         "arc" => {
             let (c, s, e) = (p(doc, "center")?, p(doc, "start")?, p(doc, "end")?);

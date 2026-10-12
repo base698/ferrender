@@ -79,6 +79,7 @@ pub fn commands(app: &App) -> Vec<Command> {
             ("Line",Tool::Line,"L","Draw connected straight lines."),
             ("Rectangle",Tool::Rect,"R","Draw a rectangle from opposite corners."),
             ("Circle",Tool::Circle,"C","Draw a circle from its center and radius."),
+            ("Ellipse",Tool::Ellipse,"","Draw an ellipse from its center, the end of one axis, and its width."),
             ("Arc",Tool::Arc,"A","Draw an arc using its center and endpoints."),
             ("3-Point Arc",Tool::Arc3,"","Choose two endpoints, then the bulge."),
             ("Tangent Arc",Tool::TangentArc,"","Continue a line or arc smoothly."),

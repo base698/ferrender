@@ -147,7 +147,7 @@ fn ops_table_matches_the_api_and_the_reference() {
         assert!(arms.contains(*op), "OPS lists {op}, which has no match arm");
         assert!(fr_core::api::REFERENCE.contains(&format!("\"op\":\"{op}\"")) || matches!(*op, "import_stl" | "run_script" | "script_meta" | "add_feature" | "get_reference"), "{op} is not in the reference text");
     }
-    for arm in arms.iter().filter(|a| !matches!(a.as_str(), "line" | "polyline" | "polygon" | "rect" | "rectangle" | "circle" | "arc" | "tangent_arc" | "spline" | "ngon" | "point" | "sphere" | "box" | "side" | "normal" | "connected")) {
+    for arm in arms.iter().filter(|a| !matches!(a.as_str(), "line" | "polyline" | "polygon" | "rect" | "rectangle" | "ellipse" | "circle" | "arc" | "tangent_arc" | "spline" | "ngon" | "point" | "sphere" | "box" | "side" | "normal" | "connected")) {
         assert!(commands.contains(&arm.as_str()), "the dispatcher handles {arm}, which OPS does not list");
     }
 }

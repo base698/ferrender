@@ -108,7 +108,7 @@ A dimension or feature value is `{"expr": "...", "v": 20.0}`: the expression as 
 | `component` | `placement` {`translate` [3 values], `rotate` [3 values]}, `visible` | The component's parent is the feature's `owner`. |
 | `plane` | `kind` (`{"offset": {base, distance}}`, `{"midplane": {a, b, flip}}`, `{"three_point": {points}}`), `visible`, `visibility_pinned` | `base`, `a`, `b` are plane references: `{"origin": "XY"}`, `{"plane": id}` or `{"face": {...}}`; `points` are `{"world": [x,y,z]}`, `{"vertex": {...}}` or `{"sketch_point": {sketch, point}}`. |
 
-Sketch entities are `{"type": "line", "a": p, "b": p, "construction": false}`, `{"type": "circle", "c": p, "r": 3.0, ...}`, `{"type": "arc", "c": p, "s": p, "e": p, ...}` (counter-clockwise from `s` to `e`) and `{"type": "spline", "a": p, "b": p, "c": p, "d": p, ...}` (interpolating through four fit points), where `p` is a point id. `arc_guides` records how an arc was drawn: `{"kind": "through", "point": id}` for a three-point arc or `{"kind": "tangent", "source": entity, "start": point}` for a tangent arc. `fixed` lists points and circles that are locked (projected geometry).
+Sketch entities are `{"type": "line", "a": p, "b": p, "construction": false}`, `{"type": "circle", "c": p, "r": 3.0, ...}`, `{"type": "arc", "c": p, "s": p, "e": p, ...}` (counter-clockwise from `s` to `e`) and `{"type": "spline", "a": p, "b": p, "c": p, "d": p, ...}` (interpolating through four fit points) and `{"type": "ellipse", "c": p, "a": p, "b": p, ...}` (centre, and the end of each of its two axes, which the solver keeps perpendicular; either may be the longer), where `p` is a point id. `arc_guides` records how an arc was drawn: `{"kind": "through", "point": id}` for a three-point arc or `{"kind": "tangent", "source": entity, "start": point}` for a tangent arc. `fixed` lists points and circles that are locked (projected geometry).
 
 Constraints are `{"kind": "...", "refs": [ids], "value": value?}`. Geometric kinds: `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `collinear`, `tangent`, `equal`, `midpoint`, `concentric`, `symmetric`, `fix`. Dimension kinds carry a `value`: `distance`, `radius`, `diameter`, `angle`, `position_x`, `position_y`. `refs` are in the canonical order the solver expects; a file whose refs are out of order is refused.
 
@@ -157,6 +157,7 @@ A plane reference is `{"origin": "XY"|"XZ"|"YZ"}`, `{"plane": id}`, `{"face": {b
 | 13 | 0.4.0 | Semantic/provenance topology tags (`schema: 2`), persistent script output identities (`script_key`) and `sweep` features. |
 | 14 | 0.4.0 | `loft` features. |
 | 15 | 0.4.0 | `point` sections in `loft` features (a loft that comes to a tip). |
+| 16 | 0.4.0 | `ellipse` entities in sketches. |
 
 The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". Older documents deserialize with absent fields taking their defaults. Legacy reference tags are upgraded only when the original pick has a unique verified match; ambiguous references remain errors for repair. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 

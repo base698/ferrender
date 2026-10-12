@@ -507,6 +507,88 @@ fn a_midpoint_constraint_moves_a_free_square_onto_the_point() {
 }
 
 #[test]
+fn the_ellipse_tool_draws_an_ellipse_that_snaps_extrudes_and_reshapes() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    let sketch = |h: &H| h.state().session.doc.sketch(sid).unwrap().clone();
+
+    // Centre, the end of a nearly level axis, then a click 15 mm off that axis.
+    run(&mut h, Action::Tool(Tool::Ellipse));
+    assert_eq!(Tool::Ellipse.clicks(), 3);
+    for (x, y) in [(20.0, 10.0), (50.0, 10.2), (32.0, 25.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = sketch(&h);
+    let (ellipse, geom) = sk.entities.iter().map(|(id, e)| (*id, e.geom)).next().expect("one entity");
+    let Geom::Ellipse { c, a, b } = geom else { panic!("not an ellipse: {geom:?}") };
+    assert_eq!(sk.entities.len(), 1);
+    assert!(h.state().clicks.is_empty(), "the tool is ready for the next ellipse");
+    let (centre, u, v) = sk.ellipse(ellipse).unwrap();
+    assert!((centre - DVec2::new(20.0, 10.0)).length() < 0.3, "{centre:?}");
+    assert!((u.length() - 30.0).abs() < 0.3 && (v.length() - 15.0).abs() < 0.3, "{u:?} {v:?}");
+    assert!(u.y.abs() < 1e-6, "a nearly level axis is made level");
+    assert!(sk.constraints.values().any(|k| k.kind == CKind::Horizontal && k.refs.contains(&c) && k.refs.contains(&a)), "and held level");
+    assert!((sk.pos(b) - centre).dot(u).abs() < 1e-6, "the second axis is square to the first");
+    save(&mut h, "ellipse.png");
+
+    // Dragging the end of the second axis changes the width and nothing else.
+    run(&mut h, Action::Tool(Tool::Select));
+    let end = sk.pos(b);
+    let from = at(&h, end.x, end.y);
+    drag(&mut h, &[from, from + egui::vec2(0.0, -20.0), from + egui::vec2(0.0, -40.0)]);
+    let sk = sketch(&h);
+    let (now, u, v) = sk.ellipse(ellipse).unwrap();
+    assert!(v.length() > 16.0, "the ellipse is wider: {}", v.length());
+    assert!((u.length() - 30.0).abs() < 0.31 && (now - centre).length() < 1e-6 && u.dot(v).abs() < 1e-6 * u.length() * v.length(), "u {u:?} v {v:?} centre {now:?} was {centre:?}");
+    let centre = now;
+
+    // A line started on the curve is tied to it.
+    run(&mut h, Action::Tool(Tool::Line));
+    let t = 60f64.to_radians();
+    let on = centre + u * t.cos() + v * t.sin();
+    let wide = v.length();
+    for p in [on, DVec2::new(60.0, 35.0)] {
+        let p = at(&h, p.x, p.y);
+        click(&mut h, p);
+    }
+    run(&mut h, Action::Cancel);
+    let sk = sketch(&h);
+    let tie = sk.constraints.values().find(|k| k.kind == CKind::Coincident && k.refs.contains(&ellipse)).unwrap_or_else(|| panic!("the line's start is held on the ellipse: entities {:?} constraints {:?} toast {:?} on {on:?}", sk.entities, sk.constraints, h.state().toast));
+    let start = sk.pos(tie.refs[0]) - sk.pos(c);
+    let (_, u, v) = sk.ellipse(ellipse).unwrap();
+    let k = (start.dot(u) / u.length_squared()).powi(2) + (start.dot(v) / v.length_squared()).powi(2);
+    assert!((k - 1.0).abs() < 1e-6, "the point lies on the ellipse: {k}");
+    assert!((sk.ellipse(ellipse).unwrap().2.length() - wide).abs() < 0.05, "and the ellipse stayed as it was");
+    let (now, u, v) = sk.ellipse(ellipse).unwrap();
+
+    // It bounds a region; extruded, the body has the ellipse's exact volume.
+    assert_eq!(fr_core::profile::profiles(&sk).len(), 1);
+    h.state_mut().finish_sketch();
+    run(&mut h, Action::Extrude);
+    let Dialog::Feature(mut f) = h.state().dialog.clone() else { panic!("the extrude dialog should open") };
+    if f.profiles.is_empty() {
+        let p = crate::view::to_screen(h.state(), DVec3::new(now.x, now.y, 0.0));
+        click(&mut h, p);
+        let Dialog::Feature(g) = h.state().dialog.clone() else { panic!() };
+        f = g;
+    }
+    assert_eq!(f.profiles.len(), 1, "the ellipse is the region");
+    f.text = "5 mm".into();
+    h.state_mut().dialog = Dialog::Feature(f);
+    h.run_steps(2);
+    h.state_mut().toast = None;
+    h.state_mut().apply_dialog();
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.clone()), None);
+    let body = &h.state().session.built.bodies[0];
+    let exact = std::f64::consts::PI * u.length() * v.length() * 5.0;
+    assert!((body.solids[0].volume() - exact).abs() < 1e-6, "{} is not {exact}", body.solids[0].volume());
+    save(&mut h, "ellipse-solid.png");
+}
+
+#[test]
 fn move_tool_moves_the_selection_in_a_sketch() {
     let mut h = harness();
     h.state_mut().create_sketch(Plane::XY);

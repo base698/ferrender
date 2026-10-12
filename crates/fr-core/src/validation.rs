@@ -51,6 +51,11 @@ fn validate_contents(s: &Sketch) -> Result<(), String> {
         { return Err(format!("circle {id} needs a finite positive radius")); }
     }
     for (&id, ent) in &s.entities {
+        if let Geom::Ellipse { c, a, b } = ent.geom
+            && (c == a || c == b || a == b || s.pos(a).distance(s.pos(c)) < 1e-9 || s.pos(b).distance(s.pos(c)) < 1e-9)
+        { return Err(format!("ellipse {id} needs a centre and two axes with some length")); }
+    }
+    for (&id, ent) in &s.entities {
         if let Geom::Spline { a,b,c,d } = ent.geom {
             crate::sketch::validate_spline_points([a,b,c,d].map(|p| s.pos(p))).map_err(|e| format!("spline {id}: {e}"))?;
         }

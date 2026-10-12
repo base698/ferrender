@@ -121,7 +121,7 @@ fn along_seg(seg: &Seg, t: f64) -> Option<DVec2> {
             let (centre, radius, start, sweep) = arc_of(a, m, b)?;
             Some(centre + DVec2::from_angle(start + sweep * t) * radius)
         }
-        Seg::Spline(_) => None,
+        Seg::Spline(_) | Seg::Ellipse(..) => None,
     }
 }
 
@@ -138,13 +138,13 @@ fn arc_of(a: DVec2, m: DVec2, b: DVec2) -> Option<(DVec2, f64, f64, f64)> {
     Some((centre, centre.distance(a), start, sweep))
 }
 
-/// The exact length of a line, arc or circle; a spline is measured along its points instead.
+/// The exact length of a line, arc or circle; a spline or ellipse is measured along its points instead.
 fn seg_length(seg: &Seg) -> Option<f64> {
     match *seg {
         Seg::Line(a, b) => Some(a.distance(b)),
         Seg::Circle(_, r) => Some(std::f64::consts::TAU * r),
         Seg::Arc(a, m, b) => arc_of(a, m, b).map(|(_, radius, _, sweep)| radius * sweep.abs()),
-        Seg::Spline(_) => None,
+        Seg::Spline(_) | Seg::Ellipse(..) => None,
     }
 }
 
@@ -167,7 +167,7 @@ fn part_of(whole: &Leg, plane: &Plane, t0: f64, t1: f64, n: DVec3) -> R<Leg> {
     match (along_seg(&whole.seg, t0), along_seg(&whole.seg, (t0 + t1) / 2.0), along_seg(&whole.seg, t1)) {
         (Some(a), Some(m), Some(b)) => {
             let seg = if matches!(whole.seg, Seg::Line(..)) { Seg::Line(a, b) } else { Seg::Arc(a, m, b) };
-            leg(seg_edge(&seg, plane, 0.0).map_err(fail)?, seg, whole.id, n, seg_length(&seg))
+            leg(seg_edge(&seg, plane, 0.0).map_err(|e| format!("the kernel rejects that part of the path: {e}"))?, seg, whole.id, n, seg_length(&seg))
         }
         _ => {
             const SAMPLES: usize = 24;

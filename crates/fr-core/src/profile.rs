@@ -41,6 +41,8 @@ pub enum Seg {
     /// Centre and radius.
     Circle(DVec2, f64),
     Spline([DVec2; 4]),
+    /// Centre and the two semi-axis vectors, the second a quarter turn anticlockwise from the first.
+    Ellipse(DVec2, DVec2, DVec2),
 }
 
 impl Seg {
@@ -53,12 +55,12 @@ impl Seg {
         }
     }
 
-    /// Where the piece starts and ends; a circle gives its centre twice.
+    /// Where the piece starts and ends; a circle or ellipse gives its centre twice.
     pub fn ends(&self) -> (DVec2, DVec2) {
         match *self {
             Seg::Line(a, b) | Seg::Arc(a, _, b) => (a, b),
             Seg::Spline(p) => (p[0], p[3]),
-            Seg::Circle(c, _) => (c, c),
+            Seg::Circle(c, _) | Seg::Ellipse(c, ..) => (c, c),
         }
     }
 }
@@ -99,6 +101,11 @@ pub fn chain(sk: &Sketch, pick: &[Id]) -> Result<Chain, String> {
                 if r < 1e-9 { return Err("the path circle has no radius".into()); }
                 return Ok(Chain { segs: vec![Seg::Circle(sk.pos(c), r)], ids: vec![*id], closed: true });
             }
+            Geom::Ellipse { .. } => {
+                if wanted.len() > 1 { return Err("an ellipse is a whole path by itself; it cannot be joined to other entities".into()); }
+                let (c, u, v) = sk.ellipse(*id).ok_or("the path ellipse has no size")?;
+                return Ok(Chain { segs: vec![Seg::Ellipse(c, u, v)], ids: vec![*id], closed: true });
+            }
             Geom::Line { a, b } => (a, b, Seg::Line(sk.pos(a), sk.pos(b))),
             Geom::Arc { s, e, .. } => { let pts = sk.polyline(*id); (s, e, Seg::Arc(sk.pos(s), pts[pts.len() / 2], sk.pos(e))) }
             Geom::Spline { a, b, c, d } => (a, d, Seg::Spline([a, b, c, d].map(|p| sk.pos(p)))),
@@ -135,11 +142,11 @@ pub fn chain(sk: &Sketch, pick: &[Id]) -> Result<Chain, String> {
     // solver's tolerance. Make each piece start exactly where the last one ended.
     for i in 1..segs.len() {
         let join = segs[i - 1].ends().1;
-        match &mut segs[i] { Seg::Line(a, _) | Seg::Arc(a, _, _) => *a = join, Seg::Spline(p) => p[0] = join, Seg::Circle(..) => {} }
+        match &mut segs[i] { Seg::Line(a, _) | Seg::Arc(a, _, _) => *a = join, Seg::Spline(p) => p[0] = join, Seg::Circle(..) | Seg::Ellipse(..) => {} }
     }
     if closed {
         let join = segs[0].ends().0;
-        match segs.last_mut().unwrap() { Seg::Line(_, b) | Seg::Arc(_, _, b) => *b = join, Seg::Spline(p) => p[3] = join, Seg::Circle(..) => {} }
+        match segs.last_mut().unwrap() { Seg::Line(_, b) | Seg::Arc(_, _, b) => *b = join, Seg::Spline(p) => p[3] = join, Seg::Circle(..) | Seg::Ellipse(..) => {} }
     }
     Ok(Chain { segs, ids, closed })
 }
@@ -333,6 +340,7 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
             if signed_area(&pts).abs() > 1e-9 {
                 let seg = match e.geom {
                     Geom::Spline { a,b,c,d } => Seg::Spline([a,b,c,d].map(|p| sk.pos(p))),
+                    Geom::Ellipse { .. } => { let Some((c, u, v)) = sk.ellipse(*id) else { continue }; Seg::Ellipse(c, u, v) },
                     _ => { let Some((c,r)) = sk.curve(*id) else { continue }; Seg::Circle(c,r) },
                 };
                 let path = vec![if signed_area(&pts) < 0.0 { pts.reverse(); seg.reversed() } else { seg }];

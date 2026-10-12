@@ -193,7 +193,7 @@ been tried against the live API.
 
 | | |
 |---|---|
-| **Sketch** | Line, rectangle, circle, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
+| **Sketch** | Line, rectangle, circle, ellipse, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
 | **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; signed X/Y position, length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
 | **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, loft through sections, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
@@ -290,7 +290,9 @@ New Sketch, pick a plane (or click a flat face of a body). Line
 points and onto lines and curves; a nearly horizontal or vertical line becomes
 exactly so. **3-Point Arc** uses start, end, then through/bulge points; **Tangent Arc**
 continues from a line or arc endpoint. **Spline** passes through four editable
-fit points. **Point Coordinates…** creates a point or edits a selected one
+fit points. **Ellipse** takes its centre, the end of one axis, then a click that
+sets its width; the ends of its two axes are points you can drag, dimension
+from the centre, or make horizontal or vertical with it. **Point Coordinates…** creates a point or edits a selected one
 with signed X/Y expressions; double-click a point to reopen it. Position
 dimensions keep the coordinates attached to parameters. Drag with Select (V);
 geometry moves as far as its constraints allow. While drawing a line, **Shift**

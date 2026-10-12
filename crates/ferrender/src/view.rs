@@ -685,6 +685,17 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
             }
         }
     }
+    // Hovering or selecting an ellipse shows its two axes, whose ends are its handles.
+    for (id, e) in &sk.entities {
+        if let Geom::Ellipse { c, a, b } = e.geom
+            && (picked(*id) || hover == Hit::Entity(*id) || [c, a, b].iter().any(|p| picked(*p) || hover == Hit::Point(*p)))
+        {
+            let (centre, first, second) = (sk.pos(c), sk.pos(a), sk.pos(b));
+            for end in [first, second] {
+                painter.extend(Shape::dashed_line(&[on_screen(app, sk, centre * 2.0 - end), on_screen(app, sk, end)], Stroke::new(1.0, colors.selected), 4.0, 4.0));
+            }
+        }
+    }
     // Selecting a spline exposes its four interpolation points and their order.
     for (id, e) in &sk.entities {
         if let Geom::Spline { a, b, c, d } = e.geom
@@ -698,7 +709,9 @@ fn draw_sketch(app: &App, painter: &Painter, sk: &Sketch, active: bool, hover: H
         }
     }
     // A spline's fit points are its handles: drawn with a filled centre so they read as draggable.
-    let fit: std::collections::HashSet<Id> = sk.entities.values().filter_map(|e| if let Geom::Spline { a, b, c, d } = e.geom { Some([a, b, c, d]) } else { None }).flatten().collect();
+    let mut fit: std::collections::HashSet<Id> = sk.entities.values().filter_map(|e| if let Geom::Spline { a, b, c, d } = e.geom { Some([a, b, c, d]) } else { None }).flatten().collect();
+    // The ends of an ellipse's axes are handles too.
+    fit.extend(sk.entities.values().filter_map(|e| if let Geom::Ellipse { a, b, .. } = e.geom { Some([a, b]) } else { None }).flatten());
     for (id, p) in &sk.points {
         let at = on_screen(app, sk, *p);
         let hot = picked(*id) || hover == Hit::Point(*id);
@@ -1002,6 +1015,7 @@ fn dimension_tool(app: &mut App, resp: &egui::Response, sk: &Sketch, hover: Hit)
         Hit::Label(cid) => app.edit_dimension(cid, pos),
         Hit::Entity(e) => match (sk.ref_kind(e), first, first_kind) {
             (Some(Ref::Curve | Ref::Line), None, _) => app.dimension_selection(vec![e], pos),
+            (Some(Ref::Ellipse), _, _) => { app.dim_refs.clear(); app.toast("An ellipse is sized by its points: click its centre, then the end of an axis, to set that radius."); }
             (Some(Ref::Line), Some(a), Some(Ref::Line)) if a != e => {
                 let (l1, l2) = (sk.line(a).unwrap(), sk.line(e).unwrap());
                 let (d1, d2) = ((l1.1 - l1.0).normalize_or_zero(), (l2.1 - l2.0).normalize_or_zero());
@@ -1149,7 +1163,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     let colors = ViewColors::new(painter.ctx());
     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     let tool = app.tool;
-    let from = (tool == Tool::Line && app.clicks.len() == 1).then(|| app.clicks[0].p);
+    let from = (matches!(tool, Tool::Line | Tool::Ellipse) && app.clicks.len() == 1).then(|| app.clicks[0].p);
     // Sizes can be typed for these once their first point is down.
     let names: &[&str] = match (tool, app.clicks.len()) {
         (Tool::Rect, 1) => &["Width", "Height"],
@@ -1274,6 +1288,20 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
                 } else {
                     boxes = Some((px(s.p), vec![90.0]));
                 }
+            }
+        }
+        (Tool::Ellipse, 1) => {
+            painter.extend(Shape::dashed_line(&[px(c[0].p), px(s.p)], stroke, 5.0, 4.0));
+            note(px(s.p), format!("R{}", len(c[0].p.distance(s.p))));
+        }
+        (Tool::Ellipse, 2) => {
+            let axis = c[1].p - c[0].p;
+            if let Some(across) = axis.perp().try_normalize() {
+                let other = across.dot(s.p - c[0].p).abs();
+                let pts = (0..=72).map(|i| { let t = i as f64 / 72.0 * std::f64::consts::TAU; px(c[0].p + axis * t.cos() + across * other * t.sin()) }).collect();
+                painter.add(Shape::line(pts, stroke));
+                painter.extend(Shape::dashed_line(&[px(c[0].p - axis), px(c[0].p + axis)], stroke, 5.0, 4.0));
+                note(px(s.p), format!("R{} \u{d7} R{}", len(axis.length()), len(other)));
             }
         }
         (Tool::Spline, n) if n > 0 => {

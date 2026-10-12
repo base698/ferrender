@@ -56,6 +56,10 @@ struct Rib {
     plane: Plane,
     /// The normal a circle is drawn about, so that circles on opposed planes still run the same way.
     about: DVec3,
+    /// Where a circle should start, as a direction from its centre: along the long axis of
+    /// the nearest ellipse in the loft, which can only start there. Without it a circle and
+    /// an ellipse turned to an odd angle are joined with a slight twist.
+    toward: Option<DVec3>,
 }
 
 impl Rib {
@@ -72,16 +76,30 @@ impl Rib {
     fn edges(&self) -> R<Vec<Edge>> {
         let at = |p: DVec2| c(self.plane.to_world(p));
         self.segs.iter().map(|s| match *s {
-            Seg::Circle(centre, r) => Edge::circle(r, c(self.about)).map(|e| e.translate(at(centre))),
+            Seg::Circle(centre, r) => Edge::circle(r, c(self.about)).map_err(|e| e.to_string()).map(|e| {
+                // Turned about its own axis, a circle is the same circle with another start point.
+                let from = g(e.start_point()).try_normalize();
+                let to = self.toward.map(|d| d - self.about * d.dot(self.about)).and_then(|d| d.try_normalize());
+                let e = match (from, to) {
+                    (Some(from), Some(to)) => e.rotate(c(DVec3::ZERO), c(self.about), from.cross(to).dot(self.about).atan2(from.dot(to))),
+                    _ => e,
+                };
+                e.translate(at(centre))
+            }),
+            Seg::Ellipse(centre, u, v) => {
+                let o = self.plane.to_world(centre);
+                super::ellipse_edge(o, self.plane.to_world(centre + u) - o, self.plane.to_world(centre + v) - o, self.about)
+            }
             ref other => seg_edge(other, &self.plane, 0.0),
         }.map_err(|e| format!("a section has an edge the kernel rejects: {e}"))).collect()
     }
 }
 
-/// Where an edge starts; a circle starts on the +X side of its sketch.
+/// Where an edge starts; a circle starts on the +X side of its sketch, an ellipse at its first axis.
 fn start(s: &Seg) -> DVec2 {
     match *s {
         Seg::Circle(centre, r) => centre + DVec2::X * r,
+        Seg::Ellipse(centre, u, _) => centre + u,
         _ => s.ends().0,
     }
 }
@@ -91,7 +109,7 @@ fn middle(s: &Seg) -> DVec2 {
     match *s {
         Seg::Line(a, b) => (a + b) / 2.0,
         Seg::Arc(_, m, _) => m,
-        Seg::Circle(centre, _) => centre,
+        Seg::Circle(centre, _) | Seg::Ellipse(centre, ..) => centre,
         Seg::Spline(points) => (points[1] + points[2]) / 2.0,
     }
 }
@@ -114,7 +132,8 @@ fn ribs(sections: &[Section]) -> R<Vec<Rib>> {
     if base.path.is_empty() {
         return Err(format!("section {base_n} has no exact outline"));
     }
-    let (want, circle) = (base.path.len(), matches!(base.path[..], [Seg::Circle(..)]));
+    // A circle or an ellipse is one closed edge with no corners; a tip for it is a tiny circle.
+    let (want, circle) = (base.path.len(), matches!(base.path[..], [Seg::Circle(..)] | [Seg::Ellipse(..)]));
     let mut out: Vec<Rib> = Vec::new();
     for (i, s) in sections.iter().enumerate() {
         let n = i + 1;
@@ -137,7 +156,7 @@ fn ribs(sections: &[Section]) -> R<Vec<Rib>> {
         };
         let b = s.plane();
         let Some(before) = out.last() else {
-            out.push(Rib { segs: path, ids: base.path_ids.clone(), plane: b, about: b.normal() });
+            out.push(Rib { segs: path, ids: base.path_ids.clone(), plane: b, about: b.normal(), toward: None });
             continue;
         };
         let a = before.plane;
@@ -145,10 +164,10 @@ fn ribs(sections: &[Section]) -> R<Vec<Rib>> {
             return Err(format!("sections {i} and {n} lie on the same plane; draw each section on its own plane"));
         }
         let ids = base.path_ids.clone();
-        // A circle has no corners to match; it only has to run the same way round.
-        if matches!(path[..], [Seg::Circle(..)]) {
+        // A circle or ellipse has no corners to match; it only has to run the same way round.
+        if matches!(path[..], [Seg::Circle(..)] | [Seg::Ellipse(..)]) {
             let about = if b.normal().dot(before.about) < 0.0 { -b.normal() } else { b.normal() };
-            out.push(Rib { segs: path, ids, plane: b, about });
+            out.push(Rib { segs: path, ids, plane: b, about, toward: None });
             continue;
         }
         let target = before.corners();
@@ -157,7 +176,7 @@ fn ribs(sections: &[Section]) -> R<Vec<Rib>> {
         let mut best: Option<(f64, Vec<Seg>)> = None;
         for flipped in [false, true] {
             let walk = if flipped { reversed(&path) } else { path.clone() };
-            let candidate = Rib { segs: walk, ids: Vec::new(), plane: b, about: b.normal() };
+            let candidate = Rib { segs: walk, ids: Vec::new(), plane: b, about: b.normal(), toward: None };
             // Compare shapes, not positions: a section may sit well to one side of the last.
             let (corners, centre) = (candidate.corners(), candidate.centre());
             for turn in 0..have {
@@ -171,7 +190,17 @@ fn ribs(sections: &[Section]) -> R<Vec<Rib>> {
             }
         }
         let segs = best.map(|(_, segs)| segs).unwrap_or(path);
-        out.push(Rib { segs, ids, plane: b, about: b.normal() });
+        out.push(Rib { segs, ids, plane: b, about: b.normal(), toward: None });
+    }
+    // Circles start along the long axis of the nearest ellipse, looking back first.
+    let long: Vec<Option<DVec3>> = out.iter().map(|rib| match rib.segs[..] {
+        [Seg::Ellipse(centre, u, v)] => { let l = if u.length() >= v.length() { u } else { v }; Some(rib.plane.to_world(centre + l) - rib.plane.to_world(centre)) }
+        _ => None,
+    }).collect();
+    for i in 0..out.len() {
+        if matches!(out[i].segs[..], [Seg::Circle(..)]) {
+            out[i].toward = long[..i].iter().rev().chain(long[i..].iter()).flatten().next().copied();
+        }
     }
     Ok(out)
 }
@@ -215,6 +244,7 @@ pub fn tag_loft(lumps: &[Solid], sections: &[Section], feature: Id) -> Tags {
     // Each section's edge lies on the side face it bounds.
     let on = |rib: &Rib, s: &Seg| match *s {
         Seg::Circle(centre, r) => rib.plane.to_world(centre + DVec2::X * r),
+        Seg::Ellipse(centre, u, _) => rib.plane.to_world(centre + u),
         _ => probe(s, &rib.plane, 0.0),
     };
     let probes: Vec<(DVec3, Id)> = ribs.iter().flat_map(|rib| rib.segs.iter().zip(rib.ids.iter().copied().chain(std::iter::repeat(0))).map(move |(s, id)| (on(rib, s), id))).collect();

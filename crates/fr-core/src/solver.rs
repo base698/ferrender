@@ -48,7 +48,7 @@ impl Sys<'_> {
         match self.sk.entities[&id].geom {
             Geom::Circle { c, r } => (self.p(x, c), self.ridx.get(&id).map_or(r, |i| x[*i])),
             Geom::Arc { c, s, .. } => (self.p(x, c), self.p(x, c).distance(self.p(x, s))),
-            Geom::Line { .. } | Geom::Spline { .. } => unreachable!("constraint refs are validated when added"),
+            Geom::Line { .. } | Geom::Spline { .. } | Geom::Ellipse { .. } => unreachable!("constraint refs are validated when added"),
         }
     }
 
@@ -72,6 +72,16 @@ impl Sys<'_> {
                 (CKind::Coincident, [Ref::Point, Ref::Curve]) => {
                     let (c, rad) = self.curve(x, r[1]);
                     out.push(self.p(x, r[0]).distance(c) - rad);
+                }
+                (CKind::Coincident, [Ref::Point, Ref::Ellipse]) => {
+                    // How far along its own ray from the centre the point is from the curve,
+                    // weighed like a distance.
+                    let Geom::Ellipse { c, a, b } = sk.entities[&r[1]].geom else { unreachable!("constraint refs are validated when added") };
+                    let (centre, u) = (self.p(x, c), self.p(x, a) - self.p(x, c));
+                    let (first, second) = (len(u), len(self.p(x, b) - centre));
+                    let d = self.p(x, r[0]) - centre;
+                    let k = ((d.dot(u) / first / first).powi(2) + (u.perp_dot(d) / first / second).powi(2)).sqrt();
+                    out.push((k - 1.0) * (first + second) / 2.0);
                 }
                 (CKind::Horizontal | CKind::Vertical, _) => {
                     let (a, b) = if r.len() == 1 { self.line(x, r[0]) } else { (self.p(x, r[0]), self.p(x, r[1])) };
@@ -156,6 +166,13 @@ impl Sys<'_> {
             }
         }
         for (eid, e) in &sk.entities {
+            // An ellipse's two axes stay square to each other.
+            if let Geom::Ellipse { c, a, b } = e.geom {
+                let centre = self.p(x, c);
+                let (u, w) = (self.p(x, a) - centre, self.p(x, b) - centre);
+                out.push(u.dot(w) / (len(u) * len(w)) * self.size);
+                if let Some(o) = owners.as_deref_mut() { o.push(*eid); }
+            }
             if let Geom::Arc { c, s, e } = e.geom {
                 let c = self.p(x, c);
                 out.push(c.distance(self.p(x, s)) - c.distance(self.p(x, e)));

@@ -75,6 +75,9 @@ pub enum Geom {
     Arc { c: Id, s: Id, e: Id },
     /// Native interpolating B-spline through four editable fit points.
     Spline { a: Id, b: Id, c: Id, d: Id },
+    /// An ellipse by its centre `c` and the ends `a` and `b` of its two axes. The solver
+    /// keeps the axes perpendicular; either may be the longer one.
+    Ellipse { c: Id, a: Id, b: Id },
 }
 
 /// Extra construction intent for arcs drawn without a centre.
@@ -209,6 +212,7 @@ pub enum Ref {
     Line,
     Curve,
     Spline,
+    Ellipse,
 }
 
 /// Copied sketch geometry, as it travels through the clipboard.
@@ -324,7 +328,7 @@ impl Sketch {
         if self.points.contains_key(&id) {
             return Some(Ref::Point);
         }
-        self.entities.get(&id).map(|e| match e.geom { Geom::Line { .. } => Ref::Line, Geom::Spline { .. } => Ref::Spline, _ => Ref::Curve })
+        self.entities.get(&id).map(|e| match e.geom { Geom::Line { .. } => Ref::Line, Geom::Spline { .. } => Ref::Spline, Geom::Ellipse { .. } => Ref::Ellipse, _ => Ref::Curve })
     }
 
     /// Checks that `refs` suit `kind` and puts them in canonical order.
@@ -337,7 +341,7 @@ impl Sketch {
         let pat: Vec<Ref> = r.iter().map(|x| x.0).collect();
         use Ref::{Curve as C, Line as L, Point as P};
         let ok = match kind {
-            CKind::Coincident => pat == [P, P] || pat == [P, L] || pat == [P, C],
+            CKind::Coincident => pat == [P, P] || pat == [P, L] || pat == [P, C] || pat == [P, Ref::Ellipse],
             CKind::Horizontal | CKind::Vertical => pat == [L] || pat == [P, P],
             CKind::Parallel | CKind::Perpendicular | CKind::Collinear => pat == [L, L],
             CKind::Angle => pat == [L] || pat == [L, L] || (pat == [C] && matches!(self.entities[&r[0].1].geom, Geom::Arc { .. })),
@@ -397,6 +401,7 @@ impl Sketch {
                 points
             },
             Some(Geom::Spline { a, b, c, d }) => vec![a, b, c, d],
+            Some(Geom::Ellipse { c, a, b }) => vec![c, a, b],
             None => vec![],
         }
     }
@@ -406,8 +411,17 @@ impl Sketch {
         match self.entities.get(&id)?.geom {
             Geom::Circle { c, r } => Some((self.pos(c), r)),
             Geom::Arc { c, s, .. } => Some((self.pos(c), self.pos(c).distance(self.pos(s)))),
-            Geom::Line { .. } | Geom::Spline { .. } => None,
+            Geom::Line { .. } | Geom::Spline { .. } | Geom::Ellipse { .. } => None,
         }
+    }
+
+    /// An ellipse as its centre and two semi-axis vectors, the second a quarter turn
+    /// anticlockwise from the first: the curve is `centre + u cos t + v sin t`.
+    pub fn ellipse(&self, id: Id) -> Option<(DVec2, DVec2, DVec2)> {
+        let Geom::Ellipse { c, a, b } = self.entities.get(&id)?.geom else { return None };
+        let (c, u) = (self.pos(c), self.pos(a) - self.pos(c));
+        let v = u.perp().try_normalize()? * self.pos(b).distance(c);
+        Some((c, u, v))
     }
 
     pub fn line(&self, id: Id) -> Option<(DVec2, DVec2)> {
@@ -435,6 +449,10 @@ impl Sketch {
         match e.geom {
             Geom::Line { a, b } => vec![self.pos(a), self.pos(b)],
             Geom::Spline { a, b, c, d } => spline_polyline([a,b,c,d].map(|p| self.pos(p))),
+            Geom::Ellipse { .. } => {
+                let Some((c, u, v)) = self.ellipse(id) else { return vec![] };
+                (0..=CIRCLE_SEGS).map(|i| { let t = (i % CIRCLE_SEGS) as f64 / CIRCLE_SEGS as f64 * std::f64::consts::TAU; c + u * t.cos() + v * t.sin() }).collect()
+            }
             Geom::Circle { c, r } => {
                 let c = self.pos(c);
                 (0..=CIRCLE_SEGS).map(|i| c + DVec2::from_angle((i % CIRCLE_SEGS) as f64 / CIRCLE_SEGS as f64 * std::f64::consts::TAU) * r).collect()
@@ -550,6 +568,7 @@ impl Sketch {
                 Geom::Circle { c, r } => Geom::Circle { c: m(&map, c), r },
                 Geom::Arc { c, s, e } => Geom::Arc { c: m(&map, c), s: m(&map, s), e: m(&map, e) },
                 Geom::Spline { a,b,c,d } => Geom::Spline { a:m(&map,a),b:m(&map,b),c:m(&map,c),d:m(&map,d) },
+                Geom::Ellipse { c, a, b } => Geom::Ellipse { c: m(&map, c), a: m(&map, a), b: m(&map, b) },
             };
             let id = self.add(geom, e.construction);
             map.insert(*old, id);
@@ -608,6 +627,7 @@ impl Sketch {
                     Geom::Circle { c, .. } => swap(c),
                     Geom::Arc { c, s, e } => [c, s, e].into_iter().for_each(swap),
                     Geom::Spline { a,b,c,d } => [a,b,c,d].into_iter().for_each(swap),
+                    Geom::Ellipse { c, a, b } => [c, a, b].into_iter().for_each(swap),
                 }
             }
         }
@@ -709,6 +729,17 @@ impl Sketch {
         Ok(self.add(Geom::Spline { a,b,c,d }, construction))
     }
 
+    /// An ellipse from its centre, the end of one axis, and the half-length of the other.
+    /// The second axis gets a point of its own, a quarter turn anticlockwise from the first.
+    pub fn add_ellipse(&mut self, centre: Id, axis: Id, other: f64, construction: bool) -> Result<Id, String> {
+        if !self.points.contains_key(&centre) || !self.points.contains_key(&axis) { return Err("an ellipse point is missing".into()); }
+        let (c, u) = (self.pos(centre), self.pos(axis) - self.pos(centre));
+        if centre == axis || u.length() < 1e-6 { return Err("an ellipse needs its axis point away from its centre".into()); }
+        if !other.is_finite() || other < 1e-6 { return Err("an ellipse needs a second radius greater than zero".into()); }
+        let b = self.add_point(c + u.perp().normalize() * other);
+        Ok(self.add(Geom::Ellipse { c: centre, a: axis, b }, construction))
+    }
+
     pub fn add_arc3(&mut self, start: Id, through: Id, end: Id, construction: bool) -> Result<Id, String> {
         if [start,through,end].iter().any(|p| !self.points.contains_key(p)) { return Err("an arc point is missing".into()); }
         let centre = arc3_center(self.pos(start), self.pos(through), self.pos(end))?;
@@ -769,7 +800,7 @@ impl Sketch {
         for e in self.entities.values().filter(|e| !e.construction) {
             let pair = match e.geom {
                 Geom::Line { a,b } => [a,b], Geom::Arc { s,e,.. } => [s,e], Geom::Spline { a,d,.. } => [a,d],
-                Geom::Circle { .. } => continue,
+                Geom::Circle { .. } | Geom::Ellipse { .. } => continue,
             };
             for p in pair { *degree.entry(nodes[&p]).or_default() += 1; endpoint_ids.insert(p); }
         }

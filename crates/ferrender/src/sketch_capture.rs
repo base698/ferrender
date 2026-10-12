@@ -110,17 +110,23 @@ pub fn project_entity(sk: &Sketch, entity: Id, cursor: Pos2, project: impl Fn(DV
             // Halfway along is sticky: within a few pixels of it, the point is the midpoint.
             if (t-0.5).abs()*d.length() < MID_REACH { mid = true; (a+b)*0.5 } else { a+(b-a)*t as f64 }
         }
-        Geom::Circle { .. } | Geom::Arc { .. } => {
-            let (center,radius) = sk.curve(entity)?;
-            if !radius.is_finite() || radius <= 0.0 { return None; }
+        Geom::Circle { .. } | Geom::Arc { .. } | Geom::Ellipse { .. } => {
             let (start,sweep) = sk.arc_angles(entity).unwrap_or((0.0,std::f64::consts::TAU));
-            let point = |t: f64| center+DVec2::from_angle(start+t)*radius;
+            // An ellipse is walked by the angle of its own two axes; a circle or arc by its angle.
+            let point: Box<dyn Fn(f64) -> DVec2> = match sk.ellipse(entity) {
+                Some((centre,u,v)) => Box::new(move |t: f64| centre+u*t.cos()+v*t.sin()),
+                None => {
+                    let (center,radius) = sk.curve(entity)?;
+                    if !radius.is_finite() || radius <= 0.0 { return None; }
+                    Box::new(move |t: f64| center+DVec2::from_angle(start+t)*radius)
+                }
+            };
             let distance = |t: f64| project(point(t)).distance_sq(cursor) as f64;
             let steps = ((sweep/std::f64::consts::TAU*64.0).ceil() as usize).max(8);
             let step = sweep/steps as f64;
             let index = (0..=steps).min_by(|a,b| distance(*a as f64*step).total_cmp(&distance(*b as f64*step)))?;
-            let (mut lo,mut hi) = if matches!(geometry,Geom::Circle { .. }) {
-                // A full circle has no endpoint at its parameter seam.
+            let (mut lo,mut hi) = if !matches!(geometry,Geom::Arc { .. }) {
+                // A full circle or ellipse has no endpoint at its parameter seam.
                 ((index as f64-1.0)*step,(index as f64+1.0)*step)
             } else { (((index as f64-1.0)*step).max(0.0),((index as f64+1.0)*step).min(sweep)) };
             // Refine the sampled minimum; endpoints remain valid candidates.

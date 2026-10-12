@@ -19,7 +19,7 @@ enum Shape {
 fn shape(sk: &Sketch, id: Id) -> Option<Shape> {
     match sk.entities.get(&id)?.geom {
         Geom::Line { a, b } => Some(Shape::Seg(sk.pos(a), sk.pos(b))),
-        Geom::Spline { .. } => None,
+        Geom::Spline { .. } | Geom::Ellipse { .. } => None,
         Geom::Circle { c, r } => Some(Shape::Arc { c: sk.pos(c), r, a0: 0.0, sweep: TAU }),
         Geom::Arc { c, .. } => {
             let (a0, sweep) = sk.arc_angles(id)?;
@@ -204,6 +204,7 @@ impl Sketch {
             let geom = match e.geom {
                 Geom::Line { a, b } => Geom::Line { a: map[&a], b: map[&b] },
                 Geom::Spline { a,b,c,d } => Geom::Spline { a:map[&a], b:map[&b], c:map[&c], d:map[&d] },
+                Geom::Ellipse { c, a, b } => Geom::Ellipse { c: map[&c], a: map[&a], b: map[&b] },
                 Geom::Circle { c, r } => Geom::Circle { c: map[&c], r },
                 // A reflection turns counter-clockwise into clockwise, so the ends swap.
                 Geom::Arc { c, s, e } => Geom::Arc { c: map[&c], s: map[&e], e: map[&s] },
@@ -302,6 +303,7 @@ impl Sketch {
                 }
                 Some(Geom::Line { a, b }) => lines.push((*id, a, b)),
                 Some(Geom::Arc { .. } | Geom::Spline { .. }) => return Err("Offset works on lines and circles; arcs and splines are not supported yet.".into()),
+                Some(Geom::Ellipse { .. }) => return Err("Offset works on lines and circles; the offset of an ellipse is not an ellipse, so it is not supported.".into()),
                 None => {}
             }
         }

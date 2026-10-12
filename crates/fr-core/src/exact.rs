@@ -6,6 +6,8 @@
 //! every operation here checks its result against what the operation must
 //! do to the volume or the bounds.
 
+use std::cell::RefCell;
+
 use cadrum::{Boolean, Edge, Face, Solid, SurfaceKind, Tessellation};
 use glam::{DVec2, DVec3};
 
@@ -42,14 +44,70 @@ pub fn bounds(lumps: &[Solid]) -> Option<(DVec3, DVec3)> {
 }
 
 /// One sketch segment as a kernel edge, `z` off the plane.
-fn seg_edge(s: &Seg, plane: &Plane, z: f64) -> Result<Edge, cadrum::Error> {
+fn seg_edge(s: &Seg, plane: &Plane, z: f64) -> R<Edge> {
     let at = |p: DVec2| c(plane.to_world(p) + plane.normal() * z);
-    match *s {
+    let made = match *s {
         Seg::Line(a, b) => Edge::line(at(a), at(b)),
         Seg::Arc(a, m, b) => Edge::arc_3pts(at(a), at(m), at(b)),
         Seg::Spline(points) => Edge::bspline(points.map(at).iter(), cadrum::BSplineEnd::NotAKnot),
         Seg::Circle(centre, r) => Edge::circle(r, c(plane.normal())).map(|e| e.translate(at(centre))),
+        Seg::Ellipse(centre, u, v) => {
+            let (o, n) = (plane.to_world(centre) + plane.normal() * z, plane.normal());
+            return ellipse_edge(o, plane.to_world(centre + u) - plane.to_world(centre), plane.to_world(centre + v) - plane.to_world(centre), n);
+        }
+    };
+    made.map_err(|e| e.to_string())
+}
+
+/// An exact ellipse in the XY plane about the origin: `ratio` long along X, 1 along Y,
+/// starting at +X and running anticlockwise about +Z.
+///
+/// The kernel wrapper has no ellipse edge, but a plane cuts a cylinder in one: the edge
+/// of that cut is a true analytic ellipse, which the kernel measures and exports exactly.
+/// A closed spline through points of the curve looks the same but is measured two or
+/// three percent short, because the kernel integrates a many-span spline too coarsely.
+fn unit_ellipse(ratio: f64) -> R<Edge> {
+    thread_local! { static MADE: RefCell<Vec<(u64, Edge)>> = const { RefCell::new(Vec::new()) }; }
+    if let Some(edge) = MADE.with(|m| m.borrow().iter().find(|e| e.0 == ratio.to_bits()).map(|e| e.1.clone())) {
+        return Ok(edge);
     }
+    if !ratio.is_finite() || !(1.0..=1e6).contains(&ratio) {
+        return Err("the ellipse is too thin for the kernel; its long axis may be at most a million times its short one".into());
+    }
+    // A unit cylinder along Z, cut by a plane tilted about Y until the cut is `ratio` long.
+    let tilt = (1.0 / ratio).acos();
+    let height = 2.0 * tilt.tan() + 2.0;
+    let (through, normal) = (DVec3::new(0.0, 0.0, height / 2.0), DVec3::new(-tilt.sin(), 0.0, tilt.cos()));
+    let cylinder = Solid::cylinder(1.0, c(DVec3::Z * height));
+    let cut: Boolean<Solid> = (&cylinder).into();
+    let parts = (cut - &Solid::half_space(c(through), c(normal))).build_vec().map_err(|e| format!("the kernel could not make the ellipse: {e}"))?;
+    let on_cut = |e: &Edge| {
+        let pts = e.approximation_segments(FINE);
+        pts.len() > 2 && pts.iter().all(|p| normal.dot(g(*p) - through).abs() < 1e-9) && g(e.start_point()).distance(g(e.end_point())) < 1e-9
+    };
+    let found: Vec<&Edge> = parts.iter().flat_map(|s| s.iter_edge()).filter(|e| on_cut(e)).collect();
+    let [edge] = found[..] else { return Err("the kernel did not make the ellipse as one closed edge".into()) };
+    // Lay the cut flat on XY about the origin, and make it run anticlockwise.
+    let mut edge = edge.clone().rotate(c(through), c(DVec3::Y), tilt).translate(c(-through));
+    if g(edge.start_tangent()).y < 0.0 { edge = edge.mirror(c(DVec3::ZERO), c(DVec3::Y)); }
+    let start = g(edge.start_point());
+    if start.distance(DVec3::X * ratio) > 1e-7 * ratio { return Err("the kernel made the ellipse somewhere unexpected".into()); }
+    MADE.with(|m| { let mut m = m.borrow_mut(); if m.len() == 64 { m.remove(0); } m.push((ratio.to_bits(), edge.clone())); });
+    Ok(edge)
+}
+
+/// An ellipse as an exact kernel edge, from its centre and two perpendicular semi-axis
+/// vectors. It runs anticlockwise about `about` and starts at the end of its longer axis.
+fn ellipse_edge(centre: DVec3, u: DVec3, v: DVec3, about: DVec3) -> R<Edge> {
+    let (long, short) = if u.length() >= v.length() { (u, v) } else { (v, -u) };
+    if short.length() < 1e-9 { return Err("the ellipse has no width".into()); }
+    let up = long.cross(short).normalize();
+    let (short, up) = if up.dot(about) < 0.0 { (-short, -up) } else { (short, up) };
+    let turn = glam::DQuat::from_mat3(&glam::DMat3::from_cols(long.normalize(), short.normalize(), up));
+    let (axis, angle) = turn.to_axis_angle();
+    let mut edge = unit_ellipse(long.length() / short.length())?.scale(c(DVec3::ZERO), short.length());
+    if angle.abs() > 1e-12 { edge = edge.rotate(c(DVec3::ZERO), c(axis), angle); }
+    Ok(edge.translate(c(centre)))
 }
 
 /// One closed boundary as kernel edges, `z` off the plane.
@@ -394,6 +452,7 @@ fn probe(seg: &Seg, plane: &Plane, lift: f64) -> DVec3 {
         Seg::Arc(_, m, _) => m,
         Seg::Circle(centre, r) => centre + DVec2::X * r,
         Seg::Spline(points) => points[1],
+        Seg::Ellipse(centre, u, _) => centre + u,
     };
     plane.to_world(p) + plane.normal() * lift
 }
