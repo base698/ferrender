@@ -2119,7 +2119,13 @@ impl Document {
         if along.length() < 1e-9 { return None; }
         let all = profile::profiles(s);
         let picked: Vec<&Profile> = if chosen.is_empty() { all.iter().filter(|p| p.depth % 2 == 0).collect() } else { all.iter().filter(|p| chosen.contains(&p.edges)).collect() };
-        let mut points: Vec<Id> = picked.iter().flat_map(|p| p.edges.iter().flat_map(|e| s.ent_points(*e))).collect();
+        // Only points on the outline count. The centre of an arc, circle or ellipse is not
+        // on it, and the centres of a lens's two faces lie on the axis, or a hair past it.
+        let on_outline = |e: Id| -> Vec<Id> {
+            let centre = match s.entities.get(&e).map(|x| x.geom) { Some(Geom::Arc { c, .. } | Geom::Circle { c, .. } | Geom::Ellipse { c, .. }) => Some(c), _ => None };
+            s.ent_points(e).into_iter().filter(|p| Some(*p) != centre).collect()
+        };
+        let mut points: Vec<Id> = picked.iter().flat_map(|p| p.edges.iter().flat_map(|e| on_outline(*e))).collect();
         points.sort();
         points.dedup();
         let side = |id: Id| along.perp_dot(s.pos(id) - a) / along.length();
