@@ -69,7 +69,7 @@ From a prompt to a printable part: these are the examples from [the Ferrender pr
     <td width="50%" valign="top">
       <img src="https://westcot.io/projects/ferrender/img/printed-bishop-plate-screw.jpg" alt="An orange 3D-printed bishop beside a printed plate with a threaded screw" width="100%">
       <br>
-      <sub>Off the printer: a bishop, and a screw threaded into its plate.</sub>
+      <sub>Off the printer: a bishop, and a screw threaded into its plate. <a href="examples/bishop-30mm.stl">Bishop STL</a>.</sub>
     </td>
     <td width="50%" valign="top">
       <img src="https://westcot.io/projects/ferrender/img/printed-honeycomb-tray.jpg" alt="A green 3D-printed honeycomb tray on a wooden table" width="100%">
@@ -79,10 +79,11 @@ From a prompt to a printable part: these are the examples from [the Ferrender pr
   </tr>
 </table>
 
-Start with the [teacup STL](examples/teacup.stl), or browse all five print meshes in [examples](examples/). Open a **.ferr** file to edit its sketches, parameters and timeline. The post has interactive previews of the teacup, toothbrush holder, sword, Virtuo holder and coffee holder.
+Start with the [30 mm bishop STL](examples/bishop-30mm.stl), or browse all six print meshes in [examples](examples/). Open a **.ferr** file to edit its sketches, parameters and timeline. The post has interactive previews of the teacup, toothbrush holder, sword, Virtuo holder and coffee holder.
 
 | Example | Design | Editable model | Print mesh |
 |---|---|---|---|
+| **Bishop** | A 30 mm chess bishop with a diagonal slot. [Build it yourself](BISHOP_TUTORIAL.md). | — | [STL](examples/bishop-30mm.stl) |
 | **Teacup** | “Tea, Earl Grey, hot.” A cup modeled by Claude in Ferrender. | — | [STL](examples/teacup.stl) |
 | **Toothbrush holder** | Slides into an existing wall plate, with three 30 mm rings and sloped drains. Ring size, pitch and drain are parameters. | [.ferr](https://westcot.io/files/ferrender/toothbrush-holder.ferr) | [STL](examples/toothbrush-holder.stl) |
 | **Sword** | Rebuilt from a Fusion design, with a separate hilt component: guard, grip and pommel, slotted for the tang. | [.ferr](https://westcot.io/files/ferrender/sword.ferr) | [STL](examples/sword.stl) |
