@@ -335,7 +335,9 @@ fn points_near_an_axis_land_on_it_and_splines_carry_on() {
     assert_eq!(sk.entities.len(), 3, "the third spline was made from three clicks");
     let closed = sk.entities.values().find_map(|e| if let Geom::Spline { a, b, c, d } = e.geom { (d == second.1 && a != second.0).then_some((a, b, c)) } else { None }).expect("it ends on the point that was clicked");
     assert!((sk.pos(closed.0).x - 40.0).abs() < 1.0 && (sk.pos(closed.1).x - 55.0).abs() < 1.0, "it passes through the clicked points: {:?} {:?} {:?} end {:?}", sk.pos(closed.0), sk.pos(closed.1), sk.pos(closed.2), end);
-    assert!((sk.pos(closed.2) - (sk.pos(closed.1) + end) / 2.0).length() < 1e-6, "the filled-in point sits halfway along the last stretch");
+    // The fit point filled in lies between the last two clicked, on the smooth curve through all three.
+    let (filled, mid) = (sk.pos(closed.2), (sk.pos(closed.1) + end) / 2.0);
+    assert!((filled - mid).length() < sk.pos(closed.1).distance(end) / 2.0 && (filled - mid).length() > 1e-3, "{filled:?} against the chord's middle {mid:?}");
     assert!(h.state().clicks.is_empty(), "landing on an existing point ends the run");
 }
 
@@ -586,6 +588,82 @@ fn the_ellipse_tool_draws_an_ellipse_that_snaps_extrudes_and_reshapes() {
     let exact = std::f64::consts::PI * u.length() * v.length() * 5.0;
     assert!((body.solids[0].volume() - exact).abs() < 1e-6, "{} is not {exact}", body.solids[0].volume());
     save(&mut h, "ellipse-solid.png");
+}
+
+#[test]
+fn a_spline_ends_where_it_lands_on_a_curve_and_escape_keeps_what_was_clicked() {
+    let mut h = harness();
+    h.state_mut().create_sketch(Plane::XY);
+    h.run_steps(2);
+    let Mode::Sketch(sid) = h.state().mode else { panic!() };
+    let sketch = |h: &H| h.state().session.doc.sketch(sid).unwrap().clone();
+    let splines = |sk: &fr_core::Sketch| sk.entities.iter().filter_map(|(id, e)| if let Geom::Spline { a, b, c, d } = e.geom { Some((*id, [a, b, c, d])) } else { None }).collect::<Vec<_>>();
+
+    // The user's sketch: an ellipse about the origin, and a spline arching over its top
+    // from one side of the curve to the other.
+    run(&mut h, Action::Tool(Tool::Ellipse));
+    for (x, y) in [(0.0, 0.0), (30.0, 0.0), (10.0, 18.0)] {
+        let p = at(&h, x, y);
+        click(&mut h, p);
+    }
+    let sk = sketch(&h);
+    let ellipse = *sk.entities.keys().next().unwrap();
+    let (centre, u, v) = sk.ellipse(ellipse).unwrap();
+    let on = |deg: f64| centre + u * deg.to_radians().cos() + v * deg.to_radians().sin();
+    let on_curve = |sk: &fr_core::Sketch, p: u32| { let (c, u, v) = sk.ellipse(ellipse).unwrap(); let d = sk.pos(p) - c; ((d.dot(u) / u.length_squared()).powi(2) + (d.dot(v) / v.length_squared()).powi(2) - 1.0).abs() < 1e-6 };
+
+    run(&mut h, Action::Tool(Tool::Spline));
+    for p in [on(120.0), DVec2::new(-8.0, 24.0), DVec2::new(4.0, 27.0), on(60.0)] {
+        let p = at(&h, p.x, p.y);
+        click(&mut h, p);
+    }
+    let sk = sketch(&h);
+    let made = splines(&sk);
+    assert_eq!(made.len(), 1, "one spline from the curve, over the top, back to the curve");
+    assert!(h.state().clicks.is_empty(), "landing on the curve ends the run");
+    assert!(on_curve(&sk, made[0].1[0]) && on_curve(&sk, made[0].1[3]), "both ends are on the ellipse");
+    assert_eq!(sk.constraints.values().filter(|k| k.kind == CKind::Coincident && k.refs.contains(&ellipse)).count(), 2, "and tied to it");
+
+    // A longer run: four free points make one spline and carry on; a click on the curve
+    // then ends the next spline there, though it has only its start and that click.
+    for p in [DVec2::new(45.0, 30.0), DVec2::new(40.0, 34.0), DVec2::new(30.0, 33.0), DVec2::new(24.0, 28.0)] {
+        let p = at(&h, p.x, p.y);
+        click(&mut h, p);
+    }
+    assert_eq!(splines(&sketch(&h)).len(), 2);
+    assert_eq!(h.state().clicks.len(), 1, "ending on a free point carries on");
+    let p = on(40.0);
+    let p = at(&h, p.x, p.y);
+    click(&mut h, p);
+    let sk = sketch(&h);
+    let made = splines(&sk);
+    assert_eq!(made.len(), 3, "the click on the curve finished a third spline");
+    assert!(h.state().clicks.is_empty(), "and ended the run");
+    let last = made.iter().max_by_key(|m| m.0).unwrap();
+    assert!(on_curve(&sk, last.1[3]), "it ends on the ellipse");
+    assert_eq!(last.1[0], made.iter().find(|m| m.0 != last.0 && m.1[3] == last.1[0]).expect("it starts where the one before ended").1[3]);
+
+    // Escape keeps the points already clicked: three clicks and Escape is a spline through all three.
+    let clicked = [DVec2::new(45.0, 5.0), DVec2::new(50.0, 15.0), DVec2::new(58.0, 18.0)];
+    for p in clicked {
+        let p = at(&h, p.x, p.y);
+        click(&mut h, p);
+    }
+    assert_eq!(h.state().clicks.len(), 3);
+    run(&mut h, Action::Cancel);
+    let sk = sketch(&h);
+    let made = splines(&sk);
+    assert_eq!(made.len(), 4, "Escape finished the spline instead of dropping its points");
+    assert!(h.state().clicks.is_empty());
+    assert_eq!(h.state().tool, Tool::Spline, "the tool is still Spline for the next one");
+    let last = made.iter().max_by_key(|m| m.0).unwrap().1;
+    for (fit, want) in [(last[0], clicked[0]), (last[1], clicked[1]), (last[3], clicked[2])] {
+        assert!((sk.pos(fit) - want).length() < 0.3, "it passes through what was clicked: {:?} against {want:?}", sk.pos(fit));
+    }
+    // A second Escape with nothing placed leaves the tool, as before.
+    run(&mut h, Action::Cancel);
+    assert_eq!(h.state().tool, Tool::Select);
+    assert_eq!(splines(&sketch(&h)).len(), 4);
 }
 
 #[test]

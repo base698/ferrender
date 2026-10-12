@@ -79,8 +79,8 @@ impl Tool {
             (Tool::Ellipse, 1) => "Click the end of one axis: its direction and half its length.",
             (Tool::Ellipse, _) => "Move away from that axis to set the width, then click.",
             (Tool::Spline, 0) => "Click the spline's start point.",
-            (Tool::Spline, 1) => "Click the first interior fit point.",
-            (Tool::Spline, 2) => "Click the second interior fit point.",
+            (Tool::Spline, 1) => "Click the next point. Clicking a point or a curve ends the spline there; Escape ends it with the points placed.",
+            (Tool::Spline, 2) => "Click the next point. Clicking a point or a curve ends the spline there; Escape ends it with the points placed.",
             (Tool::Spline, _) => "Click the spline's end point. Drag its four fit points later to refine the curve.",
             (Tool::Point, _) => "Click to place a point.",
             (Tool::Polygon, 0) => "Click the polygon's centre. Set the number of sides in the Sketch Palette.",
@@ -1243,14 +1243,33 @@ impl App {
 
     /// Turns the placed clicks into geometry once the tool has enough of them.
     pub fn commit_clicks(&mut self) {
+        self.commit_clicks_with(false);
+    }
+
+    /// [`commit_clicks`](Self::commit_clicks); `finish` ends a spline with the points
+    /// clicked so far, which is what Escape does, and ends the run.
+    pub fn commit_clicks_with(&mut self, finish: bool) {
         let (tool, mut c, construction, sides) = (self.tool, self.clicks.clone(), self.opts.construction, self.opts.sides.clamp(3, 64));
-        // A spline that lands on an existing point before its fourth click is finished
-        // there: the missing fit points go evenly along the last stretch, so the curve
-        // still passes through every clicked point and ends where it was closed.
-        if tool == Tool::Spline && c.len() >= 2 && c.len() < 4 && c.last().is_some_and(|s| s.point.is_some()) {
-            let (from, to) = (c[c.len() - 2].p, c[c.len() - 1].p);
-            let missing = 4 - c.len();
-            let fill: Vec<Snap> = (1..=missing).map(|i| Snap { p: from.lerp(to, i as f64 / (missing + 1) as f64), point: None, on: None, h: false, v: false, axis: [false, false], mid: false }).collect();
+        // Landing on existing geometry: an existing point, or a line or curve the click snapped onto.
+        let lands = |s: &Snap| s.point.is_some() || s.on.is_some();
+        // A spline is finished where it lands on existing geometry before its fourth click,
+        // or where it is ended. It still passes through every clicked point: with three
+        // clicked, the fourth fit point is put on the smooth curve through them; with two,
+        // the spline is straight.
+        if tool == Tool::Spline && c.len() >= 2 && c.len() < 4 && (finish || c.last().is_some_and(lands)) {
+            let free = |p: DVec2| Snap { p, point: None, on: None, h: false, v: false, axis: [false, false], mid: false };
+            let fill: Vec<Snap> = if let [a, b, e] = c[..] {
+                let (a, b, e) = (a.p, b.p, e.p);
+                let (t1, t2) = (a.distance(b), a.distance(b) + b.distance(e));
+                if t1 < 1e-9 || t2 - t1 < 1e-9 { vec![free((b + e) / 2.0)] } else {
+                    // The parabola through the three points, halfway between the last two.
+                    let t = (t1 + t2) / 2.0;
+                    vec![free(a * ((t - t1) * (t - t2) / (t1 * t2)) + b * (t * (t - t2) / (t1 * (t1 - t2))) + e * (t * (t - t1) / (t2 * (t2 - t1))))]
+                }
+            } else {
+                let (from, to) = (c[0].p, c[1].p);
+                vec![free(from.lerp(to, 1.0 / 3.0)), free(from.lerp(to, 2.0 / 3.0))]
+            };
             let at = c.len() - 1;
             c.splice(at..at, fill);
         }
@@ -1400,11 +1419,11 @@ impl App {
             Ok(())
         });
         self.clicks.clear();
-        // A line or spline carries on from its end until it lands on an existing point
-        // (or Escape ends the run). A continued spline is a new four-point spline that
-        // shares the end point; it is not tangent to the last one.
-        let continues = matches!(tool, Tool::Line | Tool::Spline);
-        if let (true, true, Some(b), Some(end)) = (done, continues, last, c.get(tool.clicks() - 1).filter(|s| s.point.is_none())) {
+        // A line or spline carries on from its end until it lands on existing geometry, a
+        // point or a curve, or is ended. A continued spline is a new four-point spline
+        // that shares the end point; it is not tangent to the last one.
+        let continues = matches!(tool, Tool::Line | Tool::Spline) && !finish;
+        if let (true, true, Some(b), Some(end)) = (done, continues, last, c.get(tool.clicks() - 1).filter(|s| !lands(s))) {
             self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false, axis: [false, false], mid: false });
         } else if !done && tool == Tool::Line {
             self.clicks.push(c[0]);
@@ -2597,6 +2616,10 @@ impl App {
                     self.dialog = Dialog::None;
                 } else if self.pending_constraint.is_some() {
                     self.pending_constraint = None;
+                } else if self.tool == Tool::Spline && self.clicks.len() >= 2 {
+                    // Escape ends a spline with the points clicked so far instead of dropping them.
+                    self.commit_clicks_with(true);
+                    self.cancel_tool();
                 } else if !self.clicks.is_empty() || !self.dim_refs.is_empty() {
                     self.cancel_tool();
                 } else if self.tool != Tool::Select {
