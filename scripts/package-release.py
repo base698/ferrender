@@ -19,7 +19,8 @@ def main():
     args = parser.parse_args()
     version = re.search(r'^version = "([0-9]+\.[0-9]+\.[0-9]+)"', (ROOT/'crates/ferrender/Cargo.toml').read_text(), re.M)[1]
     tag = os.environ.get('RELEASE_TAG', 'v' + version)
-    if tag != 'v' + version:
+    # A release candidate, v0.4.0-rc1, is built from the Cargo version of the release it precedes.
+    if not re.fullmatch('v' + re.escape(version) + r'(-rc\d+)?', tag):
         raise SystemExit('Release tag does not match Cargo version')
     commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     mac = args.platform.startswith('macos')
@@ -40,7 +41,7 @@ def main():
     selected_occt = os.environ.get('OCCT_ROOT')
     if selected_occt and Path(selected_occt).resolve() != occt_root.resolve():
         raise SystemExit('OCCT_ROOT differs from the verified release dependency; rebuild with scripts/prepare-occt.py')
-    name = f'Ferrender-{version}-{args.platform}'
+    name = f'Ferrender-{tag[1:]}-{args.platform}'
     stage = ROOT/'dist'/name
     if stage.exists():
         shutil.rmtree(stage)
