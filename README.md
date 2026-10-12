@@ -122,7 +122,7 @@ The feature-tour screenshots below are the real app, driven and rendered offscre
       <br>
       <sub>Extrude by <code>$t</code>. The arrow can be dragged instead; it lands on round numbers.</sub>
       <h3>Pull it up</h3>
-      Extrude and Revolve work on the closed regions of a sketch or straight on a flat face. Make a new body, or join, cut or intersect the ones it meets. Go a distance, through everything, or up to a face you click.
+      Extrude and Revolve work on the closed regions of a sketch; Extrude also works directly on a flat face. Make a new body, or join, cut or intersect the ones it meets. Extrude can go a distance, through everything, or up to a face you click.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/fillet.jpg" alt="The Fillet dialog with a 3 mm radius and a preview of the rounded edge where the round boss meets the plate" width="100%">
@@ -169,7 +169,7 @@ part as it was and slot a new feature in at that point.
 
 Choose **Model → Text / Emboss**, or press **S** and search for `text` or `emboss`, to make editable 3D lettering. Opening it from a sketch finishes sketch editing. Start on XY, XZ or YZ for a new body, or click a flat face on an exact body to raise or engrave a label. The clicked point is the baseline origin; X/Y offsets, angle and left/center/right alignment place the lettering. Height is the font's capital height, depth is the raised height or engraving depth, and spacing adds a gap between characters. These dimensions accept parameters and units, and the text remains editable in the timeline.
 
-The bundled [Noto Sans Bold font](https://github.com/base698/ferrender/blob/0.4-dev/crates/fr-core/assets/fonts/PROVENANCE.txt), distributed under the [SIL Open Font License](https://github.com/base698/ferrender/blob/0.4-dev/crates/fr-core/assets/fonts/OFL.txt), makes saved designs independent of installed fonts. This first version supports one line of up to 128 characters; unsupported characters and combining marks produce a readable error. Letter counters and separate accents are preserved. Curved faces and mesh bodies are not yet supported for embossing. Lettering must fit entirely over material on the selected face. Designs containing text require this version of Ferrender; older designs remain readable.
+The bundled [Noto Sans Bold font](https://github.com/base698/ferrender/blob/0.4-dev/crates/fr-core/assets/fonts/PROVENANCE.txt), distributed under the [SIL Open Font License](https://github.com/base698/ferrender/blob/0.4-dev/crates/fr-core/assets/fonts/OFL.txt), makes saved designs independent of installed fonts. The tool supports one line of up to 128 characters; unsupported characters and combining marks produce a readable error. Letter counters and separate accents are preserved. Curved faces and mesh bodies are not yet supported for embossing. Lettering must fit entirely over material on the selected face. Designs containing text require a build with Text / Emboss support; older designs remain readable.
 
 ## Look inside and measure
 
