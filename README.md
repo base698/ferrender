@@ -1,9 +1,15 @@
 <h1 align="center">Ferrender</h1>
 
 <p align="center">
+  <img src="docs/images/ferrender-wizard.gif" alt="Fusion keeps loading until a wizard waves a wand, breaks it into pieces, and reforms it into Ferrender, saying ah, much better" width="100%">
+  <br>
+  <sub>Ferrender. Ready when you are.</sub>
+</p>
+
+<p align="center">
   <b>A parametric 3D CAD program in the manner of Fusion, written in Rust.</b><br>
   Constrained sketches, exact solids, a timeline you can go back and edit, real screw threads,<br>
-  and every operation a JSON command that Claude can drive.
+  and a JSON command interface that agents can drive over MCP.
 </p>
 
 <p align="center">
@@ -16,13 +22,10 @@
 
 <br>
 
-<p align="center">
-  <img src="docs/images/hero.jpg" alt="Ferrender showing a bearing block with four counterbored holes, a filleted boss and a threaded M12 bore, beside a hex bolt with a modeled thread; the timeline along the bottom lists the twelve features that built them" width="100%">
-  <br>
-  <sub>A block with a tapped M12 bore and the bolt that goes in it. Twelve features, all still editable in the timeline along the bottom.</sub>
-</p>
+> **Version:** This guide follows the current [0.4.0 development branch (`0.4-dev`)](https://github.com/base698/ferrender/tree/0.4-dev). The application source on `main` is still 0.3.0; follow the branch-specific [setup instructions](#get-started) below to try 0.4. For the released version, see the [0.3.0 guide](https://github.com/base698/ferrender/blob/4cdcf2c0b348eafddc9158c3bb58882a1473bd2f/README.md).
 
 <p align="center">
+  <a href="#made-with-ferrender">Examples</a> ·
   <a href="#sketch-with-intent">Sketching</a> ·
   <a href="#from-sketch-to-solid">Solids</a> ·
   <a href="#holes-and-threads-from-a-catalog">Holes &amp; threads</a> ·
@@ -50,15 +53,45 @@
     </td>
     <td width="25%" valign="top">
       <h3>AI native</h3>
-      The buttons, the MCP server and the built-in assistant all run the same JSON commands. Claude builds in the window you are looking at.
+      The buttons, the MCP server and the built-in assistant all run the same JSON commands. An MCP client can build in the window you are looking at.
     </td>
   </tr>
 </table>
 
 <br>
 
-Every screenshot here is the real app, driven and rendered offscreen by the test harness in
-[`demo.rs`](crates/ferrender/src/demo.rs). The part is built from scratch each time the pictures are made.
+## Made with Ferrender
+
+From a prompt to a printable part: these are the examples from [the Ferrender project post](https://westcot.io/projects/ferrender/), including designs rebuilt from Fusion STLs with editable parametric history.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="https://westcot.io/projects/ferrender/img/printed-bishop-plate-screw.jpg" alt="An orange 3D-printed bishop beside a printed plate with a threaded screw" width="100%">
+      <br>
+      <sub>Off the printer: a bishop, and a screw threaded into its plate. <a href="examples/bishop-30mm.stl">Bishop STL</a>.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="https://westcot.io/projects/ferrender/img/printed-honeycomb-tray.jpg" alt="A green 3D-printed honeycomb tray on a wooden table" width="100%">
+      <br>
+      <sub>Off the printer: the green honeycomb tray.</sub>
+    </td>
+  </tr>
+</table>
+
+Start with the [30 mm bishop STL](examples/bishop-30mm.stl), or browse all six print meshes in [examples](examples/). Open a **.ferr** file to edit its sketches, parameters and timeline. The post has interactive previews of the teacup, toothbrush holder, sword, Virtuo holder and coffee holder.
+
+| Example | Design | Editable model | Print mesh |
+|---|---|---|---|
+| **Bishop** | A 30 mm chess bishop with a diagonal slot. [Build it yourself](BISHOP_TUTORIAL.md). | — | [STL](examples/bishop-30mm.stl) |
+| **Teacup** | “Tea, Earl Grey, hot.” A cup modeled by Claude in Ferrender. | — | [STL](examples/teacup.stl) |
+| **Toothbrush holder** | Slides into an existing wall plate, with three 30 mm rings and sloped drains. Ring size, pitch and drain are parameters. | [.ferr](https://westcot.io/files/ferrender/toothbrush-holder.ferr) | [STL](examples/toothbrush-holder.stl) |
+| **Sword** | Rebuilt from a Fusion design, with a separate hilt component: guard, grip and pommel, slotted for the tang. | [.ferr](https://westcot.io/files/ferrender/sword.ferr) | [STL](examples/sword.stl) |
+| **Virtuo holder** | A 237 mm honeycomb tray built with two rectangular patterns, C-channel rails and an end stop. | [.ferr](https://westcot.io/files/ferrender/virtuo-holder.ferr) | [STL](examples/virtuo-holder.stl) |
+| **Coffee holder** | A Y-shaped base, three patterned curved legs, a floor ring and a cutaway wall. Nine features and four parameters. | [.ferr](https://westcot.io/files/ferrender/coffee-holder.ferr) | [STL](examples/coffee-holder.stl) |
+
+The feature-tour screenshots below are the real app, driven and rendered offscreen by the test harness in
+[`demo.rs`](https://github.com/base698/ferrender/blob/0.4-dev/crates/ferrender/src/demo.rs). The part is built from scratch each time the pictures are made.
 
 ## Sketch with intent
 
@@ -90,7 +123,7 @@ Every screenshot here is the real app, driven and rendered offscreen by the test
       <br>
       <sub>Extrude by <code>$t</code>. The arrow can be dragged instead; it lands on round numbers.</sub>
       <h3>Pull it up</h3>
-      Extrude and Revolve work on the closed regions of a sketch or straight on a flat face. Make a new body, or join, cut or intersect the ones it meets. Go a distance, through everything, or up to a face you click.
+      Extrude and Revolve work on the closed regions of a sketch; Extrude also works directly on a flat face. Make a new body, or join, cut or intersect the ones it meets. Extrude can go a distance, through everything, or up to a face you click.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/fillet.jpg" alt="The Fillet dialog with a 3 mm radius and a preview of the rounded edge where the round boss meets the plate" width="100%">
@@ -137,7 +170,7 @@ part as it was and slot a new feature in at that point.
 
 Choose **Model → Text / Emboss**, or press **S** and search for `text` or `emboss`, to make editable 3D lettering. Opening it from a sketch finishes sketch editing. Start on XY, XZ or YZ for a new body, or click a flat face on an exact body to raise or engrave a label. The clicked point is the baseline origin; X/Y offsets, angle and left/center/right alignment place the lettering. Height is the font's capital height, depth is the raised height or engraving depth, and spacing adds a gap between characters. These dimensions accept parameters and units, and the text remains editable in the timeline.
 
-The bundled [Noto Sans Bold font](crates/fr-core/assets/fonts/PROVENANCE.txt), distributed under the [SIL Open Font License](crates/fr-core/assets/fonts/OFL.txt), makes saved designs independent of installed fonts. This first version supports one line of up to 128 characters; unsupported characters and combining marks produce a readable error. Letter counters and separate accents are preserved. Curved faces and mesh bodies are not yet supported for embossing. Lettering must fit entirely over material on the selected face. Designs containing text require this version of Ferrender; older designs remain readable.
+The bundled [Noto Sans Bold font](https://github.com/base698/ferrender/blob/0.4-dev/crates/fr-core/assets/fonts/PROVENANCE.txt), distributed under the [SIL Open Font License](https://github.com/base698/ferrender/blob/0.4-dev/crates/fr-core/assets/fonts/OFL.txt), makes saved designs independent of installed fonts. The tool supports one line of up to 128 characters; unsupported characters and combining marks produce a readable error. Letter counters and separate accents are preserved. Curved faces and mesh bodies are not yet supported for embossing. Lettering must fit entirely over material on the selected face. Designs containing text require a build with Text / Emboss support; older designs remain readable.
 
 ## Look inside and measure
 
@@ -200,9 +233,9 @@ been tried against the live API.
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
-| **Components (0.3 test build)** | Nested ownership, activation, scoped modeling, subtree visibility, and rigid component placement |
-| **Construction planes (0.3 test build)** | Persistent Offset, Midplane, and Three Points references with attached sketches |
-| **Meshes (0.4)** | STL, OBJ and 3MF import of scans with millions of triangles; repair, decimate, smooth, subdivide, cut, mirror, offset / thicken, sculpt; relief from an image; mesh booleans with closed-result checks |
+| **Components** | Nested ownership, activation, scoped modeling, subtree visibility, and rigid component placement |
+| **Construction planes** | Persistent Offset, Midplane, and Three Points references with attached sketches |
+| **Meshes (0.4)** | Indexed STL, OBJ and 3MF import, BVH picking and a coarse display for large scans; repair, decimate, smooth, subdivide, cut, mirror, offset / thicken, sculpt; relief from an image; mesh booleans with closed-result checks |
 | **Faces and edges (0.4)** | Picks named by how the face was made, so fillets, shells, threads, text and face planes follow upstream edits |
 | **Scripts (0.4)** | Rhai scripts with declared inputs, a Scripts menu, timeline chips that re-run, `ferrender run` and `check`, six samples |
 | **Inspect** | Measure, Section Analysis, degrees of freedom while sketching |
@@ -211,35 +244,41 @@ been tried against the live API.
 | **AI** | MCP server, local command socket, built-in assistant |
 
 It is early, and smaller than what it imitates: no joints or linked component instances, no drawings, and the
-[limits](#limits) below are real. `TODO.md` has the list.
+[limits](#limits) below describe the remaining gaps.
 
 ## Additions in 0.4.0
 
-**Ferrender 0.4.0** makes meshes a first-class body kind: indexed scans of millions of triangles support fast imports, BVH picking and a coarse display while orbiting, the Mesh menu edits them as timeline steps, Relief from Image turns a photo or depth map into a printable relief, and mesh booleans reject invalid inputs or results; complex scan intersections can still be refused. Faces and edges of exact bodies now carry tags saying how they were made, so fillets, shells, threads, text and face planes follow their faces through upstream edits instead of relocating by position. Designs with images or meshes save as a container with a thumbnail and an authenticated local geometry cache that can skip rebuilding. Foreign or modified supported designs rebuild, while newer unsupported files are visibly unverified previews. Rhai scripts with declared inputs run from a Scripts menu, from `ferrender run` and over MCP, and leave re-runnable chips in the timeline. See the [0.4 review](docs/releases/0.4/review.md) for measured test coverage, security boundaries and known limitations.
+The current **0.4.0 development branch** adds planar-path **Sweep**, including partial spans, and **Loft** through closed sections or to a sketch-point tip. **Ellipse** joins the sketch tools. Faces and edges of exact bodies carry identities based on how they were made, helping fillets, shells, threads, text and face planes survive upstream edits; removed or ambiguous references can still require reselection.
 
-To walk through an exported STL in a browser or a WebXR headset, see the separate [walkthrough page](web/walkthrough/README.md).
+Meshes become a first-class body kind, with indexed imports, BVH picking, a coarse display during large-model movement, timeline editing, sculpting and relief from an image. Mesh booleans check for closed, valid results and can refuse difficult intersections. Rhai scripts run from the Scripts menu, the command line or MCP, with declared inputs and re-runnable timeline chips.
 
-See the [0.4.0 release notes](docs/releases/0.4/0.4.0-release-notes.md), the [manual test plan](docs/releases/0.4/test-plan.md), the [file format](docs/FILE_FORMAT.md), the [face relief tutorial](docs/tutorials/FACE_RELIEF_0.4.md) and the [0.4 plan with what shipped and what did not](docs/releases/0.4/plan.md).
+Designs with images or meshes use a container with a thumbnail and an authenticated local geometry cache. Supported foreign or modified files rebuild; newer unsupported files open as visibly unverified, read-only previews. See the [0.4 review](https://github.com/base698/ferrender/blob/0.4-dev/docs/releases/0.4/review.md) for its tested revisions, measured coverage and known limitations.
+
+To walk through an exported STL in a browser or a WebXR headset, see the separate [walkthrough page](https://github.com/base698/ferrender/blob/0.4-dev/web/walkthrough/README.md).
+
+See the [0.4.0 release notes](https://github.com/base698/ferrender/blob/0.4-dev/docs/releases/0.4/0.4.0-release-notes.md), the [manual test plan](https://github.com/base698/ferrender/blob/0.4-dev/docs/releases/0.4/test-plan.md), the [file format](https://github.com/base698/ferrender/blob/0.4-dev/docs/FILE_FORMAT.md), the [face relief tutorial](https://github.com/base698/ferrender/blob/0.4-dev/docs/tutorials/FACE_RELIEF_0.4.md) and the [0.4 plan with what shipped and what did not](https://github.com/base698/ferrender/blob/0.4-dev/docs/releases/0.4/plan.md).
 
 ## Modeling additions in 0.3.0
 
 **Ferrender 0.3.0** adds nested components with their own sketches and bodies, scoped Join/Cut/Intersect operations, and whole-component placement and visibility. Construction planes provide persistent Offset, Midplane, and Three Points references that sketches can follow when a model changes. Native primitives add editable Box, Cylinder, Sphere, Cone and Torus features. Linear patterns support two directions for rectangular grids. It also adds Remove/Split/Join Bodies, graphical Move and primitive placement, pattern span handles, and sticky sketch capture.
 
-Use the [0.3.0 manual test plan](docs/releases/0.3/test-plan.md) for numbered checks and the [release notes](docs/releases/0.3/0.3.0-release-notes.md) for scope and validation status. The [components specification](docs/adrs/0005-components.md) and [construction planes specification](docs/adrs/0006-construction-planes.md) describe the intended behavior and deferred work. The [primitive guide](docs/adrs/0004-solid-primitives.md) explains dimensions, origins and placement. The [direct modeling guide](docs/adrs/0007-direct-modeling.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require 0.3.0 or later. Check About for the exact version and source commit.
+Use the [0.3.0 manual test plan](https://github.com/base698/ferrender/blob/0.4-dev/docs/releases/0.3/test-plan.md) for numbered checks and the [release notes](https://github.com/base698/ferrender/blob/0.4-dev/docs/releases/0.3/0.3.0-release-notes.md) for scope and validation status. The [components specification](https://github.com/base698/ferrender/blob/0.4-dev/docs/adrs/0005-components.md) and [construction planes specification](https://github.com/base698/ferrender/blob/0.4-dev/docs/adrs/0006-construction-planes.md) describe the intended behavior and deferred work. The [primitive guide](https://github.com/base698/ferrender/blob/0.4-dev/docs/adrs/0004-solid-primitives.md) explains dimensions, origins and placement. The [direct modeling guide](https://github.com/base698/ferrender/blob/0.4-dev/docs/adrs/0007-direct-modeling.md) covers body operations, arrows/rings, graphical pattern spans and sticky sketch placement. Existing designs remain readable; files using new features require 0.3.0 or later. Check About for the exact version and source commit.
 
 ## Sketching improvements in 0.2
 
-The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](docs/adrs/0001-sketching-tools.md) for the controls, limits, and checks. The [30 mm bishop tutorial](BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](docs/tutorials/BISHOP_0.1.md) is preserved.
+The 0.2 work adds **Point Coordinates…** with signed, parameter-driven X/Y dimensions, **3-Point Arc**, **Tangent Arc**, editable **four-point splines**, portable reference images with scale calibration, and **Highlight Open Ends**. See the [sketching guide and manual acceptance plan](https://github.com/base698/ferrender/blob/0.4-dev/docs/adrs/0001-sketching-tools.md) for the controls, limits, and checks. The [30 mm bishop tutorial](https://github.com/base698/ferrender/blob/0.4-dev/BISHOP_TUTORIAL.md) now uses direct coordinates and three-point arcs; its [0.1 version](https://github.com/base698/ferrender/blob/0.4-dev/docs/tutorials/BISHOP_0.1.md) is preserved.
 
-Version 0.2.2 improves three-point arc placement, dimensions on existing geometry, persistent Shift angle locks, and direct reference-image movement and scaling. See the [0.2.2 guide and focused retest plan](docs/adrs/0002-sketching-fixes.md).
+Version 0.2.2 improves three-point arc placement, dimensions on existing geometry, persistent Shift angle locks, and direct reference-image movement and scaling. See the [0.2.2 guide and focused retest plan](https://github.com/base698/ferrender/blob/0.4-dev/docs/adrs/0002-sketching-fixes.md).
 
-Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System follows the OS, and your selection is remembered across launches. See the [appearance guide and manual test plan](docs/adrs/0003-appearance-follows-the-system.md).
+Version 0.2.1 adds **View → Appearance → System, Light, or Dark**. System follows the OS, and your selection is remembered across launches. See the [appearance guide and manual test plan](https://github.com/base698/ferrender/blob/0.4-dev/docs/adrs/0003-appearance-follows-the-system.md).
 
 ## Get started
 
-You need a [Rust toolchain](https://rustup.rs) and a C++ compiler (Xcode's clang, or g++).
+For the 0.4 features described here, use `0.4-dev`. You need a [Rust toolchain](https://rustup.rs), Python 3.12 or later, and a C++ compiler (Xcode's clang, or g++).
 
 ```sh
+git clone --branch 0.4-dev https://github.com/base698/ferrender.git
+cd ferrender
 export OCCT_ROOT="$(python3 scripts/prepare-occt.py)"   # verified OpenCascade, once per shell
 cargo run --release -p ferrender                # empty design
 cargo run --release -p ferrender -- part.ferr   # or an .stl to import
@@ -269,7 +308,7 @@ driver). CI builds and tests on Ubuntu 24.04 with software Vulkan; a native Linu
 cargo test          # engine tests, plus UI tests that drive the real app offscreen and write frames to target/uitest/
 ```
 
-The README screenshots come from the same harness:
+The feature-tour screenshots come from the same harness:
 
 ```sh
 ./scripts/readme-images.sh    # runs the ignored readme_ tests and writes docs/images/
@@ -403,7 +442,9 @@ to the other. Sections are numbered in the viewport in the order they are
 joined; click a numbered one to leave it out, or reorder them with the arrows in
 the dialog. Smooth walls curve through every section; Straight joins neighbours
 with flat or ruled walls, which is the same thing when there are only two. The
-ends are flat caps. Every section needs the same number of edges (four lines to
+ends are flat caps. A sketch point can be an end section to make a cone or
+pyramid-like tip, represented by a tiny flat cap; at least one section must be
+a closed outline. The outline sections need the same number of edges (four lines to
 four lines, a circle to a circle); a mismatch is refused with both counts
 rather than matched up by guesswork. Corners are paired nearest to nearest, so
 it does not matter where an outline was started or which way round it was drawn.
@@ -411,11 +452,11 @@ A region with a hole cannot be a section: loft the hole separately and cut it.
 A loft's faces are named by the edges of its first section, so fillets and
 shells on it survive edits.
 
-### Primitives (0.3 test build)
+### Primitives
 
 Choose **Model → Primitives → Box, Cylinder, Sphere, Cone or Torus**, or use the **Primitive** toolbar button. Set dimensions, position, optional rotation, and New Body / Join / Cut / Intersect. Dimensions and placement accept units and named parameters. Place in view chooses a position on an origin plane, flat face or construction plane; optional alignment and colored arrows/rings refine it. Placement captures numeric values once. Double-click the timeline feature to edit it; no sketch is required.
 
-Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](docs/adrs/0004-solid-primitives.md) includes examples and limits.
+Position is the box's minimum corner, the cylinder/cone base center, or the sphere/torus center. Height follows +Z before rotation. Rotation runs X, then Y, then Z about that origin; position and rotation use the owning component's axes. A cone with two nonzero diameters is a frustum; a zero diameter creates a tip. For a torus, Major radius reaches the tube's center, and Tube radius sizes its cross-section. The [primitive guide](https://github.com/base698/ferrender/blob/0.4-dev/docs/adrs/0004-solid-primitives.md) includes examples and limits.
 
 These are exact solids that support subsequent sketches, fillets, holes, transforms, patterns, Combine and STEP export. New Body is the default, so touching primitives stay separate until you choose Join or Combine.
 
@@ -429,7 +470,7 @@ or ambiguous reference reports an error instead of choosing an unrelated face.
 `get_object_info` lists these tags and how picks resolved. Old files learn modern
 tags when the saved pick uniquely identifies its original face. Geometry without
 unique provenance uses a conservative signature and may need reselection after
-its shape changes; see the [review](docs/releases/0.4/review.md) for the remaining limits.
+its shape changes; see the [review](https://github.com/base698/ferrender/blob/0.4-dev/docs/releases/0.4/review.md) for the remaining limits.
 
 ### Exact and mesh bodies
 
@@ -440,13 +481,13 @@ a mesh body. Both kinds work with extrude, revolve, cut, join, move and
 pattern. Only exact bodies can be filleted, chamfered, shelled or written to
 STEP. The status bar says which kind the selected body is.
 
-### Components (0.3 test build)
+### Components
 
 Choose **Model → New Component**, name the part, and build its sketches and bodies while it is active. The browser shows the hierarchy and the status bar identifies the active component. **Activate Root** returns to the document level. Join, Cut, Intersect, and Through All stay within the feature's component; use Combine explicitly to work across components.
 
 Select a component node and choose Move to translate or rotate its whole subtree. Select a body instead to add an ordinary body Transform feature. Hide a component to hide its descendants. Each feature keeps its owner in the single document timeline; rolling back before a component's creation makes it unavailable and returns activation to root.
 
-### Construction planes (0.3 test build)
+### Construction planes
 
 Choose **Model → Construction Plane** or the **Plane** toolbar button. Offset keeps a signed distance from an origin plane, a flat face, or another construction plane. Midplane sits halfway between parallel faces or bisects intersecting faces; Flip chooses the other angular bisector. Three Points uses picked vertices, sketch points, or entered coordinates. Typed point coordinates use the owning component's axes.
 
@@ -571,16 +612,18 @@ works between Ferrender windows.
 ### Meshes
 
 Import Mesh reads STL (binary or ASCII), OBJ and 3MF and brings the mesh in
-as a body, streaming the file and sharing vertices as it goes, so scans of
-millions of triangles import in a few seconds and stay quick to orbit and
-pick. On import the mesh is repaired (degenerate and duplicate triangles
+as a body, streaming the file and sharing vertices as it goes. Indexed storage
+and BVH picking support large scans; performance depends on the mesh and hardware.
+On import the mesh is repaired (degenerate and duplicate triangles
 dropped, neighbouring triangles turned to agree, closed shells turned
 outward) and the toast reports shells, open edges and non-manifold edges.
 Bodies above two million triangles draw a coarse copy while the view moves.
+Individual face highlighting is disabled above 200,000 triangles; body selection
+and picking remain available.
 Bodies can be moved, rotated and scaled, combined with each other, sketched
 on and cut. The Mesh menu edits meshes as timeline steps: Repair (with hole
-filling), Decimate (quadric, or clustering for huge scans), Smooth (Taubin, no
-shrink), Subdivide (Loop or midpoint), Cut by a plane (capped, one side or
+filling), Decimate (quadric, or clustering for huge scans), Smooth (Taubin, to reduce
+shrinkage), Subdivide (Loop or midpoint), Cut by a plane (capped, one side or
 both), Mirror, and Offset / Thicken, which turns an open surface such as a
 relief into a closed printable solid or hollows a closed one to a wall. Relief
 from Image builds a height field from a photo or a depth map, bright pixels
@@ -658,6 +701,8 @@ fits everything.
 | `get_object_info` | one sketch (points, entities, constraints, profiles), feature or body |
 | `get_viewport_screenshot` | a rendered image from a named view or the app's camera |
 | `execute_ferrender_commands` | a list of JSON commands, each one an undo step |
+| `list_scripts` | available user, document and bundled sample scripts, with their declared inputs |
+| `run_script` | run a Rhai script with inputs against the document as one undo step |
 
 On macOS and Linux it drives the running Ferrender window over a private
 Unix socket, so you watch the model change. The socket lives in a mode-0700
@@ -698,11 +743,12 @@ unverified read-only previews, including when their saved geometry is exported.
 A design that carries reference images or imported meshes is
 saved as a ZIP container instead (since 0.4): the same JSON as `design.json`,
 each image and mesh as its own entry, a `manifest.json` and a `thumbnail.png`.
-Plain designs stay plain JSON, so they diff in git and open in older builds.
+Plain designs stay plain JSON, so they diff in git. Compatibility with an older
+build depends on the file version and features used.
 Every earlier `.ferr` opens unchanged; the first time a design with images or
 meshes is saved by 0.4, the old file is kept beside it as `name (0.3 backup).ferr`.
 Files that use features an older build lacks are refused by it with a message;
-[docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) describes both forms and the version
+[docs/FILE_FORMAT.md](https://github.com/base698/ferrender/blob/0.4-dev/docs/FILE_FORMAT.md) describes both forms and the version
 table.
 
 Unsaved changes are copied, about a second after each one, to a `recovery`
@@ -735,10 +781,10 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 
 ## Limits
 
-- Fillets, chamfers and shells find their edges and faces again by position
-  each time the model rebuilds (where they were, or the same place within the
-  body's bounds). They survive a body changing size, but an earlier feature
-  that reshapes that area can lose them; the feature then fails with a message.
+- Persistent face and edge identities cover supported exact-body operations,
+  but removed, indistinguishable or structurally replaced topology can still
+  require reselection. Legacy or untagged picks migrate only when the original
+  reference can be identified uniquely; see [Faces and edges](#faces-and-edges).
 - The kernel binding is young: `cadrum` 0.8, one maintainer, pinned to an
   exact version. OpenCascade can return a wrong shape without an error, so
   every operation is checked against what it must do to the volume or bounds;
@@ -765,8 +811,11 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
   bodies have no exact fillets or Thread (Hole works on them).
 - Sketch regions are found from shapes that share points. Two shapes that
   merely cross are not split where they cross.
-- A sketch on a body's face, a projected outline and an extruded face record
-  where the face was; they do not follow it if an earlier feature moves it.
+- Direct sketches on a face, projected outlines and the sketch copied for a
+  face extrusion capture geometry at creation; they are not live projections of
+  later face edits. For a sketch plane that follows its reference, attach it to
+  a construction plane. Hole entry positions and picked body vertices for
+  Three Points planes also remain position-based.
 - Offset does not handle arcs. Pattern axes and mirror planes use the source
   component's frame, through its origin. Section view needs the GPU viewport and does not
   affect picking.
@@ -778,8 +827,9 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 - Reference images are limited to 8 MiB of source data, 4,194,304 pixels, and
   8192 pixels per side. Calibration adjusts uniform scale; it cannot undo
   photographic perspective distortion.
-- Not built yet: helix and other paths that leave one sketch plane, sweeps that twist or scale, lofts through unequal or holed sections, sphere primitives, draft, and
-  copying a whole body. See `TODO.md`.
+- Not built yet: helix and other paths that leave one sketch plane, sweeps that
+  twist or scale, lofts through unequal-edge-count or holed outlines, loft guide
+  rails, draft, and copying a whole body.
 
 ## Credits
 
