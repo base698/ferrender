@@ -1130,7 +1130,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     });
                     ui.end_row();
                 });
-                ui.label(RichText::new("The dashed line is the hinge. A positive angle turns the face clockwise as it was seen when picked; a negative one, the other way.").color(colors.muted));
+                ui.label(RichText::new("Drag the handle on the face, or type the angle. The outline shows where the face will lie; the body is rebuilt when you press OK. A positive angle is clockwise as the face was seen when picked.").color(colors.muted));
                 app.dialog = Dialog::Tilt(t);
                 confirm(app, ui, "OK");
             });

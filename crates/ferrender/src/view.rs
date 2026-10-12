@@ -301,6 +301,65 @@ fn extrude_arrow(app: &App) -> Option<Arrow> {
     distance_arrow(app, plane, middle, &f.text)
 }
 
+/// The Tilt dialog's face laid out about its hinge, for drawing and for the handle.
+pub(crate) struct TiltShape {
+    origin: DVec3,
+    along: DVec3,
+    across: DVec3,
+    normal: DVec3,
+    /// The face's reach along the hinge, and across it.
+    a: (f64, f64),
+    b: (f64, f64),
+    /// Where the hinge is across the face, and the angle in degrees.
+    hinge: f64,
+    pub turn: f64,
+}
+
+impl TiltShape {
+    pub(crate) fn of(app: &App, t: &crate::app::TiltDlg) -> Option<TiltShape> {
+        let f = &t.face.as_ref()?.1;
+        let (along, normal) = t.hinge(app)?;
+        let across = normal.cross(along);
+        let range = |d: DVec3| f.outline.iter().flatten().fold((f64::MAX, f64::MIN), |(lo, hi), p| { let t = (*p - f.at).dot(d); (lo.min(t), hi.max(t)) });
+        let (a, b) = (range(along), range(across));
+        let text = t.text.split_once('=').map_or(t.text.as_str(), |p| p.1);
+        let turn = app.doc().eval(text, Kind::Angle).unwrap_or(0.0).clamp(-85.0, 85.0);
+        let hinge = match t.pivot {
+            fr_core::doc::Pivot::Middle => (b.0 + b.1) / 2.0,
+            fr_core::doc::Pivot::Cut => if turn >= 0.0 { b.1 } else { b.0 },
+            fr_core::doc::Pivot::Add => if turn >= 0.0 { b.0 } else { b.1 },
+        };
+        Some(TiltShape { origin: f.at, along, across, normal, a, b, hinge, turn })
+    }
+
+    /// Where a point of the face goes: straight out or in, by how far it is from the hinge.
+    fn tilted(&self, p: DVec3) -> DVec3 {
+        p + self.normal * (((p - self.origin).dot(self.across) - self.hinge) * self.turn.to_radians().tan())
+    }
+
+    /// The side of the face the handle is on: the one farther from the hinge.
+    fn far(&self) -> f64 { if self.b.1 - self.hinge >= self.hinge - self.b.0 { self.b.1 } else { self.b.0 } }
+
+    /// The point of the hinge the handle turns about.
+    fn pivot(&self) -> DVec3 { self.origin + self.along * ((self.a.0 + self.a.1) / 2.0) + self.across * self.hinge }
+
+    pub(crate) fn handle(&self) -> DVec3 {
+        self.tilted(self.pivot() + self.across * (self.far() - self.hinge))
+    }
+
+    /// The angle, in whole degrees, that puts the handle under a screen position. `None`
+    /// when the hinge is seen from the side, where the pointer says nothing about the turn.
+    pub(crate) fn angle_at(&self, app: &App, pos: Pos2) -> Option<f64> {
+        let (from, dir) = ray(app, pos);
+        let facing = dir.dot(self.along);
+        if facing.abs() < 0.08 { return None; }
+        let at = from + dir * ((self.pivot() - from).dot(self.along) / facing) - self.pivot();
+        let side = (self.far() - self.hinge).signum();
+        let turn = (at.dot(self.normal) * side).atan2(at.dot(self.across) * side).to_degrees();
+        Some(turn.clamp(-85.0, 85.0).round())
+    }
+}
+
 fn distance_arrow(app: &App, plane: Plane, middle: DVec2, text: &str) -> Option<Arrow> {
     let text = text.split_once('=').map_or(text, |t| t.1);
     let dist = app.doc().eval(text, Kind::Length).unwrap_or(0.0);
@@ -352,7 +411,9 @@ fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
             Dialog::Transform(t) => pick_body(app, app.shown(), origin).is_some_and(|b| b.0 == t.body),
             _ => false,
         };
+        let tilt = match &app.dialog { Dialog::Tilt(t) => TiltShape::of(app, t).is_some_and(|g| origin.distance(to_screen(app, g.handle())) < 16.0), _ => false };
         app.drag = match extrude_arrow(app) {
+            _ if tilt => Drag::Tilt,
             Some(a) if seg_dist(origin, a.base, a.tip) < 12.0 || origin.distance(a.tip) < 18.0 => {
                 app.drag_value = a.dist;
                 Drag::Arrow
@@ -361,7 +422,14 @@ fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
             _ => Drag::None,
         };
     }
-    if resp.dragged_by(PointerButton::Primary) && app.drag == Drag::Arrow {
+    if resp.dragged_by(PointerButton::Primary) && app.drag == Drag::Tilt {
+        if let (Dialog::Tilt(t), Some(pos)) = (app.dialog.clone(), resp.interact_pointer_pos()) {
+            match TiltShape::of(app, &t).and_then(|g| g.angle_at(app, pos)) {
+                Some(turn) => if let Dialog::Tilt(t) = &mut app.dialog { t.text = format!("{turn} deg"); },
+                None => app.toast("Seen from this side the handle cannot be turned. Orbit to look along the dashed hinge line, or type the angle."),
+            }
+        }
+    } else if resp.dragged_by(PointerButton::Primary) && app.drag == Drag::Arrow {
         pull_arrow(app, resp.drag_delta());
     } else if resp.dragged_by(PointerButton::Primary) && app.drag == Drag::Body {
         slide_body(app, delta);
@@ -2031,21 +2099,23 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 for ring in &f.outline {
                     painter.add(Shape::closed_line(ring.iter().map(|p| to_screen(app, *p)).collect(), Stroke::new(3.0, colors.selected)));
                 }
-                // The hinge, where the pivot puts it across the face.
-                if let Some((along, normal)) = t.hinge(app) {
-                    let across = normal.cross(along);
-                    let range = |d: DVec3| f.outline.iter().flatten().fold((f64::MAX, f64::MIN), |(lo, hi), p| { let t = (*p - f.at).dot(d); (lo.min(t), hi.max(t)) });
-                    let ((a0, a1), (lo, hi)) = (range(along), range(across));
-                    let turn = app.doc().value(&t.text, Kind::Angle).map_or(1.0, |v| v.v);
-                    let hinge = match t.pivot {
-                        fr_core::doc::Pivot::Middle => (lo + hi) / 2.0,
-                        fr_core::doc::Pivot::Cut => if turn > 0.0 { hi } else { lo },
-                        fr_core::doc::Pivot::Add => if turn > 0.0 { lo } else { hi },
-                    };
-                    let pad = (a1 - a0) * 0.25;
-                    let ends = [a0 - pad, a1 + pad].map(|a| to_screen(app, f.at + across * hinge + along * a));
-                    painter.extend(Shape::dashed_line(&ends, Stroke::new(2.0, colors.accent), 6.0, 4.0));
+            }
+            // The tilt is shown as it will be without asking the kernel: the hinge, the face
+            // where it will lie, and a handle that turns it.
+            if let (Some((_, f)), Some(g)) = (&t.face, TiltShape::of(app, &t)) {
+                let pad = (g.a.1 - g.a.0) * 0.25;
+                let ends = [g.a.0 - pad, g.a.1 + pad].map(|a| to_screen(app, g.origin + g.across * g.hinge + g.along * a));
+                painter.extend(Shape::dashed_line(&ends, Stroke::new(2.0, colors.accent), 6.0, 4.0));
+                for ring in &f.outline {
+                    painter.add(Shape::closed_line(ring.iter().map(|p| to_screen(app, g.tilted(*p))).collect(), Stroke::new(2.0, colors.accent)));
                 }
+                let (handle, pivot) = (to_screen(app, g.handle()), to_screen(app, g.pivot()));
+                let hot = app.drag == Drag::Tilt || hover.is_some_and(|p| p.distance(handle) < 14.0);
+                let color = if hot { colors.selected } else { colors.accent };
+                painter.line_segment([pivot, handle], Stroke::new(if hot { 3.0 } else { 2.0 }, color));
+                painter.circle(pivot, 3.5, colors.paper, Stroke::new(1.5, color));
+                painter.circle(handle, if hot { 8.0 } else { 6.5 }, color, Stroke::new(1.5, colors.paper));
+                label(painter, handle + (handle - pivot).normalized() * 26.0, &format!("{}\u{b0}", fr_core::units::trim_num(g.turn, 1)), color, None);
             }
             if let Some(pos) = clicked
                 && let Some(face) = pick_face(app, pos)
@@ -2335,7 +2405,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Blend(_), _) => "Click edges of a body to add or remove them.",
         (Dialog::Shell(_), _) => "Click the faces to leave open.",
         (Dialog::Tilt(t), _) if t.face.is_none() => "Click a flat face to tilt. Look along the line you want it to hinge about first.",
-        (Dialog::Tilt(_), _) => "The dashed line is the hinge. Click another flat face to tilt that one instead.",
+        (Dialog::Tilt(_), _) => "Drag the round handle to turn the face about the dashed hinge, or type the angle. Click another flat face to tilt that one instead.",
         (Dialog::Hole(_), _) => "Click a flat face to put a hole there; click a hole to take it away. Sketch points snap.",
         (Dialog::Thread(_), _) => "Click the round side of a rod, or the inside of a hole.",
         (Dialog::Sculpt(_), _) => "Click the body to add a brush stroke.",

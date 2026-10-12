@@ -1129,7 +1129,11 @@ pub fn tilt(lumps: &[Solid], tags: &Tags, pick: &FacePick, axis: DVec3, degrees:
         // The kernel moves the face out and lets its neighbours follow, as a wall or a rod
         // continues. Where it cannot, the face is carried straight out along its own direction.
         let before = lumps[li].volume();
-        let pushed = lumps[li].offset(lift, std::iter::once(face), 1e-6).ok().filter(|s| s.volume().is_finite() && s.volume() > before + 1e-12);
+        // Only among flat and round neighbours: the kernel spends a long time on a swept
+        // surface and then gives up.
+        let rim: Vec<u64> = face.iter_edge().map(|e| e.id()).collect();
+        let simple = lumps[li].iter_face().filter(|f| f.iter_edge().any(|e| rim.contains(&e.id()))).all(|f| matches!(kind_of(f), Kind::Plane | Kind::Cylinder | Kind::Cone));
+        let pushed = if simple { lumps[li].offset(lift, std::iter::once(face), 1e-6).ok().filter(|s| s.volume().is_finite() && s.volume() > before + 1e-12) } else { None };
         match pushed {
             Some(solid) => {
                 body_tags = carry(&[(&body, &body_tags)], std::slice::from_ref(&solid), feature);
@@ -1150,19 +1154,35 @@ pub fn tilt(lumps: &[Solid], tags: &Tags, pick: &FacePick, axis: DVec3, degrees:
         kind_of(f) == Kind::Plane && g(facing).dot(n).abs() > 1.0 - 1e-7 && ((g(on) - centre).dot(n) - lift).abs() < 1e-6
     }));
     let depth = lift + sink * 1.02 + 1e-3;
-    let column = match ordered_loops(raised.unwrap_or(face)) {
-        // A little above the face, so that the face itself is inside the cut.
-        Some(outline) => Solid::extrude(outline.iter(), c(-n * (depth + 1e-3))).map_err(fail)?.translate(c(n * 1e-3)),
-        // An outline that cannot be put in order: the box around the face instead.
-        None => {
-            let spread: Vec<DVec3> = raised.unwrap_or(face).iter_edge().flat_map(|e| e.approximation_segments(FINE)).map(g).collect();
-            let (a, b): (Vec<f64>, Vec<f64>) = spread.iter().map(|p| ((*p - centre).dot(along), (*p - centre).dot(across))).unzip();
-            let range = |v: &[f64]| v.iter().fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
-            let ((a0, a1), (b0, b1)) = (range(&a), range(&b));
-            let boxed = Solid::cube(c(DVec3::new(a0 - 1e-3, b0 - 1e-3, lift + 1e-3 - depth - 1e-3)), c(DVec3::new(a1 + 1e-3, b1 + 1e-3, lift + 1e-3)));
-            let (axis, angle) = glam::DQuat::from_mat3(&glam::DMat3::from_cols(along, across, n)).to_axis_angle();
-            let boxed = if angle.abs() > 1e-12 { boxed.rotate(c(DVec3::ZERO), c(axis), angle) } else { boxed };
-            boxed.translate(c(centre))
+    let spread: Vec<DVec3> = raised.unwrap_or(face).iter_edge().flat_map(|e| e.approximation_segments(FINE)).map(g).collect();
+    let (a, b): (Vec<f64>, Vec<f64>) = spread.iter().map(|p| ((*p - centre).dot(along), (*p - centre).dot(across))).unzip();
+    let range = |v: &[f64]| v.iter().fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+    let ((a0, a1), (b0, b1)) = (range(&a), range(&b));
+    // A box around the face, in the hinge's frame, wider than the face by `margin`.
+    let boxed = |margin: f64| {
+        let boxed = Solid::cube(c(DVec3::new(a0 - margin, b0 - margin, lift - depth)), c(DVec3::new(a1 + margin, b1 + margin, lift + margin.max(1e-3))));
+        let (axis, angle) = glam::DQuat::from_mat3(&glam::DMat3::from_cols(along, across, n)).to_axis_angle();
+        let boxed = if angle.abs() > 1e-12 { boxed.rotate(c(DVec3::ZERO), c(axis), angle) } else { boxed };
+        boxed.translate(c(centre))
+    };
+    // Where the body falls away all round the face, as at the end of a rod or the top of
+    // a block, the tool is a box a little wider than the face. A column drawn from the
+    // face's own outline would share its sides with the body's, which is slow to cut and,
+    // on a curved rod, can come out wrong. Where material continues beside the face, as
+    // at the foot of a wall, only the column under the face may be cut.
+    let margin = (0.02 * (a1 - a0).hypot(b1 - b0)).max(1e-3);
+    let outline: Vec<DVec3> = face.iter_edge().flat_map(|e| e.approximation_segments(FINE)).map(g).collect();
+    let middle = outline.iter().sum::<DVec3>() / outline.len().max(1) as f64;
+    let free = outline.iter().all(|p| {
+        let Some(out) = ((*p - middle) - n * (*p - middle).dot(n)).try_normalize() else { return true };
+        !lumps[li].contains(c(*p + out * margin - n * 1e-4f64.max(margin * 0.05)))
+    });
+    let column = if free { boxed(margin) } else {
+        match ordered_loops(raised.unwrap_or(face)) {
+            // A little above the face, so that the face itself is inside the cut.
+            Some(outline) => Solid::extrude(outline.iter(), c(-n * (depth + 1e-3))).map_err(fail)?.translate(c(n * 1e-3)),
+            // An outline that cannot be put in order: the box that just holds the face.
+            None => boxed(1e-3),
         }
     };
     // A half-space has no volume to check a cut against, so this one goes straight to the kernel.

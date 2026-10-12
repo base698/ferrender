@@ -506,11 +506,13 @@ you click. A size that cannot fit is refused in the preview.
 
 Tilt Face turns a flat face about a hinge lying in it: the slanted end of a
 rod, a leaning wall. Look along the line the face should hinge about and click
-the face; the dashed line shows the hinge, and a positive angle turns the face
-clockwise as you saw it. **From view** takes the hinge from the current view
+the face; the dashed line shows the hinge. Drag the round handle or type the
+angle: a positive angle turns the face clockwise as you saw it, and an outline
+shows where it will lie. The body is rebuilt when you press OK. **From view** takes the hinge from the current view
 again and **Turn 90°** turns it a quarter turn within the face. The pivot
 puts the hinge through the middle of the face, or at the edge where the tilt
-only cuts or only adds material. The faces around it are extended to meet it.
+only cuts or only adds material. Flat and round faces around it are extended
+to meet it.
 
 ### Timeline
 

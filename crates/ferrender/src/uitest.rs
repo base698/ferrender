@@ -1390,13 +1390,21 @@ fn a_face_is_tilted_about_a_hinge_taken_from_the_view() {
     let (along, normal) = t.hinge(h.state()).expect("a picked face has a hinge");
     assert!(normal.z > 0.999 && along.dot(normal).abs() < 1e-9, "the hinge lies in the top face: {along} {normal}");
     assert!(along.dot(-h.state().cam.basis().0) > 0.5, "and runs away from the eye, so a positive angle reads clockwise");
-    // Ten degrees: at the default thirty the low corner of so wide a plate would come out of its underside.
-    let mut t = t;
+    // The face is shown where it will lie without a rebuild, and a handle turns it. Dragged
+    // down to ten degrees: at the default thirty the low corner of so wide a plate would
+    // come out of its underside.
     assert_eq!(t.text, "30 deg");
-    t.text = "10 deg".into();
-    h.state_mut().dialog = Dialog::Tilt(t);
-    h.run_steps(2);
-    assert!(h.state().preview.as_ref().is_some_and(|p| p.2.is_none()), "{:?}", h.state().preview.as_ref().map(|p| &p.2));
+    assert!(h.state().preview.is_none(), "the tilt is drawn, not rebuilt, until OK");
+    let grip = |h: &H, text: &str| {
+        let Dialog::Tilt(mut t) = h.state().dialog.clone() else { panic!("the tilt dialog should be open") };
+        t.text = text.into();
+        crate::view::to_screen(h.state(), crate::view::TiltShape::of(h.state(), &t).expect("a picked face has a handle").handle())
+    };
+    let (from, to) = (grip(&h, "30 deg"), grip(&h, "10 deg"));
+    assert!(from.distance(to) > 20.0, "the handle moves with the angle: {from:?} {to:?}");
+    drag(&mut h, &[from, from + (to - from) * 0.5, to]);
+    assert!(matches!(&h.state().dialog, Dialog::Tilt(t) if t.text == "10 deg"), "{:?}", h.state().dialog);
+    save(&mut h, "tilt-handle.png");
     h.state_mut().apply_dialog();
     assert!(h.state().session.built.errors.is_empty(), "{:?}", h.state().session.built.errors);
     assert!((exact(&h) - 8000.0).abs() < 1e-6, "about its middle the plate holds what it did: {}", exact(&h));
