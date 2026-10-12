@@ -1644,7 +1644,8 @@ fn rename(app: &mut App, ctx: &Context) {
         r.request_focus();
         ui.horizontal(|ui| {
             if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                let _ = app.execute(&json!({"op": "edit_feature", "feature": id, "name": name.trim()}));
+                let command = if app.rename_body { json!({"op": "rename_body", "body": id, "name": name.trim()}) } else { json!({"op": "edit_feature", "feature": id, "name": name.trim()}) };
+                if let Err(e) = app.execute(&command) { app.toast(e); }
                 done = true;
             }
             if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1653,6 +1654,7 @@ fn rename(app: &mut App, ctx: &Context) {
         });
     });
     app.rename = (!done).then_some((id, name));
+    if done { app.rename_body = false; }
 }
 
 /// The view buttons in the viewport's top-left corner.

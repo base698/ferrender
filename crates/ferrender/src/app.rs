@@ -932,6 +932,8 @@ pub struct App {
     pub param_new: (String, String),
     pub param_edit: Option<(String, String)>,
     pub rename: Option<(Id, String)>,
+    /// The Rename box is naming a body, not a feature; their ids can be the same.
+    pub rename_body: bool,
     /// The GPU viewport is available; otherwise bodies are drawn in software.
     pub gpu: bool,
     pub scene: view::Scene,
@@ -1023,6 +1025,7 @@ impl App {
             param_new: Default::default(),
             param_edit: None,
             rename: None,
+            rename_body: false,
             gpu,
             scene: view::Scene::default(),
             scripts: Default::default(),

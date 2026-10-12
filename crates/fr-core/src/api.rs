@@ -162,6 +162,7 @@ FEATURES
    A modeled thread is a closed shell of its own, overlapping the body: slicers join the two, the body stays exact, and STEP shows a plain hole or rod. It does not follow later cuts through it.
 {"op":"list_threads"}                              the thread catalog: sizes, pitch, tap drill, clearance, counterbore and countersink sizes
 {"op":"set_visible","id":ID,"visible":false}       a sketch, body, plane or component
+{"op":"rename_body","body":ID,"name":"Top lens"}   names a body; the name follows the body through later features. An empty name gives back the automatic one (Body1, Body2, ...). Features are renamed with edit_feature.
 
 QUERIES
 {"op":"get_scene_info"}                            units, parameters, features (with any errors) and bodies
@@ -191,7 +192,7 @@ pub const OPS: &[&str] = &[
     "add_constraint", "set_dimension", "delete", "extrude", "revolve", "sweep", "loft", "remove_body", "split_body", "primitive", "pattern",
     "trim", "mirror", "offset", "fillet", "chamfer", "project", "edit_feature", "delete_feature", "import_stl", "import_mesh",
     "mesh_measure", "mesh_repair", "mesh_decimate", "mesh_smooth", "mesh_subdivide", "mesh_cut", "mesh_mirror", "mesh_offset",
-    "mesh_extrude_region", "mesh_sculpt", "mesh_from_image", "transform", "combine", "set_visible", "run_script", "script_meta", "add_feature",
+    "mesh_extrude_region", "mesh_sculpt", "mesh_from_image", "transform", "combine", "set_visible", "rename_body", "run_script", "script_meta", "add_feature",
 ];
 
 /// An `edit_feature` that gives a name and nothing else.
@@ -2239,6 +2240,18 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 Ok((id, id))
             })?;
             Ok(json!({"feature": id, "body": body_info(s, target)}))
+        }
+        "rename_body" => {
+            let id = id_of(c, "body")?;
+            let name = c["name"].as_str().ok_or("rename_body needs a \"name\"")?.trim().to_owned();
+            if name.chars().count() > 80 { return Err("a body name can be at most 80 characters".into()); }
+            if s.built.body(id).is_none() { return Err(format!("there is no body {id}")); }
+            s.edit(|d| {
+                if name.is_empty() { d.body_names.remove(&id); } else { d.body_names.insert(id, name); }
+                Ok(())
+            })?;
+            let shown = s.built.body(id).map(|b| b.name.clone()).unwrap_or_default();
+            Ok(json!({"body": id, "name": shown}))
         }
         "set_visible" => {
             let id = id_of(c, "id")?;

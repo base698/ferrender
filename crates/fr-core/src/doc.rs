@@ -813,6 +813,10 @@ pub struct Document {
     pub features: Vec<Feature>,
     #[serde(default)]
     pub hidden_bodies: Vec<Id>,
+    /// Names given to bodies by hand, by body id. A body without one is called Body1, Body2
+    /// and so on, in the order the bodies are made.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub body_names: BTreeMap<Id, String>,
     pub next_id: Id,
     /// Temporary allocation hints while rerunning a script. Never persisted.
     #[serde(skip)]
@@ -1686,6 +1690,9 @@ impl Document {
         }
         built.placements_applied=true;
         if !built.components.contains_key(&self.active_component) {self.active_component=0;}
+        for body in &mut built.bodies {
+            if let Some(name) = self.body_names.get(&body.id) { body.name = name.clone(); }
+        }
         built
     }
 

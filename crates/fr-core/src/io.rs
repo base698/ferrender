@@ -26,7 +26,7 @@ use glam::DVec3;
 pub const FORMAT: &str = "ferrender";
 /// The newest version this build reads. 9 is the ZIP container; the JSON inside
 /// a container keeps its own, lower version, computed as for a plain file.
-pub const FORMAT_VERSION: u32 = 17;
+pub const FORMAT_VERSION: u32 = 18;
 pub const CONTAINER_VERSION: u32 = 9;
 pub const CONTAINER_FORMAT: &str = "ferrender-container";
 
@@ -92,7 +92,8 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Tilt(_))) { 17 }
+    if !doc.body_names.is_empty() { 18 }
+    else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Tilt(_))) { 17 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Sketch(s) if s.entities.values().any(|e| matches!(e.geom, crate::sketch::Geom::Ellipse { .. })))) { 16 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Loft(l) if l.sections.iter().any(|s| s.point.is_some()))) { 15 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Loft(_))) { 14 }
