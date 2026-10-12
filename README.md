@@ -79,15 +79,15 @@ From a prompt to a printable part: these are the examples from [the Ferrender pr
   </tr>
 </table>
 
-Open a **.ferr** file to edit its sketches, parameters and timeline, or download an **STL** for your slicer. The post has interactive previews of all five models.
+Start with the [teacup STL](examples/teacup.stl), or browse all five print meshes in [examples](examples/). Open a **.ferr** file to edit its sketches, parameters and timeline. The post has interactive previews of the teacup, toothbrush holder, sword, Virtuo holder and coffee holder.
 
 | Example | Design | Editable model | Print mesh |
 |---|---|---|---|
-| **Teacup** | “Tea, Earl Grey, hot.” A cup modeled by Claude in Ferrender. | — | [STL](https://westcot.io/files/ferrender-teacup.stl) |
-| **Toothbrush holder** | Slides into an existing wall plate, with three 30 mm rings and sloped drains. Ring size, pitch and drain are parameters. | [.ferr](https://westcot.io/files/ferrender/toothbrush-holder.ferr) | [STL](https://westcot.io/files/ferrender/toothbrush-holder.stl) |
-| **Sword** | Rebuilt from a Fusion design, with a separate hilt component: guard, grip and pommel, slotted for the tang. | [.ferr](https://westcot.io/files/ferrender/sword.ferr) | [STL](https://westcot.io/files/ferrender/sword.stl) |
-| **Virtuo holder** | A 237 mm honeycomb tray built with two rectangular patterns, C-channel rails and an end stop. | [.ferr](https://westcot.io/files/ferrender/virtuo-holder.ferr) | [STL](https://westcot.io/files/ferrender/virtuo-holder.stl) |
-| **Coffee holder** | A Y-shaped base, three patterned curved legs, a floor ring and a cutaway wall. Nine features and four parameters. | [.ferr](https://westcot.io/files/ferrender/coffee-holder.ferr) | [STL](https://westcot.io/files/ferrender/coffee-holder.stl) |
+| **Teacup** | “Tea, Earl Grey, hot.” A cup modeled by Claude in Ferrender. | — | [STL](examples/teacup.stl) |
+| **Toothbrush holder** | Slides into an existing wall plate, with three 30 mm rings and sloped drains. Ring size, pitch and drain are parameters. | [.ferr](https://westcot.io/files/ferrender/toothbrush-holder.ferr) | [STL](examples/toothbrush-holder.stl) |
+| **Sword** | Rebuilt from a Fusion design, with a separate hilt component: guard, grip and pommel, slotted for the tang. | [.ferr](https://westcot.io/files/ferrender/sword.ferr) | [STL](examples/sword.stl) |
+| **Virtuo holder** | A 237 mm honeycomb tray built with two rectangular patterns, C-channel rails and an end stop. | [.ferr](https://westcot.io/files/ferrender/virtuo-holder.ferr) | [STL](examples/virtuo-holder.stl) |
+| **Coffee holder** | A Y-shaped base, three patterned curved legs, a floor ring and a cutaway wall. Nine features and four parameters. | [.ferr](https://westcot.io/files/ferrender/coffee-holder.ferr) | [STL](examples/coffee-holder.stl) |
 
 The feature-tour screenshots below are the real app, driven and rendered offscreen by the test harness in
 [`demo.rs`](https://github.com/base698/ferrender/blob/0.4-dev/crates/ferrender/src/demo.rs). The part is built from scratch each time the pictures are made.
