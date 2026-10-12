@@ -100,6 +100,7 @@ A dimension or feature value is `{"expr": "...", "v": 20.0}`: the expression as 
 | `combine` | `target`, `tools` [body ids], `op`, `keep_tools` | |
 | `blend` | `body`, `edges` [[x,y,z]], `size` value, `chamfer` (bool), `frame` | A fillet when `chamfer` is false. Edges are named by a point on them; see References. |
 | `shell` | `body`, `faces` [[x,y,z]], `thickness` value, `frame` | |
+| `tilt` | `body`, `face` [x,y,z], `axis` [x,y,z], `angle` value, `pivot` (`middle`/`cut`/`add`), `frame`, `tag` | Tilts a flat face about a hinge lying in it. `face` is a point on the face and `axis` the hinge's direction, both in the body's own frame; the tilt is right-handed about `axis`, which is clockwise looking along it. `pivot` puts the hinge at the middle of the face's width, or at the edge where the tilt only removes or only adds material. |
 | `hole` | `body`, `at` [[x,y,z]], `dir` [x,y,z], `shape` (`simple`/`counterbore`/`countersink`), `fit` (`plain`/`close`/`normal`/`loose`/`tapped`), `thread` (catalog name, e.g. `"M3x0.5"`), `diameter`, `depth`, `tip_angle`, `head_diameter`, `head_depth`, `head_angle` (values or null), `modeled`, `left`, `extra` | `depth` null means through. |
 | `thread` | `body`, `face` [x,y,z], `frame`, `thread`, `offset`, `length`, `left`, `extra` | |
 | `text` | `text`, `plane`, `height`, `depth`, `spacing`, `angle`, `x`, `y` (values), `align` (`left`/`center`/`right`), `op`, `body`, `face`, `frame` | `body`/`face` are set for raised or engraved text on a face, null for free-standing text. |
@@ -158,6 +159,7 @@ A plane reference is `{"origin": "XY"|"XZ"|"YZ"}`, `{"plane": id}`, `{"face": {b
 | 14 | 0.4.0 | `loft` features. |
 | 15 | 0.4.0 | `point` sections in `loft` features (a loft that comes to a tip). |
 | 16 | 0.4.0 | `ellipse` entities in sketches. |
+| 17 | 0.4.0 | `tilt` features. |
 
 The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". Older documents deserialize with absent fields taking their defaults. Legacy reference tags are upgraded only when the original pick has a unique verified match; ambiguous references remain errors for repair. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 

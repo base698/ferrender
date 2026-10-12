@@ -303,6 +303,41 @@ pub struct Blend {
     pub tags: Vec<Option<EdgeTag>>,
 }
 
+/// Where a tilted face is hinged across its width.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pivot {
+    /// Through the middle of the face: one side is cut and the other carried out.
+    #[default]
+    Middle,
+    /// At the edge that makes the tilt only cut material away.
+    Cut,
+    /// At the edge that makes the tilt only add material.
+    Add,
+}
+
+impl Pivot {
+    pub fn name(self) -> &'static str { match self { Pivot::Middle => "middle", Pivot::Cut => "cut", Pivot::Add => "add" } }
+    pub fn parse(s: &str) -> Option<Pivot> { match s { "middle" => Some(Pivot::Middle), "cut" => Some(Pivot::Cut), "add" => Some(Pivot::Add), _ => None } }
+}
+
+/// Tilts a flat face of a body about a hinge lying in the face. The face is named by a
+/// point on it, the hinge by a direction; both are in the body's own frame.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Tilt {
+    pub body: Id,
+    pub face: DVec3,
+    /// The hinge's direction. The tilt turns right-handed about it: clockwise, looking along it.
+    pub axis: DVec3,
+    pub angle: Value,
+    #[serde(default)]
+    pub pivot: Pivot,
+    #[serde(default)]
+    pub frame: Option<[DVec3; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Tag>,
+}
+
 /// Hollows a body, leaving the named faces open. Faces are named by a point on them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Shell {
@@ -708,6 +743,7 @@ pub enum FeatureKind {
     Pattern(Pattern),
     Blend(Blend),
     Shell(Shell),
+    Tilt(Tilt),
     Hole(Hole),
     Thread(Thread),
     Text(Text),
@@ -755,6 +791,7 @@ impl Feature {
             FeatureKind::Blend(b) if b.chamfer => "chamfer",
             FeatureKind::Blend(_) => "fillet",
             FeatureKind::Shell(_) => "shell",
+            FeatureKind::Tilt(_) => "tilt",
             FeatureKind::Hole(_) => "hole",
             FeatureKind::Thread(_) => "thread",
             FeatureKind::Text(_) => "text",
@@ -1177,7 +1214,7 @@ impl Document {
         let id = if let Some(at) = reused { self.reuse_feature_ids.remove(at).0 } else { let id = self.next_id; self.next_id += 1; id };
         let target=match &kind {
             FeatureKind::Transform(t)=>Some(t.body), FeatureKind::Combine(c)=>Some(c.target),
-            FeatureKind::Blend(b)=>Some(b.body), FeatureKind::Shell(s)=>Some(s.body),
+            FeatureKind::Blend(b)=>Some(b.body), FeatureKind::Shell(s)=>Some(s.body), FeatureKind::Tilt(t)=>Some(t.body),
             FeatureKind::Hole(h)=>Some(h.body), FeatureKind::Thread(t)=>Some(t.body), FeatureKind::Text(t)=>t.body,
             FeatureKind::Split(s)=>Some(s.body), FeatureKind::Remove(r)=>r.bodies.first().copied(),
             FeatureKind::MeshOp(m)=>Some(m.body),
@@ -1528,6 +1565,7 @@ impl Document {
                 }
                 FeatureKind::Blend(b) => set(&mut b.size, Kind::Length),
                 FeatureKind::Shell(sh) => set(&mut sh.thickness, Kind::Length),
+                FeatureKind::Tilt(t) => set(&mut t.angle, Kind::Angle),
                 FeatureKind::Hole(h) => {
                     for v in [&mut h.diameter, &mut h.depth, &mut h.head_diameter, &mut h.head_depth, &mut h.extra].into_iter().flatten() {
                         set(v, Kind::Length);
@@ -1809,6 +1847,18 @@ impl Document {
                 // Learning a reference also moves its point onto the edge it found, so that a
                 // point from a click or a rounded report later tells the edge from another with the same tag.
                 if b.tags.len() != b.edges.len() || b.tags.iter().any(|t|t.as_ref().is_none_or(crate::tag::EdgeTag::legacy)) { b.tags = made.picked; b.edges = made.points; }
+                bodies[i].set_exact(made.lumps, made.tags)?;
+                Ok(Some(made.level))
+            }
+            FeatureKind::Tilt(t) => {
+                let i = find(bodies, t.body)?;
+                if !bodies[i].is_exact() {
+                    return Err(MESH_ONLY.into());
+                }
+                let pick = exact::FacePick { points: exact::candidates(&bodies[i].solids, &[t.face], t.frame)[0], tag: t.tag.clone() };
+                let only = match t.pivot { Pivot::Middle => None, Pivot::Cut => Some(true), Pivot::Add => Some(false) };
+                let made = exact::tilt(&bodies[i].solids, &bodies[i].tags, &pick, t.axis, t.angle.v, only, id)?;
+                if t.tag.as_ref().is_none_or(Tag::legacy) { t.tag = made.picked[0].clone(); t.face = made.points[0]; }
                 bodies[i].set_exact(made.lumps, made.tags)?;
                 Ok(Some(made.level))
             }

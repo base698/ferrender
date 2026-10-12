@@ -229,7 +229,7 @@ been tried against the live API.
 | **Sketch** | Line, rectangle, circle, ellipse, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
 | **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; signed X/Y position, length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
-| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, loft through sections, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
+| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, loft through sections, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell, tilt a face |
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
@@ -501,6 +501,16 @@ Fillet and Chamfer round or bevel the edges of a
 body: click edges to add or remove them (with a face selected first, its edges
 start selected). Shell hollows a body to a wall thickness, open at the faces
 you click. A size that cannot fit is refused in the preview.
+
+### Tilt Face
+
+Tilt Face turns a flat face about a hinge lying in it: the slanted end of a
+rod, a leaning wall. Look along the line the face should hinge about and click
+the face; the dashed line shows the hinge, and a positive angle turns the face
+clockwise as you saw it. **From view** takes the hinge from the current view
+again and **Turn 90°** turns it a quarter turn within the face. The pivot
+puts the hinge through the middle of the face, or at the edge where the tilt
+only cuts or only adds material. The faces around it are extended to meet it.
 
 ### Timeline
 

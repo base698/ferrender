@@ -259,6 +259,10 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
         PlaneRef::Face {body:id,at,frame,..}=>{body(*id)?;anchor(*at,*frame)}
     }};
     match &f.kind {
+        FeatureKind::Tilt(t)=>{
+            body(t.body)?;anchor(t.face,t.frame)?;
+            if !t.axis.is_finite() || t.axis.length()<1e-9 {return Err("a tilt needs a hinge direction".into());}
+        },
         FeatureKind::Split(s)=>{
             body(s.body)?;plane(&s.plane)?;
             if d.body_owner(s.body).is_some_and(|owner|owner!=f.owner) {return Err("a split must belong to its target body's component".into());}

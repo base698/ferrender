@@ -1037,12 +1037,147 @@ fn open_through_cap(lump: &Solid, thickness: f64, faces: &[&Face]) -> R<Solid> {
         let (at, normal) = (g(at), g(normal).normalize_or_zero());
         if normal == DVec3::ZERO { return Err("the face to open has no normal".into()); }
         let reach = thickness + 0.02;
-        let prism = Solid::extrude(face.iter_edge(), c(-normal * reach)).map_err(|e| format!("the kernel could not build the opening: {e}"))?.translate(c(normal * 0.01));
+        let outline = ordered_loops(face).ok_or("the kernel could not trace the outline of the face to open")?;
+        let prism = Solid::extrude(outline.iter(), c(-normal * reach)).map_err(|e| format!("the kernel could not build the opening: {e}"))?.translate(c(normal * 0.01));
         let cut = boolean(std::slice::from_ref(&made), std::slice::from_ref(&prism), Bool::Subtract)?;
         made = cut.into_iter().max_by(|a, b| a.volume().total_cmp(&b.volume())).ok_or("the opening left nothing of the body")?;
         let _ = at;
     }
     Ok(made)
+}
+
+/// A face's boundary as edges in order, each starting where the one before ended and each
+/// loop returning to its start, which is how the kernel takes a profile. A face lists its
+/// edges in no order and each runs its own way. A straight edge that runs backwards is
+/// made again the other way round; a loop in which a curved edge runs backwards is given
+/// up on, since the kernel cannot turn one round.
+fn ordered_loops(face: &Face) -> Option<Vec<Edge>> {
+    const MEET: f64 = 1e-6;
+    let straight = |e: &Edge| {
+        let (a, b) = (g(e.start_point()), g(e.end_point()));
+        a.distance(b) > MEET && e.approximation_segments(FINE).iter().all(|p| (b - a).cross(g(*p) - a).length() <= 1e-9 * (b - a).length_squared().max(1.0))
+    };
+    let mut rest: Vec<Edge> = face.iter_edge().cloned().collect();
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        // A curved edge sets which way round its loop goes, since only straight ones can be turned.
+        let first = rest.remove(rest.iter().position(|e| !straight(e)).unwrap_or(0));
+        let (start, mut end) = (g(first.start_point()), g(first.end_point()));
+        out.push(first);
+        while end.distance(start) > MEET {
+            if let Some(i) = rest.iter().position(|e| g(e.start_point()).distance(end) <= MEET) {
+                let next = rest.remove(i);
+                end = g(next.end_point());
+                out.push(next);
+            } else if let Some(i) = rest.iter().position(|e| g(e.end_point()).distance(end) <= MEET) {
+                let back = rest.remove(i);
+                if !straight(&back) { return None; }
+                let to = g(back.start_point());
+                out.push(Edge::line(c(end), c(to)).ok()?);
+                end = to;
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Tilts a flat face about a hinge lying in it, by `degrees` right-handed about `axis`
+/// (seen looking along the axis, clockwise). The side of the face that rises is carried
+/// straight out along the face's own direction, as the end of a rod or the wall of a box
+/// continues; the side that sinks is cut away. Only the column of material over and under
+/// the face is touched. `only` puts the hinge at the edge of the face instead of its
+/// middle: `Some(true)` so that material is only cut, `Some(false)` so that it is only added.
+pub fn tilt(lumps: &[Solid], tags: &Tags, pick: &FacePick, axis: DVec3, degrees: f64, only: Option<bool>, feature: Id) -> R<Blended<Tag>> {
+    if !(degrees.abs() > 1e-6 && degrees.abs() <= 85.0) {
+        return Err("the tilt should be between 0 and 85 degrees, either way".into());
+    }
+    let found = find_faces(lumps, tags, std::slice::from_ref(pick))?;
+    let (li, face, level, tag) = (found[0].0, found[0].1, found[0].2, found[0].3.clone());
+    if kind_of(face) != Kind::Plane {
+        return Err("only a flat face can be tilted".into());
+    }
+    let point = settled(&pick.points, |p| g(face.project(c(p)).0));
+    let (at, normal) = face.project(face.center());
+    let (centre, mut n) = (g(at), g(normal).normalize());
+    // Outward is the side with no material just off the face.
+    if lumps[li].contains(c(centre + n * 1e-4)) && !lumps[li].contains(c(centre - n * 1e-4)) { n = -n; }
+    let along = (axis - n * axis.dot(n)).try_normalize().ok_or("the hinge points straight out of the face; choose a direction that lies along it")?;
+    let across = n.cross(along);
+    let outline: Vec<f64> = face.iter_edge().flat_map(|e| e.approximation_segments(FINE)).map(|p| (g(p) - centre).dot(across)).collect();
+    let (lo, hi) = outline.iter().fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+    if !(hi - lo > 1e-9) { return Err("the face has no width across that hinge".into()); }
+    let turn = degrees.to_radians();
+    // A point `t` across the hinge rises by `(t - hinge) tan`.
+    let hinge = match only { None => (lo + hi) / 2.0, Some(cut) => if (turn > 0.0) == cut { hi } else { lo } };
+    let (rise, sink) = (((hi - hinge) * turn.tan()).max((lo - hinge) * turn.tan()).max(0.0), (-((hi - hinge) * turn.tan()).min((lo - hinge) * turn.tan())).max(0.0));
+    let (through, tilted) = (centre + across * hinge, n * turn.cos() - across * turn.sin());
+    let role = |solids: &[Solid]| -> Tags {
+        solids.iter().map(|s| s.iter_face().map(|f| {
+            let (on, facing) = f.project(f.center());
+            let is_face = kind_of(f) == Kind::Plane && g(facing).dot(tilted).abs() > 1.0 - 1e-7 && (g(on) - through).dot(tilted).abs() < 1e-6;
+            Some(Tag::new(Origin::Semantic { feature, role: if is_face { "tilt:face".into() } else { "tilt:side".into() } }, kind_of(f)))
+        }).collect()).collect()
+    };
+    let fail = |e: cadrum::Error| format!("the kernel could not tilt that face: {e}");
+    let (mut body, mut body_tags) = (vec![lumps[li].clone()], vec![tags[li].clone()]);
+    // The face whose outline bounds the cut: the picked one, or where it is once carried out.
+    let mut top: Option<Solid> = None;
+    let lift = if rise > 1e-9 { rise * 1.02 + 1e-3 } else { 0.0 };
+    if lift > 0.0 {
+        // The kernel moves the face out and lets its neighbours follow, as a wall or a rod
+        // continues. Where it cannot, the face is carried straight out along its own direction.
+        let before = lumps[li].volume();
+        let pushed = lumps[li].offset(lift, std::iter::once(face), 1e-6).ok().filter(|s| s.volume().is_finite() && s.volume() > before + 1e-12);
+        match pushed {
+            Some(solid) => {
+                body_tags = carry(&[(&body, &body_tags)], std::slice::from_ref(&solid), feature);
+                body = vec![solid];
+            }
+            None => {
+                let outline = ordered_loops(face).ok_or("that face's outline cannot be carried outward; set the pivot so that the tilt only cuts")?;
+                let more = vec![Solid::extrude(outline.iter(), c(n * lift)).map_err(fail)?];
+                (body, body_tags) = boolean_tagged((&body, &body_tags), (&more, &role(&more)), Bool::Union, feature)?;
+            }
+        }
+        top = body.first().cloned();
+    }
+    // What lies beyond the tilted plane, within the column under the face: the face as it
+    // now is, when it was carried out, since its neighbours may have widened it.
+    let raised = top.as_ref().and_then(|solid| solid.iter_face().find(|f| {
+        let (on, facing) = f.project(f.center());
+        kind_of(f) == Kind::Plane && g(facing).dot(n).abs() > 1.0 - 1e-7 && ((g(on) - centre).dot(n) - lift).abs() < 1e-6
+    }));
+    let depth = lift + sink * 1.02 + 1e-3;
+    let column = match ordered_loops(raised.unwrap_or(face)) {
+        // A little above the face, so that the face itself is inside the cut.
+        Some(outline) => Solid::extrude(outline.iter(), c(-n * (depth + 1e-3))).map_err(fail)?.translate(c(n * 1e-3)),
+        // An outline that cannot be put in order: the box around the face instead.
+        None => {
+            let spread: Vec<DVec3> = raised.unwrap_or(face).iter_edge().flat_map(|e| e.approximation_segments(FINE)).map(g).collect();
+            let (a, b): (Vec<f64>, Vec<f64>) = spread.iter().map(|p| ((*p - centre).dot(along), (*p - centre).dot(across))).unzip();
+            let range = |v: &[f64]| v.iter().fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+            let ((a0, a1), (b0, b1)) = (range(&a), range(&b));
+            let boxed = Solid::cube(c(DVec3::new(a0 - 1e-3, b0 - 1e-3, lift + 1e-3 - depth - 1e-3)), c(DVec3::new(a1 + 1e-3, b1 + 1e-3, lift + 1e-3)));
+            let (axis, angle) = glam::DQuat::from_mat3(&glam::DMat3::from_cols(along, across, n)).to_axis_angle();
+            let boxed = if angle.abs() > 1e-12 { boxed.rotate(c(DVec3::ZERO), c(axis), angle) } else { boxed };
+            boxed.translate(c(centre))
+        }
+    };
+    // A half-space has no volume to check a cut against, so this one goes straight to the kernel.
+    let beyond = (&column - &Solid::half_space(c(through), c(-tilted))).build_vec().map_err(fail)?;
+    if beyond.is_empty() { return Err("the tilt left nothing to cut".into()); }
+    (body, body_tags) = boolean_tagged((&body, &body_tags), (&beyond, &role(&beyond)), Bool::Subtract, feature)?;
+    let made = volume(&body);
+    if body.is_empty() || !made.is_finite() || made <= 1e-9 {
+        return Err("the tilt left nothing of the body".into());
+    }
+    let (mut out, mut out_tags) = (Vec::new(), Vec::new());
+    for (i, lump) in lumps.iter().enumerate() {
+        if i == li { out.append(&mut body); out_tags.append(&mut body_tags); } else { out.push(lump.clone()); out_tags.push(tags[i].clone()); }
+    }
+    Ok(Blended { lumps: out, tags: out_tags, level, picked: vec![tag], points: vec![point] })
 }
 
 /// Hollows the body to a wall of `thickness`, open at the picked faces.

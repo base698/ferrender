@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Color32, Context, Key, Modifiers, Pos2, Rect, ViewportCommand};
-use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Loft, LoftSection, Pattern, PatternKind, LinearDirection, Revolve, Shell, Sweep, SweepOrient, Text, Thread, Transform};
+use fr_core::doc::{Pivot, Tilt, Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Loft, LoftSection, Pattern, PatternKind, LinearDirection, Revolve, Shell, Sweep, SweepOrient, Text, Thread, Transform};
 pub use fr_core::face::Face;
 use fr_core::render::Camera;
 use fr_core::sketch::Clip;
@@ -187,6 +187,55 @@ pub struct BlendDlg {
     pub text: String,
     /// The body's bounds when its edges were picked.
     pub frame: Option<[DVec3; 2]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TiltDlg {
+    pub body: Option<Id>,
+    /// The face to tilt, with the point that names it in the body's own frame.
+    pub face: Option<(DVec3, Face)>,
+    /// The hinge's direction, in the body's own frame.
+    pub axis: DVec3,
+    pub text: String,
+    pub pivot: Pivot,
+    pub frame: Option<[DVec3; 2]>,
+}
+
+impl TiltDlg {
+    /// Takes `face` as the one to tilt, hinged along the line of sight, so that a
+    /// positive angle turns the face clockwise as it is seen now.
+    pub fn take(&mut self, app: &App, face: Face) {
+        self.body = Some(face.body);
+        self.frame = app.session.built.frame(face.body);
+        let at = app.session.built.body(face.body).map_or(face.at, |b| b.to_local(face.at));
+        self.face = Some((at, face));
+        self.hinge_from_view(app);
+    }
+
+    /// The hinge in space, as a direction lying in the face.
+    pub fn hinge(&self, app: &App) -> Option<(DVec3, DVec3)> {
+        let normal = self.face.as_ref()?.1.plane?.normal();
+        let axis = app.session.built.body(self.body?)?.placement.transform_vector3(self.axis);
+        Some(((axis - normal * axis.dot(normal)).try_normalize()?, normal))
+    }
+
+    /// Hinges the tilt along the line of sight; seen face-on, along the screen's upward direction.
+    pub fn hinge_from_view(&mut self, app: &App) {
+        let Some(normal) = self.face.as_ref().and_then(|f| f.1.plane).map(|p| p.normal()) else { return };
+        let (eye, _, up) = app.cam.basis();
+        let lying = |v: DVec3| (v - normal * v.dot(normal)).length() > 0.2;
+        let world = if lying(eye) { -eye } else { up };
+        self.set_hinge(app, world);
+    }
+
+    /// Turns the hinge a quarter turn within the face.
+    pub fn turn_hinge(&mut self, app: &App) {
+        if let Some((along, normal)) = self.hinge(app) { self.set_hinge(app, normal.cross(along)); }
+    }
+
+    fn set_hinge(&mut self, app: &App, world: DVec3) {
+        self.axis = self.body.and_then(|b| app.session.built.body(b)).map_or(world, |b| b.placement.inverse().transform_vector3(world));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -430,6 +479,7 @@ pub enum Dialog {
     Pattern(PatternDlg),
     Blend(BlendDlg),
     Shell(ShellDlg),
+    Tilt(TiltDlg),
     Hole(HoleDlg),
     Thread(ThreadDlg),
     Text(TextDlg),
@@ -602,6 +652,11 @@ impl Dialog {
                 let size = d.enter(&b.text, Kind::Length)?;
                 Ok(d.add_feature(FeatureKind::Blend(Blend { body, edges: b.edges.clone(), size, chamfer: b.chamfer, frame: b.frame, tags: Vec::new() })))
             }
+            Dialog::Tilt(t) => {
+                let (body, face) = t.body.zip(t.face.as_ref()).ok_or("Click a flat face to tilt.")?;
+                let angle = d.enter(&t.text, Kind::Angle)?;
+                Ok(d.add_feature(FeatureKind::Tilt(Tilt { body, face: face.0, axis: t.axis, angle, pivot: t.pivot, frame: t.frame, tag: None })))
+            }
             Dialog::Shell(sh) => {
                 let body = sh.body.filter(|_| !sh.faces.is_empty()).ok_or("Click the faces to leave open.")?;
                 let thickness = d.enter(&sh.text, Kind::Length)?;
@@ -663,7 +718,7 @@ impl Dialog {
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Loft(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_))
+        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Loft(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Tilt(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_))
     }
 }
 
@@ -792,6 +847,8 @@ pub enum Action {
     /// Fillet (false) or chamfer (true) the edges of a body.
     Blend(bool),
     Shell,
+    /// Tilt a flat face about a hinge lying in it.
+    Tilt,
     Hole,
     Thread,
     Text,
@@ -2551,6 +2608,13 @@ impl App {
                 let edges = edges.into_iter().map(|point| body.and_then(|id| self.session.built.body(id)).map_or(point, |b| b.to_local(point))).collect();
                 let frame = body.and_then(|b| self.session.built.frame(b));
                 self.dialog = Dialog::Blend(BlendDlg { chamfer, body, edges, text, frame });
+            }
+            Action::Tilt => {
+                let face = self.sel_face.clone().filter(|f| f.plane.is_some() && self.session.built.body(f.body).is_some_and(|b| b.is_exact()));
+                self.finish_sketch();
+                let mut tilt = TiltDlg { body: None, face: None, axis: DVec3::X, text: "30 deg".into(), pivot: Pivot::Middle, frame: None };
+                if let Some(face) = face { tilt.take(self, face); }
+                self.dialog = Dialog::Tilt(tilt);
             }
             Action::Shell => {
                 let face = self.sel_face.clone().filter(|f| self.session.built.body(f.body).is_some_and(|b| b.is_exact()));

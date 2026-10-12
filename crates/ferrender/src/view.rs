@@ -2026,6 +2026,40 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 app.toast("That body is a mesh. Only bodies made from sketches have edges that can be filleted or chamfered.");
             }
         }
+        Dialog::Tilt(mut t) => {
+            if let Some((_, f)) = &t.face {
+                for ring in &f.outline {
+                    painter.add(Shape::closed_line(ring.iter().map(|p| to_screen(app, *p)).collect(), Stroke::new(3.0, colors.selected)));
+                }
+                // The hinge, where the pivot puts it across the face.
+                if let Some((along, normal)) = t.hinge(app) {
+                    let across = normal.cross(along);
+                    let range = |d: DVec3| f.outline.iter().flatten().fold((f64::MAX, f64::MIN), |(lo, hi), p| { let t = (*p - f.at).dot(d); (lo.min(t), hi.max(t)) });
+                    let ((a0, a1), (lo, hi)) = (range(along), range(across));
+                    let turn = app.doc().value(&t.text, Kind::Angle).map_or(1.0, |v| v.v);
+                    let hinge = match t.pivot {
+                        fr_core::doc::Pivot::Middle => (lo + hi) / 2.0,
+                        fr_core::doc::Pivot::Cut => if turn > 0.0 { hi } else { lo },
+                        fr_core::doc::Pivot::Add => if turn > 0.0 { lo } else { hi },
+                    };
+                    let pad = (a1 - a0) * 0.25;
+                    let ends = [a0 - pad, a1 + pad].map(|a| to_screen(app, f.at + across * hinge + along * a));
+                    painter.extend(Shape::dashed_line(&ends, Stroke::new(2.0, colors.accent), 6.0, 4.0));
+                }
+            }
+            if let Some(pos) = clicked
+                && let Some(face) = pick_face(app, pos)
+            {
+                if !app.session.built.body(face.body).is_some_and(|b| b.is_exact()) {
+                    app.toast("That body is a mesh. Only bodies made from sketches have faces that can be tilted.");
+                } else if face.plane.is_none() {
+                    app.toast("Only a flat face can be tilted.");
+                } else {
+                    t.take(app, face);
+                    app.dialog = Dialog::Tilt(t);
+                }
+            }
+        }
         Dialog::Shell(mut sh) => {
             for (_, f) in &sh.faces {
                 for ring in &f.outline {
@@ -2300,6 +2334,8 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Pattern(_), _) => "The dots show where each copy will go.",
         (Dialog::Blend(_), _) => "Click edges of a body to add or remove them.",
         (Dialog::Shell(_), _) => "Click the faces to leave open.",
+        (Dialog::Tilt(t), _) if t.face.is_none() => "Click a flat face to tilt. Look along the line you want it to hinge about first.",
+        (Dialog::Tilt(_), _) => "The dashed line is the hinge. Click another flat face to tilt that one instead.",
         (Dialog::Hole(_), _) => "Click a flat face to put a hole there; click a hole to take it away. Sketch points snap.",
         (Dialog::Thread(_), _) => "Click the round side of a rod, or the inside of a hole.",
         (Dialog::Sculpt(_), _) => "Click the body to add a brush stroke.",

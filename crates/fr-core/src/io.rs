@@ -26,7 +26,7 @@ use glam::DVec3;
 pub const FORMAT: &str = "ferrender";
 /// The newest version this build reads. 9 is the ZIP container; the JSON inside
 /// a container keeps its own, lower version, computed as for a plain file.
-pub const FORMAT_VERSION: u32 = 16;
+pub const FORMAT_VERSION: u32 = 17;
 pub const CONTAINER_VERSION: u32 = 9;
 pub const CONTAINER_FORMAT: &str = "ferrender-container";
 
@@ -92,7 +92,8 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Sketch(s) if s.entities.values().any(|e| matches!(e.geom, crate::sketch::Geom::Ellipse { .. })))) { 16 }
+    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Tilt(_))) { 17 }
+    else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Sketch(s) if s.entities.values().any(|e| matches!(e.geom, crate::sketch::Geom::Ellipse { .. })))) { 16 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Loft(l) if l.sections.iter().any(|s| s.point.is_some()))) { 15 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Loft(_))) { 14 }
     else if doc.features.iter().any(|f| has_tags(&f.kind) || f.script_key.is_some() || matches!(&f.kind, FeatureKind::Sweep(_))) { 13 }
@@ -123,6 +124,7 @@ fn has_tags(kind: &FeatureKind) -> bool {
     match kind {
         FeatureKind::Blend(b) => !b.tags.is_empty(),
         FeatureKind::Shell(s) => !s.tags.is_empty(),
+        FeatureKind::Tilt(t) => t.tag.is_some(),
         FeatureKind::Thread(t) => t.tag.is_some(),
         FeatureKind::Text(t) => t.tag.is_some(),
         FeatureKind::Split(s) => tagged_ref(&s.plane),

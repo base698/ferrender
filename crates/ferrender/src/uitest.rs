@@ -1371,6 +1371,58 @@ fn extrude_arrow_drags_the_distance() {
 }
 
 #[test]
+fn a_face_is_tilted_about_a_hinge_taken_from_the_view() {
+    let mut h = harness();
+    plate(&mut h);
+    let exact = |h: &H| h.state().session.built.bodies[0].solids.iter().map(|s| s.volume()).sum::<f64>();
+    let top = |h: &H| h.state().session.built.bodies[0].mesh.bbox().unwrap().1.z;
+    run(&mut h, Action::View("iso"));
+    h.state_mut().fit();
+    h.run_steps(2);
+
+    // The tool opens asking for a face; a click on the top takes it, hinged along the line of sight.
+    run(&mut h, Action::Tilt);
+    assert!(matches!(&h.state().dialog, Dialog::Tilt(t) if t.face.is_none()));
+    let p = crate::view::to_screen(h.state(), DVec3::new(20.0, 10.0, 10.0));
+    click(&mut h, p);
+    let Dialog::Tilt(t) = h.state().dialog.clone() else { panic!("the tilt dialog should be open") };
+    assert!(t.face.is_some(), "a click on a flat face picks it");
+    let (along, normal) = t.hinge(h.state()).expect("a picked face has a hinge");
+    assert!(normal.z > 0.999 && along.dot(normal).abs() < 1e-9, "the hinge lies in the top face: {along} {normal}");
+    assert!(along.dot(-h.state().cam.basis().0) > 0.5, "and runs away from the eye, so a positive angle reads clockwise");
+    // Ten degrees: at the default thirty the low corner of so wide a plate would come out of its underside.
+    let mut t = t;
+    assert_eq!(t.text, "30 deg");
+    t.text = "10 deg".into();
+    h.state_mut().dialog = Dialog::Tilt(t);
+    h.run_steps(2);
+    assert!(h.state().preview.as_ref().is_some_and(|p| p.2.is_none()), "{:?}", h.state().preview.as_ref().map(|p| &p.2));
+    h.state_mut().apply_dialog();
+    assert!(h.state().session.built.errors.is_empty(), "{:?}", h.state().session.built.errors);
+    assert!((exact(&h) - 8000.0).abs() < 1e-6, "about its middle the plate holds what it did: {}", exact(&h));
+    assert!(top(&h) > 13.0, "one side of the top is carried up: {}", top(&h));
+    assert!(matches!(&h.state().doc().features.last().unwrap().kind, fr_core::FeatureKind::Tilt(t) if (t.angle.v - 10.0).abs() < 1e-9));
+
+    // Again, the other way about a hinge turned a quarter turn, and only cutting.
+    let (before, height) = (exact(&h), top(&h));
+    run(&mut h, Action::Tilt);
+    let p = crate::view::to_screen(h.state(), DVec3::new(20.0, 10.0, 10.0));
+    click(&mut h, p);
+    let Dialog::Tilt(mut t) = h.state().dialog.clone() else { panic!("the tilt dialog should be open") };
+    let first = t.hinge(h.state()).expect("the tilted top is still flat").0;
+    t.turn_hinge(h.state());
+    assert!(t.hinge(h.state()).unwrap().0.dot(first).abs() < 1e-9, "the hinge turns a quarter turn within the face");
+    t.text = "-10 deg".into();
+    t.pivot = fr_core::doc::Pivot::Cut;
+    h.state_mut().dialog = Dialog::Tilt(t);
+    h.run_steps(2);
+    h.state_mut().apply_dialog();
+    assert!(h.state().session.built.errors.is_empty(), "{:?}", h.state().session.built.errors);
+    assert!(exact(&h) < before - 1.0 && top(&h) <= height + 1e-9, "only cutting: {} of {before}, top at {}", exact(&h), top(&h));
+    save(&mut h, "tilted.png");
+}
+
+#[test]
 fn fillet_shell_and_timeline_rollback() {
     let mut h = harness();
     plate(&mut h);

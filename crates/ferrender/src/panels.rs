@@ -2,7 +2,7 @@
 
 use egui::{Align, Align2, Color32, Context, FontId, Layout, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, vec2};
 use egui_phosphor::regular as icon;
-use fr_core::doc::{HoleFit, HoleShape, SweepOrient};
+use fr_core::doc::{HoleFit, HoleShape, Pivot, SweepOrient};
 use fr_core::{Axis, CKind, FeatureKind, Id, Kind, Op, Plane, Unit, threads};
 use serde_json::json;
 
@@ -122,6 +122,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Fillet Edges", "", Action::Blend(false));
             item(app, ui, "Chamfer Edges", "", Action::Blend(true));
             item(app, ui, "Shell", "", Action::Shell);
+            item(app, ui, "Tilt Face", "", Action::Tilt);
             ui.separator();
             item(app, ui, "Hole", "", Action::Hole);
             item(app, ui, "Thread", "", Action::Thread);
@@ -359,6 +360,9 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 if big(ui, icon::CUBE_FOCUS, "Shell", matches!(app.dialog, Dialog::Shell(_)), "Hollow a body to a wall thickness, open at the faces you choose").clicked() {
                     app.run(&ctx, Action::Shell);
                 }
+                if big(ui, icon::ARROW_ARC_RIGHT, "Tilt", matches!(app.dialog, Dialog::Tilt(_)), "Tilt a flat face about a hinge lying in it: slant the end of a rod, or draft a wall").clicked() {
+                    app.run(&ctx, Action::Tilt);
+                }
                 if big(ui, icon::CIRCLE_DASHED, "Hole", matches!(app.dialog, Dialog::Hole(_)), "Drill holes sized for a screw: clearance, tapped, counterbored or countersunk").clicked() {
                     app.run(&ctx, Action::Hole);
                 }
@@ -472,6 +476,7 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Blend(b) if b.chamfer => icon::ANGLE,
         FeatureKind::Blend(_) => icon::ARROW_BEND_UP_RIGHT,
         FeatureKind::Shell(_) => icon::CUBE_TRANSPARENT,
+        FeatureKind::Tilt(_) => icon::ARROW_ARC_RIGHT,
         FeatureKind::Hole(_) => icon::CIRCLE_DASHED,
         FeatureKind::Thread(_) => icon::SPIRAL,
         FeatureKind::Text(_) => icon::TEXT_T,
@@ -1094,6 +1099,39 @@ fn dialogs(app: &mut App, ctx: &Context) {
                     b.edges.clear();
                 }
                 app.dialog = Dialog::Blend(b);
+                confirm(app, ui, "OK");
+            });
+        }
+        Dialog::Tilt(mut t) => {
+            dialog_window(app, "Tilt Face").show(ctx, |ui| {
+                egui::Grid::new("tilt").num_columns(3).show(ui, |ui| {
+                    ui.label("Face");
+                    ui.label(match &t.face {
+                        None => RichText::new("click a flat face in the viewport").color(colors.accent),
+                        Some(_) => RichText::new("selected"),
+                    });
+                    ui.end_row();
+                    value_row(app, ui, "Angle", &mut t.text, Kind::Angle);
+                    ui.label("Pivot");
+                    ui.horizontal(|ui| {
+                        for (pivot, name, tip) in [
+                            (Pivot::Middle, "Middle", "Hinge through the middle of the face: one side is cut back, the other carried out"),
+                            (Pivot::Cut, "Only cut", "Hinge at the edge that makes the tilt only take material away"),
+                            (Pivot::Add, "Only add", "Hinge at the edge that makes the tilt only add material"),
+                        ] {
+                            ui.selectable_value(&mut t.pivot, pivot, name).on_hover_text(tip);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Hinge");
+                    ui.horizontal(|ui| {
+                        if ui.button("From view").on_hover_text("Hinge along the line of sight, so the face turns as you see it now").clicked() { t.hinge_from_view(app); }
+                        if ui.button("Turn 90\u{b0}").on_hover_text("Turn the hinge a quarter turn within the face").clicked() { t.turn_hinge(app); }
+                    });
+                    ui.end_row();
+                });
+                ui.label(RichText::new("The dashed line is the hinge. A positive angle turns the face clockwise as it was seen when picked; a negative one, the other way.").color(colors.muted));
+                app.dialog = Dialog::Tilt(t);
                 confirm(app, ui, "OK");
             });
         }

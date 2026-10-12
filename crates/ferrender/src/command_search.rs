@@ -128,6 +128,7 @@ pub fn commands(app: &App) -> Vec<Command> {
         add("Fillet Edges",Action::Blend(false),"","Round exact solid edges.","model fillet round",need_exact);
         add("Chamfer Edges",Action::Blend(true),"","Bevel exact solid edges.","model chamfer bevel",need_exact);
         add("Shell",Action::Shell,"","Hollow an exact solid.","model shell wall thickness",need_exact);
+        add("Tilt Face",Action::Tilt,"","Tilt a flat face about a hinge lying in it.","model tilt rotate face angle draft slant taper",need_exact);
         add("Hole",Action::Hole,"","Drill a hole into an exact solid.","model hole drill counterbore countersink",need_exact);
         add("Thread",Action::Thread,"","Add threads to a rod or hole.","model thread screw",need_exact);
         add("Measure",Action::Measure,"I","Measure distances and angles.","view measure inspect",need_body);

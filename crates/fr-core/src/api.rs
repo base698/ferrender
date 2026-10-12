@@ -14,7 +14,7 @@ use base64::Engine;
 use glam::{DVec2, DVec3};
 use serde_json::{Value as J, json};
 
-use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Loft, LoftSection, Op, Pattern, PatternKind, Revolve, Session, Shell, Sweep, SweepOrient, Text, Thread, Transform};
+use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Loft, LoftSection, Op, Pattern, Pivot, Tilt, PatternKind, Revolve, Session, Shell, Sweep, SweepOrient, Text, Thread, Transform};
 use crate::measure::{self, Item};
 use crate::threads;
 use crate::exact;
@@ -148,6 +148,7 @@ FEATURES
 {"op":"fillet_edges","body":BODY,"edges":[[x,y,z],...],"radius":V}   rounds the edges nearest those points; "edges":"all" takes every edge. An entry can also be {"tag":EDGE_TAG} copied from get_object_info on the body: faces and edges carry tags saying how they were made (swept from a sketch entity, a cap, made by a feature), and a fillet, chamfer, shell, thread, text or face plane finds its faces by persistent tag when the body changes shape. Modern removed or ambiguous references fail rather than selecting an unrelated nearby face; untagged or legacy references learn a tag only from a unique saved-location match. get_object_info on such a feature reports "resolved": "tag" | "origin" | "position".
 {"op":"chamfer_edges","body":BODY,"edges":[[x,y,z],...],"distance":V}
 {"op":"shell","body":BODY,"open_faces":[[x,y,z],...],"thickness":V}   hollows the body, leaving the faces nearest those points open
+{"op":"tilt_face","body":BODY,"face":[x,y,z],"axis":[x,y,z],"angle":30,"pivot":"middle"}   tilts the flat face nearest that point about a hinge lying in it. "axis" is the hinge's direction (its part along the face is used); the tilt is right-handed about it, so clockwise when looking along the axis, and a negative angle goes the other way. pivot: middle (the hinge passes through the middle of the face: one side is cut away and the other is carried out) | cut (the hinge is at the edge, so material is only removed) | add (only added). Angles up to 85 degrees. The faces around it are extended to meet the tilted one, so a rod continues along its own surface. "face" may be {"tag":TAG} from get_object_info
    get_object_info on an exact body lists its edges and faces under "topology", each with a "point" to use here. Edges and faces retain their semantic/source identity through supported size and topology edits. Deleted or indistinguishable references request reselection. Placing fillets, chamfers and shells late can still reduce downstream dependencies.
 {"op":"hole","body":BODY,"at":[x,y,z],"thread":"M3","fit":"normal","through":true}   drills a hole entering at that point on the body's surface
    at: one point or a list of points (one hole each). direction: [x,y,z] the way the drill goes; left out, it is straight into the flat face at the first point.
@@ -184,7 +185,7 @@ type R<T> = Result<T, String>;
 /// checks this list against the match arms and the reference text.
 pub const OPS: &[&str] = &[
     "get_scene_info", "get_object_info", "get_viewport_screenshot", "batch", "undo", "redo", "new", "open", "save",
-    "export_stl", "export_step", "get_reference", "text", "rollback", "fillet_edges", "chamfer_edges", "shell", "measure",
+    "export_stl", "export_step", "get_reference", "text", "rollback", "fillet_edges", "chamfer_edges", "shell", "tilt_face", "measure",
     "list_threads", "hole", "thread", "move", "set_units", "set_parameter", "delete_parameter", "create_component",
     "activate_component", "move_component", "create_plane", "create_sketch", "add_geometry", "point_coordinates",
     "add_constraint", "set_dimension", "delete", "extrude", "revolve", "sweep", "loft", "remove_body", "split_body", "primitive", "pattern",
@@ -640,6 +641,13 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["edges"] = json!(b.edges.len());
             o[if b.chamfer { "distance" } else { "radius" }] = json!({"expr": b.size.expr, "value": len_out(doc, b.size.v)});
             o["tags"] = json!(b.tags);
+        }
+        FeatureKind::Tilt(t) => {
+            o["body"] = json!(t.body);
+            o["angle"] = json!({"expr": t.angle.expr, "value": t.angle.v});
+            o["axis"] = json!(t.axis.to_array());
+            o["pivot"] = json!(t.pivot.name());
+            o["tag"] = json!(t.tag);
         }
         FeatureKind::Shell(sh) => {
             o["body"] = json!(sh.body);
@@ -1278,6 +1286,25 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let frame = s.built.frame(body);
             let id = s.edit_feature(|d| {
                 let id = d.add_feature(FeatureKind::Blend(Blend { body, edges, size, chamfer, frame, tags }));
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            Ok(out)
+        }
+        "tilt_face" => {
+            let body = id_of(c, "body")?;
+            let angle = s.doc.value(&text_of(&c["angle"]).map_err(|_| "tilt_face needs an \"angle\"")?, Kind::Angle)?;
+            let axis = c["axis"].as_array().filter(|a| a.len() == 3).and_then(|a| Some(DVec3::new(a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?))).ok_or("tilt_face needs an \"axis\": [x, y, z], the direction of the hinge")?;
+            if !axis.is_finite() || axis.length() < 1e-9 { return Err("the \"axis\" needs some length".into()); }
+            let pivot = match &c["pivot"] { J::Null => Pivot::Middle, v => v.as_str().and_then(Pivot::parse).ok_or("\"pivot\" is middle, cut or add")? };
+            let b = s.built.body(body).ok_or("the body does not exist")?;
+            let (faces, tags) = face_picks(s, body, &json!([c["face"].clone()]), "face")?;
+            // The hinge direction is kept in the body's own frame, like the point that names the face.
+            let (face, axis) = (b.to_local(faces[0]), b.placement.inverse().transform_vector3(axis));
+            let (frame, tag) = (s.built.frame(body), tags.into_iter().next().flatten());
+            let id = s.edit_feature(|d| {
+                let id = d.add_feature(FeatureKind::Tilt(Tilt { body, face, axis, angle, pivot, frame, tag }));
                 Ok((id, id))
             })?;
             let mut out = changed(s, &before);
