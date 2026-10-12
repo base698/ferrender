@@ -49,7 +49,7 @@ impl Capture {
         if bypass { self.entity = None; self.blocked = None; self.sample = None; return None; }
         if let Some((id,p)) = endpoint {
             self.entity = None; self.sample = None;
-            self.current = Some(Snap { p, point: Some(id), on: None, h: false, v: false, axis: [false, false], mid: false });
+            self.current = Some(Snap { p, point: Some(id), on: None, h: false, v: false, axis: [false, false], mid: false, pinned: false });
             return self.current;
         }
         if self.blocked.is_some_and(|id| candidates.iter().find(|c| c.entity == id).is_none_or(|c| c.distance > RELEASE_PX)) { self.blocked = None; }
@@ -85,7 +85,7 @@ impl Capture {
     }
 
     fn show(&mut self, c: Candidate) -> Option<Snap> {
-        self.current = Some(Snap { p: c.point, point: None, on: Some(c.entity), h: false, v: false, axis: [false, false], mid: c.mid });
+        self.current = Some(Snap { p: c.point, point: None, on: Some(c.entity), h: false, v: false, axis: [false, false], mid: c.mid, pinned: false });
         self.current
     }
 }

@@ -331,7 +331,9 @@ exactly so. **3-Point Arc** uses start, end, then through/bulge points; **Tangen
 continues from a line or arc endpoint. **Spline** passes through four editable
 fit points. **Ellipse** takes its centre, the end of one axis, then a click that
 sets its width; the ends of its two axes are points you can drag, dimension
-from the centre, or make horizontal or vertical with it. **Point Coordinates…** creates a point or edits a selected one
+from the centre, or make horizontal or vertical with it. While drawing, a
+visible point of another sketch or a corner of a body can be clicked: the new
+point lands where it falls on this sketch's plane and is fixed there. **Point Coordinates…** creates a point or edits a selected one
 with signed X/Y expressions; double-click a point to reopen it. Position
 dimensions keep the coordinates attached to parameters. Drag with Select (V);
 geometry moves as far as its constraints allow. While drawing a line, **Shift**

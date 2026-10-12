@@ -92,9 +92,9 @@ impl PlaneDlg {
 
     pub fn hint(&self) -> &'static str {
         match self.kind {
-            0 if self.pick_to => "Click the flat face the offset plane should reach.",
+            0 if self.pick_to => "Click the flat face, sketch point or body corner the offset plane should reach.",
             0 if self.base.is_none() => "Choose a flat face, an origin plane in the browser, or a construction plane.",
-            0 => "Type a signed distance or drag the arrow. To face measures a gap.",
+            0 => "Type a signed distance or drag the arrow. To face or point sets it by what the plane should reach.",
             1 if self.faces.is_empty() => "Click the first flat face for the midplane.",
             1 => "Click a different flat face. Flip chooses the other angular bisector.",
             _ => "Click three body vertices or sketch points, or type coordinates in the dialog.",
@@ -237,7 +237,7 @@ pub fn dialog(app: &mut App, ctx: &Context, mut d: PlaneDlg) {
                     });
                 }
                 egui::Grid::new("plane-offset").show(ui, |ui| crate::panels::value_row(app, ui, "Distance", &mut d.text, Kind::Length));
-                if ui.add_enabled(d.base.is_some(), egui::Button::new("To face").selected(d.pick_to)).clicked() { d.pick_to = !d.pick_to; }
+                if ui.add_enabled(d.base.is_some(), egui::Button::new("To face or point").selected(d.pick_to)).on_hover_text("Click a flat face, a sketch point or a body corner: the distance is set so the plane reaches it").clicked() { d.pick_to = !d.pick_to; }
                 if ui.button("Clear base").clicked() { d.base = None; d.pick_to = false; }
             }
             1 => {

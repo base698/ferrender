@@ -107,6 +107,9 @@ pub struct Snap {
     pub axis: [bool; 2],
     /// The point is the midpoint of the entity in `on`, and stays there.
     pub mid: bool,
+    /// The point is where a point of another sketch, or a corner of a body, falls on this
+    /// sketch's plane; the new point is fixed there.
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1251,13 +1254,13 @@ impl App {
     pub fn commit_clicks_with(&mut self, finish: bool) {
         let (tool, mut c, construction, sides) = (self.tool, self.clicks.clone(), self.opts.construction, self.opts.sides.clamp(3, 64));
         // Landing on existing geometry: an existing point, or a line or curve the click snapped onto.
-        let lands = |s: &Snap| s.point.is_some() || s.on.is_some();
+        let lands = |s: &Snap| s.point.is_some() || s.on.is_some() || s.pinned;
         // A spline is finished where it lands on existing geometry before its fourth click,
         // or where it is ended. It still passes through every clicked point: with three
         // clicked, the fourth fit point is put on the smooth curve through them; with two,
         // the spline is straight.
         if tool == Tool::Spline && c.len() >= 2 && c.len() < 4 && (finish || c.last().is_some_and(lands)) {
-            let free = |p: DVec2| Snap { p, point: None, on: None, h: false, v: false, axis: [false, false], mid: false };
+            let free = |p: DVec2| Snap { p, point: None, on: None, h: false, v: false, axis: [false, false], mid: false, pinned: false };
             let fill: Vec<Snap> = if let [a, b, e] = c[..] {
                 let (a, b, e) = (a.p, b.p, e.p);
                 let (t1, t2) = (a.distance(b), a.distance(b) + b.distance(e));
@@ -1289,6 +1292,8 @@ impl App {
                 // A point snapped onto an axis is held there, level with or above the fixed origin.
                 if s.axis[0] { let _ = sk.add_constraint(CKind::Horizontal, &[id, 0], None); }
                 if s.axis[1] { let _ = sk.add_constraint(CKind::Vertical, &[id, 0], None); }
+                // Picked from another sketch or a body: it stays where that was.
+                if s.pinned { let _ = sk.add_constraint(CKind::Fix, &[id], None); }
                 id
             }
         };
@@ -1424,7 +1429,7 @@ impl App {
         // that shares the end point; it is not tangent to the last one.
         let continues = matches!(tool, Tool::Line | Tool::Spline) && !finish;
         if let (true, true, Some(b), Some(end)) = (done, continues, last, c.get(tool.clicks() - 1).filter(|s| !lands(s))) {
-            self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false, axis: [false, false], mid: false });
+            self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false, axis: [false, false], mid: false, pinned: false });
         } else if !done && tool == Tool::Line {
             self.clicks.push(c[0]);
         }

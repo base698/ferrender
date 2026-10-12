@@ -309,7 +309,7 @@ fn offset_to_face_uses_signed_world_gap_on_a_rotated_component() {
     h.run_steps(3);
     run(&mut h, Action::View("top"));
     run(&mut h, Action::Fit);
-    h.get_by_label("To face").click(); h.run_steps(2);
+    h.get_by_label("To face or point").click(); h.run_steps(2);
     let perpendicular = crate::view::to_screen(h.state(), DVec3::new(55.0, 30.0, 30.0));
     click(&mut h, perpendicular);
     near(plane_distance(&h), 3.0);
@@ -326,7 +326,7 @@ fn offset_to_face_uses_signed_world_gap_on_a_rotated_component() {
     h.get_by_label("Clear base").click(); h.run_steps(2);
     let top = crate::view::to_screen(h.state(), DVec3::new(60.0, 30.0, 10.0));
     click(&mut h, top);
-    h.get_by_label("To face").click(); h.run_steps(2);
+    h.get_by_label("To face or point").click(); h.run_steps(2);
     run(&mut h, Action::View("left"));
     let bottom = crate::view::to_screen(h.state(), DVec3::new(50.0, 30.0, 10.0));
     click(&mut h, bottom);
@@ -454,4 +454,73 @@ fn component_planes_dark_screenshot_and_native_candidate_fixture() {
     h.state_mut().set_appearance(Appearance::Light);
     let image = save(&mut h, "components-and-planes-light-0.3.0.png");
     assert_eq!((image.width(), image.height()), (1440, 900));
+}
+
+#[test]
+fn a_path_starts_at_a_point_picked_from_another_sketch_and_a_plane_reaches_a_point() {
+    // A profile circle on a plane 8 mm up, 20 mm back from the XZ plane, and a block beside it.
+    let mut h = state_harness();
+    command(&mut h, json!({"op":"create_sketch","plane":"XY","offset":8}));
+    let profile = h.state().doc().sketches().last().unwrap().0.id;
+    let out = command(&mut h, json!({"op":"add_geometry","sketch":profile,"items":[{"type":"circle","center":[5,20],"radius":1.5}]}));
+    let centre = out["items"][0]["points"][0].as_u64().unwrap() as Id;
+    command(&mut h, json!({"op":"primitive","type":"box","width":10,"depth":10,"height":6,"position":[20,0,0]}));
+    assert!(h.state().doc().sketch(profile).unwrap().visible);
+
+    // A new sketch on XZ. Its plane is 20 mm in front of the circle; the circle's centre is
+    // picked where it is seen, and the spline starts squarely in front of it on the plane.
+    h.state_mut().create_sketch(Plane::XZ);
+    h.run_steps(2);
+    let Mode::Sketch(path) = h.state().mode else { panic!("editing the path sketch") };
+    run(&mut h, Action::Tool(Tool::Spline));
+    let seen = crate::view::to_screen(h.state(), DVec3::new(5.0, 20.0, 8.0));
+    h.hover_at(seen);
+    h.run_steps(2);
+    click(&mut h, seen);
+    assert!(h.state().clicks.first().is_some_and(|c| c.pinned && c.point.is_none()), "the first click is pinned to the other sketch's point: {:?}", h.state().clicks);
+    for (x, z) in [(5.0, 16.0), (12.0, 24.0), (22.0, 28.0)] {
+        let p = crate::view::to_screen(h.state(), DVec3::new(x, 0.0, z));
+        click(&mut h, p);
+    }
+    run(&mut h, Action::Cancel);
+    let sk = h.state().doc().sketch(path).unwrap().clone();
+    let (spline, start) = sk.entities.iter().find_map(|(id, e)| if let fr_core::Geom::Spline { a, .. } = e.geom { Some((*id, a)) } else { None }).expect("the spline");
+    assert!((sk.pos(start) - glam::DVec2::new(5.0, 8.0)).length() < 1e-9, "it starts exactly in front of the centre, not where the cursor was: {:?}", sk.pos(start));
+    assert!(sk.constraints.values().any(|c| c.kind == fr_core::CKind::Fix && c.refs == vec![start]), "and is fixed there");
+
+    // A corner of the block is picked the same way.
+    run(&mut h, Action::Tool(Tool::Line));
+    let corner = crate::view::to_screen(h.state(), DVec3::new(30.0, 0.0, 6.0));
+    click(&mut h, corner);
+    assert!(h.state().clicks.first().is_some_and(|c| c.pinned), "{:?}", h.state().clicks);
+    let free = crate::view::to_screen(h.state(), DVec3::new(40.0, 0.0, 14.0));
+    click(&mut h, free);
+    run(&mut h, Action::Cancel);
+    let sk = h.state().doc().sketch(path).unwrap().clone();
+    let line = sk.entities.iter().find_map(|(_, e)| if let fr_core::Geom::Line { a, .. } = e.geom { Some(a) } else { None }).expect("the line");
+    assert!((sk.pos(line) - glam::DVec2::new(30.0, 6.0)).length() < 1e-9, "{:?}", sk.pos(line));
+    command(&mut h, json!({"op":"delete","sketch":path,"ids":[sk.entities.iter().find(|(_, e)| matches!(e.geom, fr_core::Geom::Line { .. })).unwrap().0]}));
+
+    // Swept along that path, the rod stands on the circle: centred 20 mm back, starting at its height.
+    h.state_mut().finish_sketch();
+    command(&mut h, json!({"op":"sweep","sketch":profile,"path_sketch":path,"path":[spline],"operation":"new"}));
+    assert!(h.state().session.built.errors.is_empty(), "{:?}", h.state().session.built.errors);
+    let rod = h.state().session.built.bodies.last().unwrap().mesh.bbox().unwrap();
+    assert!((rod.0.y - 18.5).abs() < 0.01 && (rod.1.y - 21.5).abs() < 0.01 && (rod.0.z - 8.0).abs() < 0.01, "{rod:?}");
+
+    // An offset plane from XZ is made to pass through the circle's centre by clicking it.
+    run(&mut h, Action::Plane);
+    h.state_mut().choose_plane_reference(PlaneRef::Origin(OriginPlane::XZ));
+    let Dialog::Plane(mut d) = h.state().dialog.clone() else { panic!("the plane dialog") };
+    d.pick_to = true;
+    h.state_mut().dialog = Dialog::Plane(d);
+    h.run_steps(2);
+    let seen = crate::view::to_screen(h.state(), DVec3::new(5.0, 20.0, 8.0));
+    click(&mut h, seen);
+    let Dialog::Plane(d) = h.state().dialog.clone() else { panic!("the plane dialog stays open") };
+    assert!(!d.pick_to && d.text.starts_with("-20"), "the distance reaches the point: {}", d.text);
+    accept(&mut h);
+    let plane = h.state().doc().features.last().unwrap().id;
+    near(h.state().session.built.planes[&plane].plane.origin.y, 20.0);
+    let _ = centre;
 }

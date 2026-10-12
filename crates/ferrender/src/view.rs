@@ -172,17 +172,17 @@ fn grid_step(app: &App) -> f64 {
 pub fn snap(app: &App, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Snap> {
     let raw = sketch_pos(app, sk, pos)?;
     if let Some((id,p)) = crate::sketch_capture::nearest_point(sk,pos,|p|on_screen(app,sk,p)) {
-        return Some(Snap { p,point:Some(id),on:None,h:false,v:false,axis:[false,false], mid:false });
+        return Some(Snap { p,point:Some(id),on:None,h:false,v:false,axis:[false,false], mid:false, pinned:false });
     }
     if let Some(c) = sk.entities.keys().filter_map(|id| crate::sketch_capture::project_entity(sk,*id,pos,|p|on_screen(app,sk,p)))
         .filter(|c|c.distance<=6.0).min_by(|a,b|a.distance.total_cmp(&b.distance)) {
-        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false,axis:[false,false], mid:c.mid });
+        return Some(Snap { p:c.point,point:None,on:Some(c.entity),h:false,v:false,axis:[false,false], mid:c.mid, pinned:false });
     }
     Some(free_snap(app,raw,from,false))
 }
 
 fn free_snap(app: &App, raw: DVec2, from: Option<DVec2>, bypass: bool) -> Snap {
-    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false, axis: [false, false], mid: false };
+    let mut s = Snap { p: raw, point: None, on: None, h: false, v: false, axis: [false, false], mid: false, pinned: false };
     if bypass { return s; }
     if app.opts.snap_grid {
         let step = grid_step(app);
@@ -212,11 +212,39 @@ fn free_snap(app: &App, raw: DVec2, from: Option<DVec2>, bypass: bool) -> Snap {
     s
 }
 
+/// A point of another visible sketch, or a corner of a visible body, under the cursor:
+/// where it falls on this sketch's plane. It is found where it is drawn, so that what
+/// is clicked is what is seen, and it is used squarely below or above that on the plane.
+fn foreign_point(app: &App, sk: &Sketch, sid: Id, pos: Pos2) -> Option<DVec2> {
+    let doc = app.doc();
+    let built = &app.session.built;
+    let mut best: Option<(f32, DVec3)> = None;
+    let mut consider = |world: DVec3| {
+        let d = to_screen(app, world).distance(pos);
+        if d <= crate::sketch_capture::POINT_PX && best.is_none_or(|b| d < b.0) { best = Some((d, world)); }
+    };
+    for (f, other) in doc.sketches().filter(|(f, s)| f.id != sid && s.visible && !doc.is_suppressed(f.id) && !built.errors.contains_key(&f.id) && built.component_visible(f.owner)) {
+        let Some(plane) = built.sketch_plane(doc, f.id) else { continue };
+        for (id, p) in &other.points {
+            if *id != ORIGIN { consider(plane.to_world(*p)); }
+        }
+    }
+    for body in built.bodies.iter().filter(|b| app.body_visible(b)) {
+        for corner in body.edges.iter().flat_map(|e| e.first().into_iter().chain(e.last())) { consider(*corner); }
+    }
+    best.map(|(_, world)| sk.plane.to_local(world))
+}
+
 fn captured_snap(app: &mut App, ui: &Ui, sk: &Sketch, pos: Pos2, from: Option<DVec2>) -> Option<Snap> {
     let raw = sketch_pos(app,sk,pos)?;
     let Mode::Sketch(sid) = app.mode else { return snap(app,sk,pos,from); };
     let (time,bypass) = ui.input(|i|(i.time,i.modifiers.alt || i.key_down(egui::Key::Space) || !i.focused));
     let endpoint = crate::sketch_capture::nearest_point(sk,pos,|p|on_screen(app,sk,p));
+    // A point of another sketch or a corner of a body, where this sketch has no point of its own.
+    if endpoint.is_none() && !bypass && let Some(p) = foreign_point(app, sk, sid, pos) {
+        app.sketch_capture.clear();
+        return Some(Snap { p, point: None, on: None, h: false, v: false, axis: [false, false], mid: false, pinned: true });
+    }
     let candidates: Vec<_> = sk.entities.keys().filter_map(|id| crate::sketch_capture::project_entity(sk,*id,pos,|p|on_screen(app,sk,p))).collect();
     let context = crate::sketch_capture::Context { sketch:sid,tool:app.tool,revision:app.session.rev,camera:app.cam,plane:sk.plane };
     app.sketch_capture.update(context,time,endpoint,&candidates,bypass).or_else(||Some(free_snap(app,raw,from,bypass)))
@@ -1121,14 +1149,14 @@ pub(crate) fn line_drawing_snap(sk: &Sketch, start: DVec2, mut snap: Snap, typed
             }
         }
     }
-    let on_axis = snap.axis[0] || snap.axis[1];
+    let on_axis = snap.axis[0] || snap.axis[1] || snap.pinned;
     let inferred = if angle.is_none() && snap.point.is_none() && snap.on.is_none() && !on_axis { sticky_angle(raw, &candidates, typed) } else { typed.guide = None; raw };
     let locked = update_angle_lock(typed, shift, angle.unwrap_or(inferred));
     let target = angle.or(locked).unwrap_or(inferred);
     if angle.is_some() || locked.is_some() || typed.guide.is_some() {
         let radians = target.rem_euclid(360.0).to_radians();
         snap.p = start + DVec2::from_angle(radians) * delta.length();
-        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on, snap.axis) = (None, None, [false, false]); }
+        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on, snap.axis, snap.pinned) = (None, None, [false, false], false); }
         snap.h = radians.sin().abs() < 1e-9;
         snap.v = radians.cos().abs() < 1e-9;
     }
@@ -1144,7 +1172,7 @@ pub(crate) fn tangent_drawing_snap(start: DVec2, tangent: DVec2, mut snap: Snap,
     let raw = 2.0 * delta.dot(tangent.perp()).atan2(delta.dot(tangent)).to_degrees();
     let candidates: Vec<_> = (-7..=7).filter(|i| *i != 0).map(|i| (i as f64 * 45.0, "Sweep")).collect();
     // Sweep values are signed and must not wrap: +315° and -45° are different arcs.
-    let on_axis = snap.axis[0] || snap.axis[1];
+    let on_axis = snap.axis[0] || snap.axis[1] || snap.pinned;
     if sweep.is_some() || snap.point.is_some() || snap.on.is_some() || on_axis { typed.guide = None; }
     if typed.guide.is_some_and(|g| (raw - g.0).abs() > 6.0) { typed.guide = None; }
     if sweep.is_none() && typed.guide.is_none() && snap.point.is_none() && snap.on.is_none() && !on_axis {
@@ -1162,7 +1190,7 @@ pub(crate) fn tangent_drawing_snap(start: DVec2, tangent: DVec2, mut snap: Snap,
     if sweep.is_some() || locked.is_some() || typed.guide.is_some() {
         let half = (target / 2.0).to_radians();
         snap.p = start + (tangent * half.cos() + tangent.perp() * half.sin()) * delta.length();
-        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on, snap.axis) = (None, None, [false, false]); }
+        if snap.p.distance(start + delta) > 1e-7 { (snap.point, snap.on, snap.axis, snap.pinned) = (None, None, [false, false], false); }
     }
     snap
 }
@@ -1188,7 +1216,7 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
     }
     let hovered = resp.hover_pos().and_then(|p| captured_snap(app, ui, sk, p, from));
     // Over the boxes themselves the pointer is not over the sketch; the shape stays where it was.
-    let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false, axis: [false, false], mid: false });
+    let kept = app.typed.as_ref().and_then(|t| t.last).map(|(p, point, on)| Snap { p, point, on, h: false, v: false, axis: [false, false], mid: false, pinned: false });
     let Some(mut s) = hovered.or(kept) else { return };
     let attachment = s;
     if let Some(t) = &mut app.typed {
@@ -1354,6 +1382,12 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
         }
         painter.circle(at,4.5,colors.paper,Stroke::new(2.0,colors.selected));
         note(at+vec2(0.0,36.0),format!("On {} · Alt to release",if sk.line(entity).is_some(){"line"}else{"curve"}));
+    } else if s.pinned {
+        // A diamond marks a point taken from another sketch or from a body.
+        let d = 6.5;
+        painter.add(Shape::closed_line(vec![at + vec2(0.0, -d), at + vec2(d, 0.0), at + vec2(0.0, d), at + vec2(-d, 0.0)], Stroke::new(1.8, colors.selected)));
+        painter.circle_filled(at, 2.0, colors.selected);
+        note(at + vec2(0.0, 36.0), "Point of another sketch or body · fixed here · Alt to release".to_owned());
     } else if s.h || s.v {
         let r = Rect::from_center_size(at + vec2(16.0, 16.0), Vec2::splat(15.0));
         painter.rect(r, 3.0, colors.paper, Stroke::new(1.0, colors.selected), StrokeKind::Outside);
