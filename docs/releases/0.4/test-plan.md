@@ -94,6 +94,8 @@ L26. **Tilt a face.** Cylinder, 10 mm across, 30 mm tall. Front view, then orbit
 
 L28. **Rename a body.** Make two primitives. Right-click Body2 in the browser, Rename, type a name, Enter: the browser shows it. Move the body, undo twice, redo: the name goes and comes back with its step. Save, reopen: the name is kept. Rename it to nothing: it is Body2 again.
 
+L29. **Structural estimate script.** Save your work first: the script starts a new design. Scripts menu, open `examples/structural-joist.rhai` and run it with its defaults. A single joist appears and the log reports a bending utilization near 0.54, a shear utilization below it, and a sag of a few millimetres, each marked as a preliminary estimate. Change the depth input to half and run again: the bending utilization rises about fourfold and the sag about eightfold.
+
 L9. **Shell beside a fillet.** Cylinder, 20 mm across, 30 tall. Fillet its top edge with 3 mm. Shell: click the flat top, wall 2 mm, OK. Expect the message "Hollowed to a 2 mm wall, open at 1 face…", and looking down into the top, an open hole to the floor of the cavity with no thin skin over it. Section Analysis through the middle shows a wall of even thickness and an open top. Save, reopen: the opening is still there. Undo the shell and the fillet, then shell the plain cylinder the same way: also open (that is the kernel's own path, unchanged).
 
 L10. **Your bottle.** Open the bottle saved before the fix (`profile-fixed.ferr`). It rebuilds rather than opening from its cache, and the neck is open. Section it along the construction plane in the design: no cap under the neck.

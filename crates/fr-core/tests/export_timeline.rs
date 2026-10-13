@@ -224,3 +224,17 @@ fn small_inline_mesh_can_still_be_exported() {
     assert_eq!(again.built.bodies.len(), 1);
     assert!((again.built.bodies[0].mesh.volume()-8.).abs()<1e-6);
 }
+
+#[test]
+fn body_names_come_back_on_replay() {
+    let mut s = Session::default();
+    let a = cmd(&mut s, json!({"op":"primitive", "type":"box", "width":5, "depth":6, "height":7}))["changed_bodies"][0]["id"].as_u64().unwrap();
+    cmd(&mut s, json!({"op":"primitive", "type":"sphere", "diameter":4, "position":[20, 0, 0]}));
+    cmd(&mut s, json!({"op":"rename_body", "body": a, "name": "Left \"foot\" \\ ${x}"}));
+    // A name left behind by a body that is gone is passed over.
+    s.doc.body_names.insert(999, "ghost".into());
+    let again = replay(&s, json!({}));
+    assert!(again.built.errors.is_empty(), "{:?}", again.built.errors);
+    let names: Vec<_> = again.built.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["Left \"foot\" \\ ${x}", "Body2"]);
+}

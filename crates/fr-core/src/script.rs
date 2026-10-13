@@ -1128,6 +1128,12 @@ pub fn export_timeline_named(session: &Session, stem: &str) -> R<Export> {
         rhai_literal(&serde_json::to_value(member).map_err(|e| e.to_string())?, out)?;
         source_push(out, " });\n")?;
     }
+    for (id, name) in &doc.body_names {
+        // Named only if the replay has that body: a suppressed or consumed one is not an error.
+        source_push(out, &format!("    for b in scene().bodies {{ if b.id == {id} {{ rename_body(#{{ body: {id}, name: "))?;
+        rhai_literal(&json!(name), out)?;
+        source_push(out, " }); } }\n")?;
+    }
     let mut dropped = 0;
     for id in &doc.hidden_bodies {
         if doc.feature(*id).is_none() && session.built.body(*id).is_none() { dropped += 1; continue; }
