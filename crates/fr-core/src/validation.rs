@@ -120,6 +120,7 @@ impl Clip {
 pub fn document(d: &Document) -> Result<(), String> {
     if d.structural_members.len() > 1024 { return Err("at most 1024 structural member tags are supported".into()); }
     for tag in d.structural_members.values() { tag.validate()?; }
+    if let Some(case) = &d.structural_case { case.validate()?; }
     if d.features.len() > MAX_FEATURES || d.params.len() > 1024 {
         return Err("the document exceeds the feature or parameter limit".into());
     }

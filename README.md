@@ -198,7 +198,8 @@ The bundled [Noto Sans Bold font](https://github.com/base698/ferrender/blob/0.4-
 The 0.4 development branch also has a first-pass [structural member analysis API](docs/STRUCTURAL_ANALYSIS.md)
 for rectangular lumber extrusions: measured sections and spacing, 2D frame loads/supports,
 stress ratios and sampled deflection. Start with [the Rhai joist example](examples/structural-joist.rhai).
-Results are preliminary estimates with explicit material inputs; viewport overlays and full design checks are follow-up work.
+Inspect → Loads runs it in the app for a deck over a row of joists and draws each member bent and coloured by how near its limit it is.
+Results are preliminary estimates with explicit material inputs; full design checks are follow-up work.
 
 Everything above is also a command. These are some of the commands behind the bearing block, as Claude would send
 them over MCP:

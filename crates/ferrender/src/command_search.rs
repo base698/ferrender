@@ -133,6 +133,7 @@ pub fn commands(app: &App) -> Vec<Command> {
         add("Hole",Action::Hole,"","Drill a hole into an exact solid.","model hole drill counterbore countersink",need_exact);
         add("Thread",Action::Thread,"","Add threads to a rod or hole.","model thread screw",need_exact);
         add("Measure",Action::Measure,"I","Measure distances and angles.","view measure inspect",need_body);
+        add("Loads",Action::Loads,"","Put a deck load on tagged lumber and see stress and sag.","inspect loads structural beam joist stress deflection sag lumber",need_body);
     }
     let deleting=if sketch.is_some() {selected} else {app.sel_feature.is_some_and(|id|app.doc().feature(id).is_some())};
     add("Delete",Action::Delete,"Del","Delete the selected geometry or feature.","edit delete",(!deleting).then_some("Select geometry or a feature first."));

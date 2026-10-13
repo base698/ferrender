@@ -2210,6 +2210,7 @@ fn model_mode(app: &mut App, resp: &egui::Response, painter: &Painter, consumed:
                 }
             }
         }
+        Dialog::Loads(d) => crate::structure_ui::overlay(app, painter, &d),
         Dialog::Measure(mut m) => {
             let show = |p: &Picked, color: Color32, width: f32| match &p.item {
                 Item::Point(at) => {
@@ -2425,6 +2426,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         (Dialog::Thread(_), _) => "Click the round side of a rod, or the inside of a hole.",
         (Dialog::Sculpt(_), _) => "Click the body to add a brush stroke.",
         (Dialog::Text(_), _) => "Click a flat face to place text, or choose XY, XZ or YZ. The cross marks its baseline origin.",
+        (Dialog::Loads(_), _) => "Each tagged member is drawn bent under the load, green to red by how near its limit it is, with its worst ratio and sag. Orbit to look along the row.",
         (Dialog::Measure(_), _) => "Click two things to measure between: corners and sketch points, edges and sketch lines, or faces.",
         (Dialog::Transform(_), _) => "Drag colored arrows or rotation rings. Shift gives fine moves or 15° rotations. Click another body to move it.",
         (Dialog::Combine(c), _) if c.target.is_none() => "Click the body to keep.",

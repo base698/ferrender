@@ -92,7 +92,7 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if !doc.structural_members.is_empty() { 19 }
+    if !doc.structural_members.is_empty() || doc.structural_case.is_some() { 19 }
     else if !doc.body_names.is_empty() { 18 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Tilt(_))) { 17 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Sketch(s) if s.entities.values().any(|e| matches!(e.geom, crate::sketch::Geom::Ellipse { .. })))) { 16 }

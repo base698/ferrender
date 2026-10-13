@@ -820,6 +820,9 @@ pub struct Document {
     /// Measured lumber/member metadata; geometry and analysis results are rebuilt.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub structural_members: BTreeMap<Id, crate::structure::MemberTag>,
+    /// The load case last used for a quick structural estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_case: Option<crate::structure::Case>,
     pub next_id: Id,
     /// Temporary allocation hints while rerunning a script. Never persisted.
     #[serde(skip)]
@@ -1505,6 +1508,7 @@ impl Document {
             d.active_component = 0;
             d.hidden_bodies.clear();
             d.structural_members.clear();
+            d.structural_case = None;
             for f in &mut d.features {
                 f.name.clear();
                 match &mut f.kind {

@@ -5,15 +5,54 @@ estimate the elastic response of a planar frame. It is intended for comparing
 proposed shed joist/beam arrangements using explicit dimensions and loading.
 It does not determine whether an existing shed or repair passes inspection.
 
-The implementation has four commands, automatically available as Rhai functions
-and through MCP's `execute_ferrender_commands`:
+The implementation has five commands, automatically available as Rhai functions
+and through MCP's `execute_ferrender_commands`. In the app, the [Loads panel](#the-loads-panel)
+runs the quick case and draws its result on the model.
 
 | Command | Purpose |
 |---|---|
 | `set_structural_member` | Set species, grade, nominal label, reference design values, per-property factors, density and optional end bearings on an extrusion. |
 | `remove_structural_member` | Remove a tag, including one whose geometry was deleted. |
 | `get_structural_members` | Inspect tags, actual sections, world centerlines, lengths, supplied-bearing clear spans and parallel centerline distances. Unsupported members carry an error. |
-| `analyze_structure` | Build and solve a planar frame; return reactions, stress ratios, colors and deflection polylines. Does not edit the design or install a viewport overlay. |
+| `analyze_structure` | Build and solve a planar frame; return reactions, stress ratios, colors and deflection polylines. Does not edit the design. |
+| `estimate_structure` | The quick case: one deck pressure over every tagged member as a simple span. Works out deck widths from spacing, can analyse a trial section, and can keep the case with the design. |
+
+## The Loads panel
+
+**Inspect → Loads** (also in the View menu and command search) puts one evenly spread
+load on a deck and shows how each tagged member carries it.
+
+- **Storage load** and **Deck weight** are pressures on the deck, in psf or kPa. The
+  members' own weight is added when the box is ticked and the lumber has a density.
+- Each member is a simple span between its two ends, supported at the middle of its
+  bearing when a bearing length was entered. Members must be level and all run along X
+  or all along Y.
+- **Carries** is the width of deck a member holds up. Left empty, it is half the gap to
+  the member on each side; a member at the end of the row carries as much again on its
+  open side. Type a width to replace it, for example for two boards fixed together.
+- The table gives each member's bending and shear ratio (stress over the allowable you
+  entered; above 1 is over), its sag, and span over sag.
+- On the model each member is drawn bent, with the sag exaggerated by the slider,
+  coloured green through red by its worst ratio, with arrows where it is loaded.
+- **Compare with every member at** analyses a trial width and depth beside the design as
+  built, without changing the design. Switch the drawing between the two. To change the
+  design itself, edit the member's sketch or the parameter that sizes it; the panel
+  follows the real geometry.
+- **Lumber** holds the species, grade, E, Fb, Fv, density and bearing. *Tag selected
+  body* makes the selected plain rectangular extrusion a member; *Use for all members*
+  applies the values to every member.
+- **Done** keeps the load case with the design.
+
+The same case is the `estimate_structure` command:
+
+```json
+{"op":"estimate_structure","case":{"live_pa":1436,"dead_pa":239,"include_self_weight":true,
+  "tributary_mm":{"21":150},"trial_section_mm":[38.1,285.75]},"remember":true}
+```
+
+Everything under Allowables and interpretation below applies to the panel too. It
+treats each member alone: nothing is shared through the deck, and two boards fixed
+together are two members unless you give them their widths by hand.
 
 ## Starting on a laptop
 

@@ -1467,6 +1467,102 @@ fn a_face_is_tilted_about_a_hinge_taken_from_the_view() {
     save(&mut h, "tilted.png");
 }
 
+/// Three 40 by 140 joists along X, 600 apart, tagged as lumber. With `SHED` set to a
+/// design's path, that design is opened instead, to look at the panel on a real model.
+fn joists(h: &mut H) -> Vec<fr_core::Id> {
+    if let Ok(path) = std::env::var("FERRENDER_LOADS_DESIGN") {
+        h.state_mut().execute(&json!({"op": "open", "path": path})).unwrap();
+        return h.state().doc().structural_members.keys().copied().collect();
+    }
+    let tag = json!({"species": "test", "grade": "test", "nominal_size": "2x6", "design_values": {"e_mpa": 10000.0, "fb_mpa": 8.0, "fv_mpa": 1.0, "source": "test"}, "density_kg_m3": 500});
+    (0..3).map(|i| {
+        let app = h.state_mut();
+        let sketch = app.execute(&json!({"op": "create_sketch", "plane": "YZ"})).unwrap()["sketch"].clone();
+        app.execute(&json!({"op": "add_geometry", "sketch": sketch, "items": [{"type": "rect", "center": [600 * i, 0], "size": [40, 140]}]})).unwrap();
+        app.execute(&json!({"op": "set_visible", "id": sketch, "visible": false})).unwrap();
+        let body = app.execute(&json!({"op": "extrude", "sketch": sketch, "distance": 3000, "operation": "new"})).unwrap()["feature"].as_u64().unwrap() as fr_core::Id;
+        app.execute(&json!({"op": "set_structural_member", "body": body, "member": tag})).unwrap();
+        body
+    }).collect()
+}
+
+#[test]
+fn the_loads_panel_estimates_and_draws_tagged_members() {
+    let mut h = harness();
+    let ids = joists(&mut h);
+    run(&mut h, Action::View("iso"));
+    h.state_mut().fit();
+    h.run_steps(2);
+    run(&mut h, Action::Loads);
+    let Dialog::Loads(mut d) = h.state().dialog.clone() else { panic!("the loads panel should be open") };
+    if std::env::var("FERRENDER_LOADS_DESIGN").is_ok() {
+        d.trial = true;
+        d.trial_width = "1.5".into();
+        d.trial_depth = "11.25".into();
+        h.state_mut().dialog = Dialog::Loads(d.clone());
+        save(&mut h, "loads-design.png");
+        d.show_trial = true;
+        h.state_mut().dialog = Dialog::Loads(d);
+        save(&mut h, "loads-design-trial.png");
+        return;
+    }
+    // A millimetre design opens in kPa; the lumber boxes show the first member's values.
+    assert!(!d.us && d.live == "1.5" && d.lumber.e == "10000", "{d:?}");
+    d.live = "2".into();
+    d.dead = "0".into();
+    d.own_weight = false;
+    h.state_mut().dialog = Dialog::Loads(d.clone());
+    h.run_steps(2);
+    let (now, trial) = crate::structure_ui::estimates(h.state_mut(), &d);
+    let now = now.expect("three level joists can be estimated");
+    assert!(trial.is_none());
+    // The middle joist carries 600 mm of deck: 1.2 N/mm over 3 m.
+    let middle = now["members"].as_array().unwrap().iter().find(|m| m["body"].as_u64() == Some(ids[1] as u64)).unwrap();
+    assert!((middle["max_moment_n_mm"].as_f64().unwrap() - 1.2 * 3000.0 * 3000.0 / 8.0).abs() < 1e-3, "{middle}");
+    let over = middle["bending_shear_utilization"].as_f64().unwrap();
+    assert!(over > 1.0, "a 40 by 140 joist is past its limit under 2 kPa: {over}");
+    save(&mut h, "loads.png");
+
+    // Twice as deep, as a trial: within its limit, and the design is not changed.
+    d.trial = true;
+    d.trial_width = "40".into();
+    d.trial_depth = "280".into();
+    d.show_trial = true;
+    h.state_mut().dialog = Dialog::Loads(d.clone());
+    h.run_steps(2);
+    let (_, trial) = crate::structure_ui::estimates(h.state_mut(), &d);
+    let trial = trial.expect("a trial was asked for").expect("the trial can be estimated");
+    let deeper = trial["members"].as_array().unwrap().iter().find(|m| m["body"].as_u64() == Some(ids[1] as u64)).unwrap();
+    assert!((deeper["bending_shear_utilization"].as_f64().unwrap() - over / 4.0).abs() < 1e-9, "twice as deep is a quarter of the bending stress");
+    assert!((exact_volume(&h) - 3.0 * 40.0 * 140.0 * 3000.0).abs() < 1e-3, "a trial changes nothing in the design");
+    save(&mut h, "loads-trial.png");
+
+    // A width typed for one member replaces the one taken from spacing.
+    d.widths.insert(ids[0], "300".into());
+    let (now, _) = crate::structure_ui::estimates(h.state_mut(), &d);
+    assert_eq!(now.unwrap()["tributary_mm"][ids[0].to_string()], 300.0);
+
+    // Nonsense in a box is said plainly rather than estimated.
+    let mut bad = d.clone();
+    bad.live = "lots".into();
+    assert!(crate::structure_ui::estimates(h.state_mut(), &bad).0.unwrap_err().contains("storage load should be a number"));
+
+    // Done keeps the load with the design, and the panel opens on it again.
+    h.state_mut().dialog = Dialog::Loads(d);
+    h.run_steps(2);
+    let done = h.get_by_label("Done").rect().center();
+    click(&mut h, done);
+    assert_eq!(h.state().dialog, Dialog::None);
+    let kept = h.state().doc().structural_case.clone().expect("the case is kept with the design");
+    assert!((kept.live_pa - 2000.0).abs() < 1e-9 && kept.trial_section_mm == Some([40.0, 280.0]) && kept.tributary_mm.get(&ids[0]) == Some(&300.0), "{kept:?}");
+    run(&mut h, Action::Loads);
+    assert!(matches!(&h.state().dialog, Dialog::Loads(d) if d.live == "2" && d.trial && d.trial_depth == "280"));
+}
+
+fn exact_volume(h: &H) -> f64 {
+    h.state().session.built.bodies.iter().flat_map(|b| b.solids.iter()).map(|s| s.volume()).sum()
+}
+
 #[test]
 fn fillet_shell_and_timeline_rollback() {
     let mut h = harness();

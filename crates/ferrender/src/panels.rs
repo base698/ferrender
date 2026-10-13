@@ -143,6 +143,7 @@ pub fn menu_bar(app: &mut App, ui: &mut Ui) {
             item(app, ui, "Fit", "F", Action::Fit);
             item(app, ui, "Section Analysis\u{2026}", "", Action::Section);
             item(app, ui, "Measure", "I", Action::Measure);
+            item(app, ui, "Loads", "", Action::Loads);
             ui.separator();
             ui.checkbox(&mut app.opts.grid, "Grid");
             ui.checkbox(&mut app.opts.constraints, "Constraints");
@@ -380,6 +381,9 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
             group(ui, "INSPECT", |ui| {
                 if big(ui, icon::RULER, "Measure", matches!(app.dialog, Dialog::Measure(_)), "The distance and angle between two points, edges or faces (I)").clicked() {
                     app.run(&ctx, Action::Measure);
+                }
+                if big(ui, icon::SCALES, "Loads", matches!(app.dialog, Dialog::Loads(_)), "Put a deck load on tagged lumber and see each member's stress and sag").clicked() {
+                    app.run(&ctx, Action::Loads);
                 }
                 if big(ui, icon::CUBE_TRANSPARENT, "Section", app.section.on, "Cut the view open to look inside").clicked() {
                     app.run(&ctx, Action::Section);
@@ -1341,6 +1345,7 @@ fn dialogs(app: &mut App, ctx: &Context) {
                 confirm(app, ui, "OK");
             });
         }
+        Dialog::Loads(d) => crate::structure_ui::dialog(app, ctx, d),
         Dialog::Measure(mut m) => {
             dialog_window(app, "Measure").show(ctx, |ui| {
                 let u = app.doc().units;

@@ -486,6 +486,8 @@ pub enum Dialog {
     Blend(BlendDlg),
     Shell(ShellDlg),
     Tilt(TiltDlg),
+    /// The Inspect tool that puts a deck load on the tagged members.
+    Loads(crate::structure_ui::LoadsDlg),
     Hole(HoleDlg),
     Thread(ThreadDlg),
     Text(TextDlg),
@@ -852,6 +854,8 @@ pub enum Action {
     Section,
     /// Fillet (false) or chamfer (true) the edges of a body.
     Blend(bool),
+    /// Estimate how the tagged members carry a deck load.
+    Loads,
     Shell,
     /// Tilt a flat face about a hinge lying in it.
     Tilt,
@@ -934,6 +938,8 @@ pub struct App {
     pub rename: Option<(Id, String)>,
     /// The Rename box is naming a body, not a feature; their ids can be the same.
     pub rename_body: bool,
+    /// The Loads panel's estimates, for the design revision and panel they were worked out from.
+    pub loads: Option<(u64, crate::structure_ui::LoadsDlg, crate::structure_ui::Estimates)>,
     /// The GPU viewport is available; otherwise bodies are drawn in software.
     pub gpu: bool,
     pub scene: view::Scene,
@@ -1026,6 +1032,7 @@ impl App {
             param_edit: None,
             rename: None,
             rename_body: false,
+            loads: None,
             gpu,
             scene: view::Scene::default(),
             scripts: Default::default(),
@@ -2617,6 +2624,10 @@ impl App {
                 }
             }
             Action::Section => self.show_section = !self.show_section,
+            Action::Loads => {
+                self.finish_sketch();
+                self.dialog = Dialog::Loads(crate::structure_ui::LoadsDlg::open(self));
+            }
             Action::Measure => {
                 self.finish_sketch();
                 self.dialog = Dialog::Measure(MeasureDlg::default());

@@ -343,6 +343,11 @@ pub struct Analysis {
     pub include_self_weight: bool,
     #[serde(default = "default_scale")]
     pub deformation_scale: f64,
+    /// A what-if: every member is analysed with this width (across the frame) and depth
+    /// (in it) instead of its measured section. The design itself is not changed, and
+    /// the result says that it is a trial.
+    #[serde(default)]
+    pub trial_section_mm: Option<[f64; 2]>,
 }
 
 fn default_scale() -> f64 {
@@ -354,6 +359,7 @@ struct Prepared {
     tag: MemberTag,
     width: f64,
     depth: f64,
+    area: f64,
     stations: Vec<f64>,
     nodes: Vec<usize>,
     q: [f64; 2],
@@ -426,6 +432,15 @@ pub fn analyze(s: &Session, request: &Analysis) -> R<J> {
             ));
         };
         let (width, depth) = (g.section_mm[1 - depth_axis], g.section_mm[depth_axis]);
+        let (width, depth) = match request.trial_section_mm {
+            Some([w, d]) => {
+                positive(w, "trial width")?;
+                positive(d, "trial depth")?;
+                (w, d)
+            }
+            None => (width, depth),
+        };
+        let area = width * depth;
         let mut q = [0.0; 2];
         if request.include_self_weight {
             if normal.dot(DVec3::Z).abs() > 1e-8 {
@@ -434,7 +449,7 @@ pub fn analyze(s: &Session, request: &Analysis) -> R<J> {
             let density = tag
                 .density_kg_m3
                 .ok_or(format!("member {id} needs density_kg_m3 for self-weight"))?;
-            q = project(-DVec3::Z * density * g.area_mm2 * 1e-9 * 9.80665);
+            q = project(-DVec3::Z * density * area * 1e-9 * 9.80665);
         }
         members.insert(
             id,
@@ -443,6 +458,7 @@ pub fn analyze(s: &Session, request: &Analysis) -> R<J> {
                 tag,
                 width,
                 depth,
+                area,
                 stations: vec![0.0, 1.0],
                 nodes: Vec::new(),
                 q,
@@ -563,7 +579,7 @@ pub fn analyze(s: &Session, request: &Analysis) -> R<J> {
             frame.members.push(fr_structure::Member {
                 nodes: [node_map[m.nodes[i]], node_map[m.nodes[i + 1]]],
                 e: m.tag.adjusted()[0],
-                area: m.geometry.area_mm2,
+                area: m.area,
                 inertia: m.width * m.depth.powi(3) / 12.0,
                 uniform_load: m.q,
             });
@@ -602,17 +618,17 @@ pub fn analyze(s: &Session, request: &Analysis) -> R<J> {
         }
         let section_modulus = m.width * m.depth.powi(2) / 6.0;
         let fb = max_moment / section_modulus;
-        let fv = 1.5 * max_shear / m.geometry.area_mm2;
+        let fv = 1.5 * max_shear / m.area;
         let [e, fb_allow, fv_allow] = m.tag.adjusted();
         let utilization = (fb / fb_allow).max(fv / fv_allow);
         if !utilization.is_finite() {
             return Err("stress utilization exceeds numeric range".into());
         }
         results.push(json!({"body":id,"geometry":m.geometry,"material":m.tag,
-            "section":{"width_mm":m.width,"depth_mm":m.depth,"area_mm2":m.geometry.area_mm2,"inertia_mm4":m.width * m.depth.powi(3) / 12.0,"section_modulus_mm3":section_modulus},
+            "section":{"width_mm":m.width,"depth_mm":m.depth,"area_mm2":m.area,"inertia_mm4":m.width * m.depth.powi(3) / 12.0,"section_modulus_mm3":section_modulus},
             "adjusted_design_values":{"e_mpa":e,"fb_mpa":fb_allow,"fv_mpa":fv_allow},
             "uniform_load_n_per_mm":m.q,"max_moment_n_mm":max_moment,"max_shear_n":max_shear,"max_axial_n":max_axial,
-            "bending_stress_mpa":fb,"shear_stress_mpa":fv,"axial_stress_mpa":max_axial / m.geometry.area_mm2,
+            "bending_stress_mpa":fb,"shear_stress_mpa":fv,"axial_stress_mpa":max_axial / m.area,
             "bending_utilization":fb / fb_allow,"shear_utilization":fv / fv_allow,"bending_shear_utilization":utilization,
             "color_rgb":utilization_color(utilization),"sampled_max_displacement_mm":max_displacement,
             "axial_design_required":max_axial > 1e-6,"samples":samples}));
@@ -622,7 +638,7 @@ pub fn analyze(s: &Session, request: &Analysis) -> R<J> {
         "reaction_n":[solution.reactions[i][0],solution.reactions[i][1]],"reaction_moment_n_mm":solution.reactions[i][2]})).collect();
     Ok(
         json!({"method":"linear_2d_euler_bernoulli","units":{"length":"mm","force":"N","moment":"N mm","stress":"MPa"},
-        "analysis_axes":[x_axis,y_axis],"deformation_scale":request.deformation_scale,"include_self_weight":request.include_self_weight,
+        "analysis_axes":[x_axis,y_axis],"trial_section_mm":request.trial_section_mm,"deformation_scale":request.deformation_scale,"include_self_weight":request.include_self_weight,
         "members":results,"nodes":nodes,"design_checks_complete":false,
         "limitations":["Preliminary bending/shear estimates using caller-supplied values and factors; not a Forte calculation or permit approval.",
             "No buckling, axial/bending interaction, bearing capacity, connections, sistering fasteners, creep, load combinations, torsion or 3D behavior.",
@@ -639,4 +655,135 @@ pub fn utilization_color(ratio: f64) -> [u8; 3] {
     } else {
         [255, ((1.0 - t) * 2.0 * 150.0 + 40.0) as u8, 55]
     }
+}
+
+/// A quick load case for a floor or loft: one pressure on the deck, carried by every
+/// tagged member as a simple span between its two ends. It is kept with the design.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Case {
+    /// What is stored or stood on the deck, in Pa.
+    pub live_pa: f64,
+    /// The deck and anything fixed to it, in Pa. The members' own weight is separate.
+    #[serde(default)]
+    pub dead_pa: f64,
+    #[serde(default)]
+    pub include_self_weight: bool,
+    /// The width of deck a member carries, in mm, by body. A member not named here takes
+    /// its width from the spacing of the members beside it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tributary_mm: BTreeMap<Id, f64>,
+    /// See [`Analysis::trial_section_mm`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_section_mm: Option<[f64; 2]>,
+    #[serde(default = "default_scale")]
+    pub deformation_scale: f64,
+}
+
+impl Case {
+    pub fn validate(&self) -> R<()> {
+        for (value, label) in [(self.live_pa, "the live load"), (self.dead_pa, "the dead load")] {
+            if !value.is_finite() || !(0.0..=1e6).contains(&value) {
+                return Err(format!("{label} must be between 0 and 1 000 000 Pa"));
+            }
+        }
+        if self.tributary_mm.len() > 1024 {
+            return Err("at most 1024 tributary widths are supported".into());
+        }
+        for width in self.tributary_mm.values() {
+            positive(*width, "tributary width")?;
+        }
+        if let Some([w, d]) = self.trial_section_mm {
+            positive(w, "trial width")?;
+            positive(d, "trial depth")?;
+        }
+        if !self.deformation_scale.is_finite() || !(0.0..=10000.0).contains(&self.deformation_scale) {
+            return Err("deformation_scale must be between 0 and 10000".into());
+        }
+        Ok(())
+    }
+}
+
+/// The width of deck each member carries when nothing says otherwise: half the gap to
+/// the member on each side. A member at the end of the row has one neighbour, and is
+/// taken to carry as much again on its open side, as a joist next to a wall does.
+/// A member with no parallel neighbour has no width to offer and is left out.
+pub fn spacing_tributary(members: &[Geometry], across: DVec3) -> BTreeMap<Id, f64> {
+    let mut row: Vec<(f64, Id)> = members.iter().map(|g| (((g.start_mm + g.end_mm) / 2.0).dot(across), g.body)).collect();
+    row.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out = BTreeMap::new();
+    for (i, &(at, body)) in row.iter().enumerate() {
+        let before = i.checked_sub(1).map(|j| at - row[j].0);
+        let after = row.get(i + 1).map(|next| next.0 - at);
+        let width = match (before, after) {
+            (Some(a), Some(b)) => (a + b) / 2.0,
+            (Some(gap), None) | (None, Some(gap)) => gap,
+            (None, None) => continue,
+        };
+        if width > 1e-6 {
+            out.insert(body, width);
+        }
+    }
+    out
+}
+
+/// Runs a [`Case`] over every tagged member that can be analysed. The members must be
+/// level and run the same way, along X or along Y. Each is pinned at one end and free
+/// to slide at the other, at the middle of its measured bearing when it has one.
+pub fn estimate(s: &Session, case: &Case) -> R<J> {
+    case.validate()?;
+    let (mut members, mut skipped) = (Vec::new(), Vec::new());
+    for (&id, tag) in &s.doc.structural_members {
+        match geometry(s, id, tag) {
+            Ok(g) => members.push(g),
+            Err(e) => skipped.push(json!({"body": id, "error": e})),
+        }
+    }
+    if members.is_empty() {
+        return Err(match skipped.first() {
+            Some(first) => format!("no tagged member can be analysed: {}", first["error"].as_str().unwrap_or_default()),
+            None => "tag a rectangular extrusion as a structural member first".into(),
+        });
+    }
+    let along = |g: &Geometry, axis: DVec3| ((g.end_mm - g.start_mm) / g.length_mm).dot(axis).abs() > 1.0 - 1e-8;
+    let (plane, across) = if members.iter().all(|g| along(g, DVec3::X)) {
+        (AnalysisPlane::XZ, DVec3::Y)
+    } else if members.iter().all(|g| along(g, DVec3::Y)) {
+        (AnalysisPlane::YZ, DVec3::X)
+    } else {
+        return Err("the quick estimate needs level members that all run along X, or all along Y; use analyze_structure for other frames".into());
+    };
+    let mut tributary = spacing_tributary(&members, across);
+    for (body, width) in &case.tributary_mm {
+        if members.iter().any(|g| g.body == *body) {
+            tributary.insert(*body, *width);
+        }
+    }
+    let (mut supports, mut area_loads) = (Vec::new(), Vec::new());
+    for g in &members {
+        let ends = g.support_centers_from_start_mm.map_or([0.0, 1.0], |c| c.map(|v| v / g.length_mm));
+        for (at, fix) in [(ends[0], [true, true, false]), (ends[1], [false, true, false])] {
+            supports.push(Support { location: Location { body: g.body, at }, fix });
+        }
+        if let Some(&width) = tributary.get(&g.body).filter(|_| case.live_pa + case.dead_pa > 0.0) {
+            area_loads.push(AreaLoad { body: g.body, pressure_pa: case.live_pa + case.dead_pa, tributary_width_mm: width, direction: [0.0, -1.0] });
+        }
+    }
+    let request = Analysis {
+        plane,
+        bodies: Some(members.iter().map(|g| g.body).collect()),
+        supports,
+        point_loads: Vec::new(),
+        uniform_loads: Vec::new(),
+        area_loads,
+        connections: Vec::new(),
+        include_self_weight: case.include_self_weight,
+        deformation_scale: case.deformation_scale,
+        trial_section_mm: case.trial_section_mm,
+    };
+    let mut out = analyze(s, &request)?;
+    out["case"] = json!(case);
+    out["tributary_mm"] = json!(tributary);
+    out["skipped"] = json!(skipped);
+    Ok(out)
 }

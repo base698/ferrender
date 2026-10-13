@@ -171,6 +171,8 @@ STRUCTURAL ESTIMATES (first-pass 2D frames; see docs/STRUCTURAL_ANALYSIS.md)
 {"op":"get_structural_members"}   tags, current extrusion dimensions/centerlines, clear spans when measured end bearings are supplied, and parallel centerline spacing. Unsupported or stale geometry has an error, not an estimate.
 {"op":"analyze_structure","analysis":{"plane":"XZ","bodies":[ID],"supports":[{"location":{"body":ID,"at":0},"fix":[true,true,false]},{"location":{"body":ID,"at":1},"fix":[false,true,false]}],"uniform_loads":[{"body":ID,"force_n_per_mm":[0,-1]}],"include_self_weight":false,"deformation_scale":20}}
    Explicit mm/N/MPa units, independent of document units. at is a fraction of physical member length, not a distance. Supported planes XY/XZ/YZ; loads and fix refer to those two axes and their positive normal rotation. Members are single rectangular New Body extrusions along their length. Place them with sketches/components; later body transforms/cuts are unsupported. Point loads split the beam at location; area_loads use pressure_pa * tributary_width_mm * 1e-6 in direction (a 2D unit vector). include_self_weight is mandatory; true needs density and applies -Z gravity. Separate members connect only via explicit connections:[[LOCATION,LOCATION]] at coincident centerlines, forming rigid joints. Results supply support reactions, bending/shear utilization color_rgb and sampled deformed_mm polylines; no viewport overlay is installed. No NDS table lookup, factor selection, code approval, bearing/buckling/connection/sister-fastener check, or Forte integration is implied.
+{"op":"estimate_structure","case":{"live_pa":1436,"dead_pa":239,"include_self_weight":true,"tributary_mm":{"BODY":609.6},"trial_section_mm":[38.1,235],"deformation_scale":10},"remember":true}
+   The quick case behind the app's Loads panel: one deck pressure carried by every tagged member as a simple span between its ends (at the middle of each measured bearing). Members must be level and all run along X or all along Y. A member's deck width comes from the spacing of its neighbours unless tributary_mm names it. trial_section_mm analyses every member at that width and depth instead of its own, to compare sizes without changing the design. remember keeps the case with the design; without "case" the remembered one is used. Returns what analyze_structure does, plus the widths used and any members skipped with the reason.
 
 QUERIES
 {"op":"get_scene_info"}                            units, parameters, features (with any errors) and bodies
@@ -201,7 +203,7 @@ pub const OPS: &[&str] = &[
     "trim", "mirror", "offset", "fillet", "chamfer", "project", "edit_feature", "delete_feature", "import_stl", "import_mesh",
     "mesh_measure", "mesh_repair", "mesh_decimate", "mesh_smooth", "mesh_subdivide", "mesh_cut", "mesh_mirror", "mesh_offset",
     "mesh_extrude_region", "mesh_sculpt", "mesh_from_image", "transform", "combine", "set_visible", "rename_body", "run_script", "script_meta", "add_feature",
-    "set_structural_member", "remove_structural_member", "get_structural_members", "analyze_structure",
+    "set_structural_member", "remove_structural_member", "get_structural_members", "analyze_structure", "estimate_structure",
 ];
 
 /// An `edit_feature` that gives a name and nothing else.
@@ -1113,6 +1115,19 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
         "set_structural_member" => { structure_api::set_member(s, c) }
         "remove_structural_member" => { structure_api::remove_member(s, c) }
         "get_structural_members" => { structure_api::members(s) }
+        "estimate_structure" => {
+            // The case given, or the one kept with the design.
+            let case: crate::structure::Case = match &c["case"] {
+                J::Null => s.doc.structural_case.clone().ok_or("estimate_structure needs a \"case\"; the design has none saved")?,
+                given => serde_json::from_value(given.clone()).map_err(|e| format!("invalid structural case: {e}"))?,
+            };
+            case.validate()?;
+            if c["remember"].as_bool().unwrap_or(false) && s.doc.structural_case.as_ref() != Some(&case) {
+                let keep = case.clone();
+                s.edit_without_rebuild(|d| { d.structural_case = Some(keep); Ok(()) })?;
+            }
+            crate::structure::estimate(s, &case)
+        }
         "analyze_structure" => {
             let request = serde_json::from_value(c["analysis"].clone()).map_err(|e| format!("invalid structural analysis: {e}"))?;
             crate::structure::analyze(s, &request)
