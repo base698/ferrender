@@ -24,13 +24,21 @@ load on a deck and shows how each tagged member carries it.
 
 - **Storage load** and **Deck weight** are pressures on the deck, in psf or kPa. The
   members' own weight is added when the box is ticked and the lumber has a density.
+- Beside each pressure is the weight it comes to over the deck the members carry
+  between them, in pounds, or in kilonewtons with the mass that weighs as much.
+- The storage load is drawn as a translucent stack standing on the deck, with one arrow
+  and its total weight. The stack is as tall as boxed household storage of that weight
+  would be at 10 lb/ft³ (160 kg/m³), so 30 psf stands 3 ft deep. It is a picture of
+  the load, not part of the design, and can be switched off.
+- A body tagged as lumber carries a scales mark beside its name in the browser. Only
+  tagged bodies are counted; the tags are saved in the design.
 - Each member is a simple span between its two ends, supported at the middle of its
   bearing when a bearing length was entered. Members must be level and all run along X
   or all along Y.
 - **Carries** is the width of deck a member holds up. Left empty, it is half the gap to
   the member on each side; a member at the end of the row carries as much again on its
   open side. Type a width to replace it, for example for two boards fixed together.
-- The table gives each member's bending and shear ratio (stress over the allowable you
+- The table gives the load each member holds, its bending and shear ratio (stress over the allowable you
   entered; above 1 is over), its sag, and span over sag.
 - On the model each member is drawn bent, with the sag exaggerated by the slider,
   coloured green through red by its worst ratio, with arrows where it is loaded.

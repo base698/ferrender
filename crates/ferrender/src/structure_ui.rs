@@ -46,6 +46,8 @@ pub struct LoadsDlg {
     pub trial_depth: String,
     /// Draw the trial rather than the design as it is.
     pub show_trial: bool,
+    /// Draw the storage load as a stack on the deck, with its weight.
+    pub show_load: bool,
     /// Deck widths typed in place of the ones taken from spacing.
     pub widths: BTreeMap<Id, String>,
     pub lumber: Lumber,
@@ -92,6 +94,7 @@ impl LoadsDlg {
             trial_width: trial.map_or(String::new(), |t| tidy(t[0] / length)),
             trial_depth: trial.map_or(String::new(), |t| tidy(t[1] / length)),
             show_trial: false,
+            show_load: true,
             widths: kept.map_or(BTreeMap::new(), |c| c.tributary_mm.iter().map(|(id, w)| (*id, tidy(w / length))).collect()),
             lumber,
         }
@@ -163,6 +166,64 @@ pub fn estimates(app: &mut App, d: &LoadsDlg) -> Estimates {
     made
 }
 
+/// A whole number with its thousands set apart.
+fn grouped(value: f64) -> String {
+    let digits = format!("{:.0}", value.abs());
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 { out.push(','); }
+        out.push(c);
+    }
+    if value < -0.5 { format!("-{out}") } else { out }
+}
+
+/// A force in pounds, or in kilonewtons with the mass that weighs as much.
+fn force_text(newtons: f64, us: bool) -> String {
+    if us { format!("{} lb", grouped(newtons / 4.448_222)) } else { format!("{:.2} kN ({} kg)", newtons / 1000.0, grouped(newtons / 9.806_65)) }
+}
+
+/// Household storage, boxed and stacked, weighs about this much for its volume: ten
+/// pounds to the cubic foot. The load is drawn as a stack of it, so that its height
+/// can be pictured.
+const STACK_N_PER_M3: f64 = 10.0 * PCF * 9.806_65;
+
+/// The deck the estimate loaded: each member's strip, as its two ends, the level
+/// direction across it and the strip's width, with the height of the members' tops.
+struct Deck {
+    strips: Vec<(DVec3, DVec3, DVec3, f64)>,
+    top: f64,
+}
+
+impl Deck {
+    fn of(result: &J) -> Deck {
+        let mut deck = Deck { strips: Vec::new(), top: f64::MIN };
+        for m in result["members"].as_array().into_iter().flatten() {
+            let (start, end) = (point(&m["geometry"]["start_mm"]), point(&m["geometry"]["end_mm"]));
+            deck.top = deck.top.max(start.z.max(end.z) + m["section"]["depth_mm"].as_f64().unwrap_or(0.0) / 2.0);
+            let Some(width) = m["body"].as_u64().and_then(|b| result["tributary_mm"][b.to_string()].as_f64()) else { continue };
+            if let Some(across) = DVec3::Z.cross(end - start).try_normalize() { deck.strips.push((start, end, across, width)); }
+        }
+        deck
+    }
+
+    /// The loaded area, in square millimetres.
+    fn area(&self) -> f64 { self.strips.iter().map(|s| s.0.distance(s.1) * s.3).sum() }
+
+    /// The rectangle that holds every strip: a corner and its two sides.
+    fn outline(&self) -> Option<(DVec3, DVec3, DVec3)> {
+        let first = self.strips.first()?;
+        let (along, across) = ((first.1 - first.0).try_normalize()?, first.2);
+        let (mut a, mut b) = ((f64::MAX, f64::MIN), (f64::MAX, f64::MIN));
+        for (start, end, _, width) in &self.strips {
+            for p in [start, end] {
+                a = (a.0.min(p.dot(along)), a.1.max(p.dot(along)));
+                b = (b.0.min(p.dot(across) - width / 2.0), b.1.max(p.dot(across) + width / 2.0));
+            }
+        }
+        Some((along * a.0 + across * b.0 + DVec3::Z * self.top, along * (a.1 - a.0), across * (b.1 - b.0)))
+    }
+}
+
 fn rgb(member: &J) -> Color32 {
     let c = |i: usize| member["color_rgb"][i].as_u64().unwrap_or(128) as u8;
     Color32::from_rgb(c(0), c(1), c(2))
@@ -198,14 +259,26 @@ pub fn dialog(app: &mut App, ctx: &Context, mut d: LoadsDlg) {
         egui::Grid::new("loads").num_columns(3).show(ui, |ui| {
             ui.label("Storage load").on_hover_text("What is stored or stood on the deck, spread evenly");
             ui.add(egui::TextEdit::singleline(&mut d.live).desired_width(70.0));
-            ui.label(d.pressure_name());
+            // The same load as a weight, over the deck the members carry between them.
+            let (us, unit) = (d.us, d.pressure_name());
+            let on_deck = |pa: Option<f64>| match (&now, pa) {
+                (Ok(result), Some(pa)) => {
+                    let area = Deck::of(result).area();
+                    let size = if us { format!("{} ft\u{b2}", tidy(area / (304.8 * 304.8))) } else { format!("{} m\u{b2}", tidy(area / 1e6)) };
+                    format!("{}  =  {} on {size}", unit, force_text(pa * area / 1e6, us))
+                }
+                _ => unit.to_owned(),
+            };
+            let pressure = if us { PSF } else { 1000.0 };
+            ui.label(on_deck(number(&d.live, "").ok().map(|v| v * pressure)));
             ui.end_row();
             ui.label("Deck weight").on_hover_text("The sheathing and anything fixed to it. The members' own weight is counted separately.");
             ui.add(egui::TextEdit::singleline(&mut d.dead).desired_width(70.0));
-            ui.label(d.pressure_name());
+            ui.label(on_deck(number(&d.dead, "").ok().map(|v| v * pressure)));
             ui.end_row();
         });
         ui.checkbox(&mut d.own_weight, "Count the members' own weight");
+        ui.checkbox(&mut d.show_load, "Draw the storage load as a stack on the deck").on_hover_text("As tall as boxed household storage of that weight would be, at 10 lb/ft\u{b3} (160 kg/m\u{b3})");
         ui.horizontal(|ui| {
             ui.checkbox(&mut d.trial, "Compare with every member at");
             ui.add_enabled(d.trial, egui::TextEdit::singleline(&mut d.trial_width).desired_width(44.0).hint_text("wide"));
@@ -228,8 +301,8 @@ pub fn dialog(app: &mut App, ctx: &Context, mut d: LoadsDlg) {
                 let other = trial.as_ref().and_then(|t| t.as_ref().ok());
                 if let Some(Err(e)) = &trial { ui.colored_label(colors.error, format!("Trial: {e}")); }
                 let length = d.length();
-                egui::Grid::new("members").num_columns(8).striped(true).show(ui, |ui| {
-                    for head in ["Member", "Section", "Carries", "Bending", "Shear", "Sag", "Span / sag"] { ui.label(RichText::new(head).color(colors.muted)); }
+                egui::Grid::new("members").num_columns(9).striped(true).show(ui, |ui| {
+                    for head in ["Member", "Section", "Carries", "Holds", "Bending", "Shear", "Sag", "Span / sag"] { ui.label(RichText::new(head).color(colors.muted)); }
                     if other.is_some() {
                         ui.label(RichText::new("Trial bending").color(colors.muted));
                         ui.label(RichText::new("Trial sag").color(colors.muted));
@@ -243,6 +316,8 @@ pub fn dialog(app: &mut App, ctx: &Context, mut d: LoadsDlg) {
                         let auto = result["tributary_mm"][body.to_string()].as_f64().map_or("none".to_owned(), |w| tidy(w / length));
                         let typed = d.widths.entry(body).or_default();
                         ui.add(egui::TextEdit::singleline(typed).desired_width(48.0).hint_text(auto)).on_hover_text("The width of deck this member carries. Empty takes it from the spacing of the members beside it.");
+                        // Everything on the member, its own weight included when that is counted.
+                        ui.label(force_text(m["uniform_load_n_per_mm"][1].as_f64().unwrap_or(0.0).abs() * m["geometry"]["length_mm"].as_f64().unwrap_or(0.0), d.us));
                         let ratio = |ui: &mut egui::Ui, m: &J, key: &str| {
                             let v = m[key].as_f64().unwrap_or(0.0);
                             ui.label(RichText::new(format!("{v:.2}")).color(if v > 1.0 { colors.error } else { colors.ink }).strong());
@@ -341,6 +416,40 @@ pub fn overlay(app: &mut App, painter: &Painter, d: &LoadsDlg) {
         (true, Some(Ok(t))) => t,
         _ => match now { Ok(r) => r, Err(_) => return },
     };
+    // The storage load as a stack standing on the deck, with what it weighs.
+    let live = d.case(false).map_or(0.0, |c| c.live_pa);
+    if d.show_load && live > 0.0 && let Some((corner, long, wide)) = Deck::of(&shown).outline() {
+        let deck = Deck::of(&shown);
+        let tall = DVec3::Z * (live / STACK_N_PER_M3 * 1000.0);
+        let at = |a: f64, b: f64, c: f64| crate::view::to_screen(app, corner + long * a + wide * b + tall * c);
+        let tint = Color32::from_rgba_unmultiplied(colors.accent.r(), colors.accent.g(), colors.accent.b(), 34);
+        let line = Stroke::new(1.2, colors.accent);
+        let faces = [
+            [(0.0, 0.0, 1.0), (1.0, 0.0, 1.0), (1.0, 1.0, 1.0), (0.0, 1.0, 1.0)],
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 1.0), (0.0, 0.0, 1.0)],
+            [(0.0, 1.0, 0.0), (1.0, 1.0, 0.0), (1.0, 1.0, 1.0), (0.0, 1.0, 1.0)],
+            [(0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0)],
+            [(1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (1.0, 1.0, 1.0), (1.0, 0.0, 1.0)],
+        ];
+        for face in faces {
+            let quad: Vec<_> = face.iter().map(|c| at(c.0, c.1, c.2)).collect();
+            painter.add(Shape::convex_polygon(quad.clone(), tint, Stroke::NONE));
+            painter.add(Shape::closed_line(quad, line));
+        }
+        // One arrow for the whole of it, down onto the middle of the stack.
+        let (tail, tip) = (at(0.5, 0.5, 1.0) - vec2(0.0, 46.0), at(0.5, 0.5, 1.0));
+        let heavy = Stroke::new(3.5, colors.accent);
+        painter.line_segment([tail, tip - vec2(0.0, 6.0)], heavy);
+        painter.add(Shape::convex_polygon(vec![tip, tip - vec2(8.0, 14.0), tip - vec2(-8.0, 14.0)], colors.accent, Stroke::NONE));
+        let height = tall.length();
+        let stacked = if d.us { format!("{:.1} ft", height / 304.8) } else { format!("{:.2} m", height / 1000.0) };
+        let text = format!("{} of storage, like boxes stacked {stacked} deep", force_text(live * deck.area() / 1e6, d.us));
+        let galley = painter.layout_no_wrap(text, egui::FontId::proportional(13.0), colors.ink);
+        let rect = egui::Rect::from_center_size(tail - vec2(0.0, 13.0), galley.size() + vec2(10.0, 6.0));
+        painter.rect_filled(rect, 3.0, colors.panel);
+        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, colors.accent), egui::StrokeKind::Inside);
+        painter.galley(rect.min + vec2(5.0, 3.0), galley, colors.ink);
+    }
     for m in shown["members"].as_array().into_iter().flatten() {
         let depth = m["section"]["depth_mm"].as_f64().unwrap_or(0.0);
         // The side of the section that stands in the frame: the one that is not level.

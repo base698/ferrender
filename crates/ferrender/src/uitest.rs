@@ -1507,7 +1507,7 @@ fn the_loads_panel_estimates_and_draws_tagged_members() {
         return;
     }
     // A millimetre design opens in kPa; the lumber boxes show the first member's values.
-    assert!(!d.us && d.live == "1.5" && d.lumber.e == "10000", "{d:?}");
+    assert!(!d.us && d.live == "1.5" && d.lumber.e == "10000" && d.show_load, "{d:?}");
     d.live = "2".into();
     d.dead = "0".into();
     d.own_weight = false;
