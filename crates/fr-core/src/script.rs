@@ -1118,6 +1118,16 @@ pub fn export_timeline_named(session: &Session, stem: &str) -> R<Export> {
         }
         source_push(out, " });\n")?;
     }
+    for (body, member) in &doc.structural_members {
+        // Native files retain stale tags for repair. Do not silently lose one
+        // in a script export if its source extrusion was deleted.
+        if !matches!(doc.feature(*body).map(|f| &f.kind), Some(crate::FeatureKind::Extrude(_))) {
+            return Err(format!("remove or repair structural member tag {body} before exporting the timeline"));
+        }
+        source_push(out, &format!("    set_structural_member(#{{ body: {body}, member: "))?;
+        rhai_literal(&serde_json::to_value(member).map_err(|e| e.to_string())?, out)?;
+        source_push(out, " });\n")?;
+    }
     let mut dropped = 0;
     for id in &doc.hidden_bodies {
         if doc.feature(*id).is_none() && session.built.body(*id).is_none() { dropped += 1; continue; }

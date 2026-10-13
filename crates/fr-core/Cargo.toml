@@ -4,6 +4,7 @@ version = "0.4.0"
 edition = "2024"
 
 [dependencies]
+fr-structure = { version = "0.4.0", path = "../fr-structure" }
 base64 = "0.23.1"
 crc32fast = "1"
 cadrum = { version = "=0.8.20", default-features = false }

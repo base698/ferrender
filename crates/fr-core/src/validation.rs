@@ -118,6 +118,8 @@ impl Clip {
 /// Broken feature dependencies remain loadable so they can be repaired in the timeline.
 /// Structural invariants needed for safe solver/kernel access must hold first.
 pub fn document(d: &Document) -> Result<(), String> {
+    if d.structural_members.len() > 1024 { return Err("at most 1024 structural member tags are supported".into()); }
+    for tag in d.structural_members.values() { tag.validate()?; }
     if d.features.len() > MAX_FEATURES || d.params.len() > 1024 {
         return Err("the document exceeds the feature or parameter limit".into());
     }

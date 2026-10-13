@@ -1447,6 +1447,7 @@ dependencies = [
  "cadrum",
  "crc32fast",
  "earcutr",
+ "fr-structure",
  "glam",
  "image",
  "libc",
@@ -1459,6 +1460,10 @@ dependencies = [
  "skrifa",
  "zip",
 ]
+
+[[package]]
+name = "fr-structure"
+version = "0.4.0"
 
 [[package]]
 name = "fs_extra"

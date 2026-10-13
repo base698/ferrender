@@ -66,6 +66,7 @@ Only these names are allowed; any other entry, any entry whose name contains `\`
 | `features` | array | The timeline, in order. At most 10 000. |
 | `hidden_bodies` | array of ids | Bodies hidden in the viewport. |
 | `body_names` | object, body id → string | Names given to bodies by hand. Omitted when empty; a body without an entry is called `Body1`, `Body2`, ... in the order the bodies are made. |
+| `structural_members` | object, extrusion id → member tag | Optional species, grade, nominal label, reference E/Fb/Fv in MPa with source and per-property factors, optional density in kg/m³ and end bearings in mm. At most 1024; omitted when empty. See [Structural analysis](STRUCTURAL_ANALYSIS.md). Geometry and computed results are not stored. Stale ids remain repairable but cannot be analyzed. Requires format 19 so older readers cannot silently discard engineering metadata. |
 | `next_id` | integer | The next feature id. Ids are never reused; pattern copies use `source_feature_id * 1000 + k`. |
 | `rollback` | integer, optional | How many features the timeline currently builds; absent means all. |
 | `active_component` | integer, optional | The component new features go into; absent or `0` is the root. |
@@ -162,6 +163,7 @@ A plane reference is `{"origin": "XY"|"XZ"|"YZ"}`, `{"plane": id}`, `{"face": {b
 | 16 | 0.4.0 | `ellipse` entities in sketches. |
 | 17 | 0.4.0 | `tilt` features. |
 | 18 | 0.4.0 | `body_names`. |
+| 19 | 0.4.0 | `structural_members` (preliminary timber-member analysis metadata). |
 
 The writer computes the lowest version that covers what the document uses; a reader accepts any version up to the newest it knows and refuses higher ones with "this file was written by a newer version of Ferrender". Older documents deserialize with absent fields taking their defaults. Legacy reference tags are upgraded only when the original pick has a unique verified match; ambiguous references remain errors for repair. The version is therefore a promise about *readers*, not a schema identifier, and a design can go down in version when the feature that required it is deleted.
 

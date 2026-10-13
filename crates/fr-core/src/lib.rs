@@ -27,6 +27,7 @@ pub mod sandboxfs;
 pub mod script;
 pub mod sketch;
 pub mod solver;
+pub mod structure;
 pub mod tag;
 pub mod threads;
 pub mod text;
