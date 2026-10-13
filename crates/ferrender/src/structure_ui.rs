@@ -299,16 +299,24 @@ pub fn dialog(app: &mut App, ctx: &Context, mut d: LoadsDlg) {
             Err(e) => { ui.colored_label(colors.error, e); }
             Ok(result) => {
                 let other = trial.as_ref().and_then(|t| t.as_ref().ok());
+                if d.show_trial && other.is_some() {
+                    ui.label(RichText::new(format!("Showing the trial: every member at {} \u{d7} {} {}. The design itself is unchanged.", d.trial_width.trim(), d.trial_depth.trim(), d.length_name())).color(colors.accent));
+                }
                 if let Some(Err(e)) = &trial { ui.colored_label(colors.error, format!("Trial: {e}")); }
                 let length = d.length();
                 egui::Grid::new("members").num_columns(9).striped(true).show(ui, |ui| {
                     for head in ["Member", "Section", "Carries", "Holds", "Bending", "Shear", "Sag", "Span / sag"] { ui.label(RichText::new(head).color(colors.muted)); }
-                    if other.is_some() {
-                        ui.label(RichText::new("Trial bending").color(colors.muted));
-                        ui.label(RichText::new("Trial sag").color(colors.muted));
+                    // The rows follow the drawing: the design as built, or the trial. The
+                    // other of the two is set beside them, named for what it is.
+                    let trial_shown = d.show_trial && other.is_some();
+                    let (main, beside) = match other { Some(t) if trial_shown => (t, Some(result)), _ => (result, other) };
+                    let beside_name = if trial_shown { "As built".to_owned() } else { format!("At {} \u{d7} {}", d.trial_width.trim(), d.trial_depth.trim()) };
+                    if beside.is_some() {
+                        ui.label(RichText::new(format!("{beside_name}: bending")).color(colors.muted));
+                        ui.label(RichText::new("sag").color(colors.muted));
                     }
                     ui.end_row();
-                    for m in result["members"].as_array().into_iter().flatten() {
+                    for m in main["members"].as_array().into_iter().flatten() {
                         let Some(body) = m["body"].as_u64().map(|b| b as Id) else { continue };
                         let name = app.session.built.body(body).map_or(format!("Body {body}"), |b| b.name.clone());
                         if ui.selectable_label(app.sel_body == Some(body), name).clicked() { app.sel_body = Some(body); }
@@ -327,7 +335,7 @@ pub fn dialog(app: &mut App, ctx: &Context, mut d: LoadsDlg) {
                         ratio(ui, m, "shear_utilization");
                         ui.label(sag_text(sag(m), d.us));
                         ui.label(if sag(m) > 1e-9 { format!("L / {:.0}", span(m) / sag(m)) } else { "\u{2014}".into() });
-                        if let Some(t) = other.and_then(|t| find(t, body)) {
+                        if let Some(t) = beside.and_then(|t| find(t, body)) {
                             ratio(ui, t, "bending_utilization");
                             ui.label(sag_text(sag(t), d.us));
                         }
