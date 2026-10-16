@@ -98,26 +98,16 @@
     },
     {
       "name": "num-modular",
-      "version": "0.6.6",
-      "license": "MIT OR Apache-2.0",
+      "version": "0.6.5",
+      "license": "Apache-2.0",
       "repository": "https://github.com/cmpute/num-modular",
-      "source_commit": "7439ff309dd695bf32ab83fa7dbef881bd433f4d",
-      "crate_sha256": "26ac76200f74e658124f95fa63e1a82b2fd2181c5b2fdde80b3d89d2d3f905e7",
+      "source_commit": "38062e0666b5de93a6f63b7c754615329b0fc86a",
+      "crate_sha256": "bd8e500409e6cd603b03e477c26a6caecdc27ac58979a53e881c75eafc079f44",
       "files": [
         {
-          "path": "num-modular-0.6.6/LICENSE-APACHE",
-          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
-          "source": "crate:LICENSE-APACHE"
-        },
-        {
-          "path": "num-modular-0.6.6/COPYING",
-          "sha256": "b72a775087f5989161ef6d88626df7c57733e22c592d4571f5d6b33b7c6d3df8",
-          "source": "crate:COPYING"
-        },
-        {
-          "path": "num-modular-0.6.6/LICENSE-MIT",
-          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
-          "source": "crate:LICENSE-MIT"
+          "path": "num-modular-0.6.5/LICENSE",
+          "sha256": "98b52ccf20010b67d8fd3bdf151f50ecdfc01f25d6de190e015dd436d9f7ea0b",
+          "source": "crate:LICENSE"
         }
       ]
     },
