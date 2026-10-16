@@ -343,8 +343,11 @@ fn read_entry(archive: &mut ZipArchive<Cursor<&[u8]>>, name: &str, max: usize) -
 fn open_container(bytes: &[u8]) -> Result<ZipArchive<Cursor<&[u8]>>, String> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a Ferrender container: {e}"))?;
     if archive.len() > MAX_ENTRIES { return Err("the container has too many entries".into()); }
-    if let Some(bad) = archive.file_names().find(|n| !entry_allowed(n)) {
-        return Err(format!("the container has an unexpected entry: {bad}"));
+    for name in archive.file_names() {
+        let name = name.map_err(|e| format!("the container has an unreadable entry name: {e}"))?;
+        if !entry_allowed(&name) {
+            return Err(format!("the container has an unexpected entry: {name}"));
+        }
     }
     let mut expanded = 0u64;
     for i in 0..archive.len() {
@@ -659,13 +662,14 @@ mod cache_trust_tests {
     fn rewrite(bytes: &[u8], edit: impl Fn(&str, Vec<u8>) -> Vec<u8>) -> Vec<u8> {
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         let mut out = ZipWriter::new(Cursor::new(Vec::new()));
-        out.set_raw_comment(archive.comment().into()); // replay the original MAC, as an attacker could
+        out.set_raw_comment(archive.comment().into()).unwrap(); // replay the original MAC, as an attacker could
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).unwrap();
             let mut payload = Vec::new();
             entry.read_to_end(&mut payload).unwrap();
-            out.start_file(entry.name(), SimpleFileOptions::default()).unwrap();
-            out.write_all(&edit(entry.name(), payload)).unwrap();
+            let name = entry.name().unwrap().into_owned();
+            out.start_file(name.as_str(), SimpleFileOptions::default()).unwrap();
+            out.write_all(&edit(&name, payload)).unwrap();
         }
         out.finish().unwrap().into_inner()
     }

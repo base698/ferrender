@@ -291,7 +291,7 @@ pub fn read_3mf(path: &Path) -> Result<Mesh, String> {
     let (file, _) = open(path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("{} is not a 3MF archive: {e}", path.display()))?;
     if archive.len() > MAX_3MF_ENTRIES { return Err("the 3MF has too many archive entries".into()); }
-    let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    let names: Vec<String> = archive.file_names().map(|n| n.map(|n| n.into_owned())).collect::<Result<_, _>>().map_err(|e| format!("the 3MF has an unreadable entry name: {e}"))?;
     let model = names.iter().find(|n| n.eq_ignore_ascii_case("3D/3dmodel.model")).or_else(|| names.iter().find(|n| n.to_ascii_lowercase().ends_with(".model"))).ok_or("the 3MF has no model file")?;
     let mut xml = String::new();
     let entry = archive.by_name(model).map_err(|e| format!("could not read the 3MF model: {e}"))?;

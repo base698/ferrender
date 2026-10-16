@@ -44,7 +44,7 @@ fn volumes(s: &Session) -> Vec<(u32, f64, usize)> {
 fn entries(path: &PathBuf) -> Vec<String> {
     let bytes = std::fs::read(path).unwrap();
     let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-    let mut names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    let mut names: Vec<String> = archive.file_names().map(|n| n.unwrap().into_owned()).collect();
     names.sort();
     names
 }
@@ -102,7 +102,7 @@ fn a_cache_that_disagrees_is_discarded_and_the_design_rebuilds() {
             let mut f = archive.by_index(i).unwrap();
             let mut data = Vec::new();
             std::io::Read::read_to_end(&mut f, &mut data).unwrap();
-            let fname = f.name().to_owned();
+            let fname = f.name().unwrap().into_owned();
             out.start_file(fname.clone(), zip::write::SimpleFileOptions::default()).unwrap();
             std::io::Write::write_all(&mut out, &edit(&fname, data)).unwrap();
         }
@@ -172,7 +172,7 @@ fn a_newer_file_shows_its_cache_read_only() {
         let mut f = archive.by_index(i).unwrap();
         let mut data = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut data).unwrap();
-        let name = f.name().to_owned();
+        let name = f.name().unwrap().into_owned();
         if name == "design.json" {
             let mut v: J = serde_json::from_slice(&data).unwrap();
             v["version"] = json!(io::FORMAT_VERSION + 1);

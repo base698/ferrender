@@ -49,7 +49,7 @@ fn design(image: bool) -> Session {
 fn entries(path: &Path) -> Vec<String> {
     let bytes = std::fs::read(path).unwrap();
     let archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
-    let mut names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    let mut names: Vec<String> = archive.file_names().map(|n| n.unwrap().into_owned()).collect();
     names.sort();
     names
 }
