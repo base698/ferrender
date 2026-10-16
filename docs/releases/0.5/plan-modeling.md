@@ -95,10 +95,28 @@ cadrum's `color` feature (per-face colour map on a solid, on by default) is avai
 - Named views and simple annotation for reviewing a draft before detailing.
 - STEP export keeps the component hierarchy (assembly STEP), which also makes colour export meaningful.
 
-## 5. Suggested order
+## 5. Measure: points on faces and sizes of round things (suggested 2026-10-16)
+
+Found measuring the 3 in soccer ball. Measure ([view.rs](../../../crates/ferrender/src/view.rs) `pick_item`, [measure.rs](../../../crates/fr-core/src/measure.rs)) works between whole items: a click on a face picks the entire face, not the spot clicked. Two clicks on the ball give the closest gap between two faces, 0 on the same face or the seam width between neighbouring panels, and there is no way to measure point to point across a smooth surface. The only points it takes are sketch points and edge ends. A single picked face states its diameter only when it is a cylinder (`exact::barrel`); a sphere reads as "Curved face" with its area.
+
+For comparison (from memory, not checked against current releases): Fusion's Measure is also pick-based, with a selection filter, and a single pick reports that item's own size (an edge's length, a circular edge's or cylinder's radius, a face's area), with snaps to arc and circle centres. Blender's Measure tool is a ruler dragged between any two points: each end lands where the cursor meets a surface, Ctrl snaps to vertices and edges, and Shift-drag gives a protractor. The N panel shows bounding-box dimensions. Neither has a ready-made circumference readout; MeasureIt add-ons cover that.
+
+Suggested:
+
+1. **Points on faces.** With a modifier held, or a "points" toggle in the dialog, a click on a face picks the exact spot hit, as in Blender. Snap points for edge midpoints and the centres of circles, arcs and spheres.
+2. **Sizes for a single pick**, shown as soon as one thing is picked:
+   - Sphere face: diameter, circumference and centre.
+   - Cylinder or hole: diameter, circumference and length.
+   - Circle or arc edge: diameter, circumference and arc length.
+   - Whole body: overall size, volume and surface area.
+
+   On the ball, one click would read Ø 3.000 in, circumference 9.425 in. The same sizes belong in the MCP `measure` command.
+
+## 6. Suggested order
 
 1. Done before 0.4.0 shipped: section 1 (a), (b), the cache reason, and the `"edges": "all"` bug (2.4). The evaluation's follow-up checks 1 and 2 on the house itself remain to be rerun on the release build.
 2. Decide incremental rebuild (1c) and cache budget (1d) with [the scripts isolation decision](plan-scripts.md#1-isolation-the-one-that-changes-the-architecture); they share the question of what a feature's output is.
 3. Loft, then 3-D sweep paths with twist and scale, then n-point splines (section 2). The pumpkin script in the archive is the acceptance model: it should shrink to about five features and rebuild in well under a second.
 4. Per-component appearance (3.1), then the shading model (3.2).
 5. Section 4 as time allows, reparenting and body naming first.
+6. Section 5 (Measure) is small and independent; it can go in whenever there is a gap.
