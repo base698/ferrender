@@ -1,0 +1,283 @@
+# Ferrender 0.4 release plan
+
+Status: **built as 0.4.0 on branch `0.4-dev`; not yet merged to `main`, tagged or released** (draft PR #4, awaiting the [acceptance run](acceptance.md)). Written 2026-10-08 as the plan against 0.3.0 (commit 4cdcf2c) and updated step by step with what was built (see the **Done** notes under [Order of work](#order-of-work) and the release notes in `releases/0.4.0.md`). This replaces the separate scripts and file-format plans; the research behind them is summarised here and the sources are kept at the end.
+
+0.4 has five features. Two are the ones already planned, now with their deferred parts pulled in; three are new.
+
+| # | Feature | One line |
+|---|---|---|
+| 1 | [File format](#1-file-format) | Keep the JSON document; add an optional ZIP container for binary payloads, a thumbnail and a written spec. |
+| 2 | [Geometry cache](#2-geometry-cache) | Save the built B-rep beside the design so a file opens without a rebuild and old apps can still view new files. |
+| 3 | [Face and edge identification](#3-face-and-edge-identification) | Name picked faces and edges by how they were made, not only by where they are, so fillets, shells, planes and text stop landing on the wrong face after an upstream edit. |
+| 4 | [Mesh editing](#4-mesh-editing) | An indexed mesh body that can be large, repaired, decimated, smoothed, sculpted, cut and combined; a relief from an image; an MCP tool set. Acceptance: a multi-million-triangle STL stays usable, and a face relief is made from a photo over MCP. |
+| 5 | [Scripts](#5-scripts) | Rhai scripts with declared inputs, a Scripts menu, a timeline chip that re-runs, `ferrender run` and `ferrender check`, MCP tools and five samples. |
+
+[Order of work](#order-of-work), [tests](#release-tests), [release checklist](#release-checklist), [not in 0.4](#not-in-04) and [sources](#sources) follow the features. File format version goes from 8 to **9** for the container (0.3.0 already spent 6, 7 and 8 on grid patterns, primitives and split/remove); later 0.4 features that change `design.json` take 10 and up. Every new thing is gated as today, so a plain design still saves as the lowest version that can read it.
+
+**Progress:** all nine implementation areas are present on branch `0.4-dev`. The original design proposals below are not a claim that every acceptance target was reached; [the independent review](review.md) records current behavior, fixes, measured coverage and remaining limits. Where the result differs from the plan, the step's note says so: one CRC per design instead of per-body prefix hashes in the cache, Deflate instead of zstd, no region subdivision, no `META.shortcut` key bindings, and 8-bit relief images. Two earlier differences were closed during review: the BSP Boolean was replaced by Manifold, as the plan asked, and `confirm`/`ask` are answered in the app.
+
+**Checked against the code on 2026-10-09 (`2014b67`).** These smaller plan items are also not in 0.4.0 and were not recorded before:
+
+- `ferrender check --retag` does not exist. `ferrender check --save` rewrites a design, which records its tags.
+- `get_scene_info` reports `container` but not `thumbnail`.
+- There is no separate `mesh_region` command. Regions are an argument of the mesh commands and are not stored for reuse.
+- The timeline does not say how a pick was found. `get_object_info` reports `"resolved"`; there is no tooltip.
+- Inline JSON meshes are read up to 1 M triangles, not only below 20 000; any design with a mesh saves as a container.
+- JPEG reference images are re-encoded as PNG, not kept as JPEG.
+- The stress-table targets for orbit frame rate and decimation time at 5 M and 12 M triangles were not measured. Import, pick, save and reopen were, on synthetic meshes of those sizes and on real scans up to 3.5 M, and met their targets. The one large Boolean measured, a 7 k-triangle tool against the 3.5 M scan, took 27 s where the table asks for under 8 s at 5 M.
+- The second acceptance test (a face relief that is recognisably the person, printed) has a passing rebuild and STL export but no human judgment and no print.
+
+**Added outside this plan:** Sweep, a sixth feature (PR #3): a profile carried along a planar path, with mitred corners. It can also cover only parts of its path (PR #6). It is described in the README and the release notes and has checks S1 to S6 in the test plan. What 0.4 leaves open for scripts is collected in [0.5-scripts.md](../0.5/plan-scripts.md).
+
+---
+
+## 1. File format
+
+### What we have
+
+A `.ferr` is pretty-printed JSON from `fr_core::io::to_json`: units, parameters, an ordered feature list, hidden bodies, `next_id`, rollback, active component. Bodies are never stored. Faces and edges are named by a point plus the body's bounds at pick time. Reference images are base64 PNG inside the JSON; imported STLs are stored as JSON triangle coordinates. The writer stamps the lowest version that can read the file; readers refuse higher. Designs are 5–45 kB. Measured on the designs now archived under `~/Documents/3d/ferrender/models/chess/`: rook 11.5 kB pretty, 4.2 kB compact, 1.5 kB zstd.
+
+### What the research said
+
+Fusion's `.f3d` (taken apart from the 81 files on this machine and the Backup volume) is a ZIP of undocumented binary object streams plus cached ShapeManager B-rep stamped with the kernel build, a thumbnail, materials and raw image blobs; its layout changed twice in two years, the 2026 saves switched to Zstandard entries that `unzip` cannot read, and the manifest's version string never moved. FreeCAD is a ZIP of `Document.xml` plus one `.brp` per object plus a thumbnail. Inventor and SolidWorks are OLE compound files with cached bodies, which is what lets an older SolidWorks *view* a newer file. Onshape is a database. SolveSpace, Dune3D, CADmium and the code-CAD tools are single text files with history only. Ferrender's version rule is Dune3D's and 3MF's rule word for word. The one recorded argument against a single JSON document, FreeCAD's 2014 answer to "save as JSON for git", was "makes not much sense if we had to embed our BREP files".
+
+### Decision
+
+Keep the JSON document model, rebuild-on-open as the source of truth, the lowest-version stamp, serde-default schema growth, the size limits and the `.ferr` extension. Change the packaging:
+
+1. **Container.** When a document has reference images, imported meshes, a geometry cache or a thumbnail to carry, write a ZIP (Deflate for text, Store for already-compressed media, never Zstandard) with:
+   - `design.json`: today's JSON, except that image and mesh fields hold a path (`"blob": "images/3.png"`) instead of bytes;
+   - `images/<feature-id>.<png|jpg>`: original bytes, so a JPEG stays a JPEG;
+   - `meshes/<feature-id>.bin`: indexed mesh (see [mesh format](#mesh-body-format)), so a 5 M-triangle import is 60 MB, not 600 MB of JSON;
+   - `cache/…`: the [geometry cache](#2-geometry-cache);
+   - `thumbnail.png`: 256 px isometric render written on every save;
+   - `manifest.json`: `format`, `version`, `min_reader`, `app` (semver and git commit from `build_info`), `kernel` (cadrum and OCCT versions), `saved` (RFC 3339).
+   
+   Plain designs stay single JSON files, so git diffs, MCP round-trips and every existing test are untouched. Readers sniff the first bytes (`{` or `PK`).
+2. **Spec.** A normative `docs/FILE_FORMAT.md`: every feature kind's fields and units, reference semantics, the version table (1 base · 2 text · 3 images, splines, position dimensions · 4 angle locks · 5 components and planes · 6 grid patterns · 7 primitives · 8 split and remove · 9 container · 10+ for mesh bodies, element ids, cache and scripts as they land), and the compatibility promise. A test serialises one feature of every kind against checked-in fixtures so schema drift is deliberate.
+3. **Recovery files** use the same writer. **MCP** `save`/`open` are unchanged; `get_scene_info` reports `"container": true/false` and `"thumbnail"`.
+
+### Model changes
+
+- `reference::Image` and `FeatureKind::Import` gain a storage enum: `Inline(bytes)` (reads today's files) or `Blob(path)`.
+- `io::save` chooses JSON or ZIP; `io::load` sniffs; per-entry and total size limits; declared-size and path-traversal checks before any decompression; the `zip` crate, no external tools.
+- Thumbnail from the existing offscreen renderer (`render::snapshot`).
+
+### Why not
+
+Always-ZIP ends text readability for every design. Side-car files break when one file moves. Compact JSON saves 3× and costs diffability. SQLite is for assemblies Ferrender does not target. A binary design encoding is Fusion's mistake.
+
+---
+
+## 2. Geometry cache
+
+Previously deferred "until a design takes two seconds to open". It is in 0.4 because three things now need it: large mesh bodies make rebuild-on-open expensive even when nothing exact changed, the scripts feature's `ferrender check` wants a fast load of many files, and a cached shape is the only way an older app can show a file that uses a newer feature (the SolidWorks property).
+
+### Design
+
+- One entry per exact body: `cache/<body-id>.brep.zst`, cadrum `write_brep`, zstd-compressed inside the ZIP entry (Store at the ZIP level so it is not compressed twice). Mesh bodies are already stored as blobs and need no cache.
+- `cache/index.json`: for each body the hash of the **design prefix** that produced it (the JSON of every feature up to and including the one that last changed the body, plus parameters), the kernel version, triangle count, bounds and volume.
+- **On open:** if the manifest's kernel version matches and every body's prefix hash matches the document, the bodies are loaded from the cache and the timeline is marked **built from cache**. The first edit triggers the normal rebuild from that feature onward. A mismatch on any body discards the whole cache and rebuilds; nothing is ever half-cached.
+- **Verification:** after loading from cache, volumes and bounds are compared with the index; a mismatch discards the cache. `ferrender check --rebuild` rebuilds and compares against the cache to catch kernel drift in CI.
+- **Viewing in an older app:** a 0.4 app opening a file whose `design.json` is version 7 will still refuse to edit, but shows the cached bodies read-only with a banner, the way SolidWorks views next-year files. This needs the reader to load `manifest.json` and `cache/` before it parses `design.json`, which is why the manifest carries the version.
+- **Not cached:** sketches (cheap), modeled threads (they are meshes already in the body), hidden state.
+- **Size.** OCCT BRep text is roughly 5–20× the JSON before compression; zstd brings it to 1–3×. A 20-feature design with fillets is expected to carry a 100–300 kB cache. The cache is skipped when it would exceed 32 MB and the index says so.
+- **Open-time benchmark** in the tests: rebuild versus cache-load for the bishop, the rook, the 0.3.0 bearing fixtures and a fillet-heavy fixture; cache-load must be under 200 ms for all of them.
+
+### Risks
+
+Kernel-version coupling, exactly as in Fusion: handled by the version check and the discard-and-rebuild path, which is never wrong, only slower. A second truth: handled by never trusting the cache without the hash, the kernel version and the volume check all agreeing.
+
+---
+
+## 3. Face and edge identification
+
+Previously deferred as "hints on references". It is in 0.4 in full because every feature that picks topology (fillet, chamfer, shell, hole, thread, text, construction planes, split, and the scripts' face inputs) inherits the same failure: a point plus bounds finds the wrong face after an upstream change reshapes the area. The 0.3.0 test plan lists it as the known limitation.
+
+### What others do
+
+Four strategies were found: opaque persistent keys (Inventor, SolidWorks, Fusion's `entityToken`; the Fusion streams are full of `edge_recipe_data` built from progenitor vertices and sketch curve ids), queries re-evaluated on rebuild with cached ids (Onshape), history-derived names (FreeCAD 1.0 element maps, hashed when long and versioned so an algorithm change forces a recompute), and geometric re-finding by position (Dune3D for fillets, Ferrender). NIST's 2007 construction-history exchange prototype called naming a picked edge by its midpoint "very susceptible to geometric accuracy problems". The cheapest robust upgrade is the pairing Onshape uses: keep the geometric query, but also store a name derived from the creating feature, prefer the name on rebuild, fall back to the point.
+
+### Design
+
+Every face and edge of an exact body gets a **tag** while the body is built, and references store the tag beside the point and frame they store today.
+
+```rust
+// crates/fr-core/src/tag.rs
+pub enum Origin {
+    /// A side face swept from a sketch entity by an extrude or revolve.
+    Swept { feature: Id, entity: Id },
+    /// An extrude's start or end cap, a revolve's start or end face.
+    Cap { feature: Id, end: bool },
+    /// Made by a fillet, chamfer, shell, hole, thread, primitive or text: the feature and its ordinal within it.
+    Made { feature: Id, n: u32 },
+    /// A face that survived a boolean unchanged, or was split by one: the original tag plus a split ordinal.
+    Split { of: Box<Tag>, n: u32 },
+}
+pub struct Tag { pub origin: Origin, pub kind: Kind /* Plane | Cylinder | Cone | Sphere | Torus | Spline | Line | Circle | Ellipse | Curve */ }
+pub struct Ref {                    // replaces the bare (point, frame) pairs in Blend, Shell, Thread, Text, PlaneRef, PointRef, Hole direction picks
+    pub at: DVec3,
+    pub frame: Option<[DVec3; 2]>,
+    #[serde(default)] pub tag: Option<Tag>,
+    #[serde(default)] pub hint: Option<Hint>,   // normal or axis at pick time, and area or length
+}
+```
+
+- **Tagging at creation** is exact: an extrude knows which sketch entity each side face came from (cadrum's face order follows the wire; verified by matching the face's surface against the entity's curve), and caps are the two faces whose normal is the plane normal. Fillets, chamfers, shells, holes and threads tag their new faces `Made` in the order the kernel returns them. Primitives and text likewise.
+- **Carrying tags through booleans** is the hard part. First choice: cadrum exposes OCCT's `BRepAlgoAPI` history (`Modified`, `Generated`, `IsDeleted`) and tags follow it directly. If it does not (to be established in the first week; a small upstream PR is the fallback plan), tags are propagated after each operation by matching every result face to the pre-operation faces by surface identity and overlapping extent, which is the step-by-step version of what the resolver does today and far more reliable than re-finding from a point across the whole history. Faces with no match are `Split` children of the face whose surface they lie on, numbered by angle around the surface's axis or by position along it, so the numbering is stable across rebuilds.
+- **Resolution** on rebuild, in order: a face whose tag equals the stored tag; else faces with the same `origin` ignoring the split ordinal, disambiguated by the hint and the point; else the current point-plus-frame search, filtered by `kind` and hint. The resolver reports which level matched; `get_object_info` shows it, and the timeline tooltip says "found by tag" or "found by position", which makes the behaviour inspectable.
+- **Old files** have no tags: references keep working by position, and gain tags the first time the user touches the feature or when `ferrender check --retag` is run.
+- **Mesh bodies** keep position-only references (they have no construction).
+- **API.** `get_object_info` on a body lists faces and edges with `tag`, `kind`, `point`, as today plus the tag; every command that takes `{"body","point"}` also accepts `{"body","tag":{...}}` and scripts prefer tags.
+- **Tests:** the bearing block fixture with a fillet on an edge that moves when the block grows (position would miss, tag must hit); a shell whose open face is split by a later cut; text on a face after the face is halved by a hole; the 0.3.0 planes test suite re-run with tags; a boolean that deletes a tagged face produces the existing "face is gone" error, not a silent relocation.
+
+---
+
+## 4. Mesh editing
+
+Ferrender has mesh bodies today: an imported STL is a `Mesh { tris: Vec<[DVec3; 3]> }` triangle soup, booleans against it go through `csg.rs` with a 60 000-triangle limit, it can be moved, patterned, cut and joined, and it is stored as JSON. That is enough to drop a scanned part into a design and not enough to work on it. 0.4 makes meshes a first-class body kind.
+
+### The two acceptance tests
+
+1. **Large STL stress test.** A set of real files: a 1 M-triangle 3D scan, a 5 M-triangle scan, and a 12 M-triangle sliced-model export (sourced from public scan repositories and this machine's print folders; checked into a non-git fixtures location with a download script). Targets on the development Mac, release build:
+
+   | Operation | 1 M | 5 M | 12 M |
+   |---|---|---|---|
+   | Import (STL to indexed mesh, stitched) | < 1.5 s | < 7 s | < 20 s |
+   | Orbit frame rate after import | 60 fps | 60 fps | ≥ 30 fps |
+   | Face/vertex pick under the pointer | < 20 ms | < 50 ms | < 100 ms |
+   | Decimate to 10 % | < 4 s | < 20 s | < 60 s |
+   | Save and reopen through the container | < 2 s | < 8 s | < 20 s |
+   | Boolean cut with a 10 k-triangle tool | < 2 s | < 8 s | refused with a clear message above the limit, or decimate first |
+   | Peak memory | < 0.5 GB | < 2 GB | < 5 GB |
+
+   Undo across these operations must stay bounded: the undo stack stores the document, not meshes, so mesh edits are features that re-apply (below), and the snapshot cost is the feature list, not the triangles.
+2. **A face from a photo, over MCP.** Starting from a portrait photo on disk, an MCP client (Claude) produces a printable relief of the face using only Ferrender's tools: `mesh_from_image` on a depth map, `mesh_smooth`, `mesh_decimate`, `mesh_cut` to trim the border, a plaque made with the normal sketch tools, `combine` to mount it, `export_stl`, and a `get_viewport_screenshot` at each step to judge the result. The depth map comes from a depth-estimation model run outside Ferrender (the client has such tools; Ferrender does not ship a neural network), and `mesh_from_image` also accepts the plain photo as a luminance height map for the lithophane-style fallback. The test passes when the exported STL is watertight, prints on an FDM printer at 100 mm wide, and the result is recognisably the person. The session transcript becomes a tutorial.
+
+### Mesh body format
+
+A new `fr_core::mesh::Indexed { positions: Vec<Vec3f>, indices: Vec<[u32; 3]>, attributes }` replaces the soup for stored and edited meshes; the soup type stays as the tessellation output of exact bodies. Half-edge adjacency is built on demand and cached per rebuild. Stored in the container as `meshes/<id>.bin`: a 32-byte header, `f32` positions, `u32` indices, optional per-vertex colour, little-endian, with the count and a CRC in the header; 12 bytes per vertex and 12 per triangle, so 5 M triangles is about 90 MB uncompressed and 40 MB Deflated. Inline JSON remains readable for old files and is written only below 20 000 triangles.
+
+### Operations
+
+Each is a feature in the timeline that takes a mesh body and produces a mesh body, so the history is editable and undo is cheap. Names are the API ops; the UI exposes them under a **Mesh** menu with the same dialogs pattern as the solid features.
+
+| Op | What it does | Notes |
+|---|---|---|
+| `import_stl` | as today, plus binary STL streaming, OBJ and 3MF (mesh only), stitching, and a report of open edges, components and non-manifold edges | the only op that creates a mesh from a file |
+| `mesh_repair` | stitch, remove duplicate and degenerate triangles, fix orientation, fill holes up to N edges, drop small shells | runs automatically on import with a summary; explicit for later |
+| `mesh_decimate` | quadric edge collapse to a target triangle count or error | preserves boundary and sharp edges above an angle |
+| `mesh_smooth` | Taubin smoothing (no shrink) with iterations and strength, optionally within a region | |
+| `mesh_subdivide` | Loop or midpoint subdivision, optionally within a region | needed for sculpting coarse meshes |
+| `mesh_cut` | cut by a plane, construction plane or face; keep one side or both | reuses `split_body` semantics |
+| `mesh_mirror` | mirror across a plane, with optional weld at the seam | |
+| `mesh_offset` | thicken an open shell or hollow a closed one by a distance | makes a relief printable |
+| `mesh_sculpt` | a brush: `push`, `pull`, `smooth`, `flatten`, `inflate` at a point with radius, strength and falloff; one feature per stroke, strokes mergeable | the UI brush records strokes as the same op |
+| `mesh_region` | select triangles by paint, by plane side, by normal cone, or by connected component; returns a region id used by other ops | regions are stored on the feature that made them |
+| `mesh_extrude_region` | move a region along its average normal or a direction, building side walls | |
+| `mesh_from_image` | a relief: an image becomes a height field on a rectangle of given width, depth range, resolution and optional base thickness; `invert`, `blur`, `gamma`; luminance or a 16-bit depth PNG | the lithophane and the face relief |
+| `mesh_boolean` | union, difference, intersection of meshes, and mesh against exact (exact is tessellated at the fine setting) | replaces `csg.rs` and its 60 000 limit; see below |
+| `mesh_measure` | triangles, watertight, volume, surface area, components, bounds, thickness estimate at a point | |
+| `mesh_to_solid` | not in 0.4 (see [Not in 0.4](#not-in-04)); `project` from a mesh face region onto a sketch plane is in, so outlines can still drive exact features | |
+
+**Booleans.** `csg.rs` is a BSP CSG that cannot scale. The replacement is a BVH-accelerated mesh boolean with exact predicates for intersection and a robust retriangulation (the design follows the published approach of Manifold; a Rust implementation exists and is evaluated first, otherwise it is written against the same tests). Inputs must be watertight and oriented; `mesh_repair` runs first and the op refuses with a reason otherwise. Exact bodies combined with meshes remain meshes, as today.
+
+**Display.** Indexed GPU buffers with per-body vertex and index buffers uploaded once per rebuild, not per frame; a coarse level of detail for orbiting when a body exceeds 2 M triangles; picking through a BVH kept with the body; section analysis works on meshes.
+
+**Picking and references.** Mesh "faces" for the existing face-based features are connected regions bounded by sharp edges (the `Mesh::face` grouping that exists today), so `create_sketch` on a flat region and `extrude` of a flat region keep working on large meshes within the pick budget above.
+
+### Data model
+
+```rust
+pub enum FeatureKind {
+    // ...existing...
+    MeshOp(MeshOp),     // body, op, parameters, optional region
+}
+pub struct Body { /* ... */ pub mesh: MeshData /* Soup for exact tessellation, Indexed for mesh bodies */, pub bvh: OnceCell<Bvh> }
+```
+
+Mesh ops carry the same `owner`, suppression and roll-back behaviour as other features. Regions and sculpt strokes reference vertices by index; a `mesh_decimate` or `mesh_subdivide` earlier in the timeline than a stroke renumbers vertices, so such edits are refused when a later feature depends on the indices ("a later sculpt stroke uses this mesh; put the decimate after it"), which mirrors the fillet-last guidance for solids.
+
+### MCP
+
+All ops above as commands; `get_object_info` on a mesh body returns the measure block and the region list; `mesh_from_image` takes a path on disk; the reference gains a Mesh section; the face-from-photo transcript is the worked example in the reference.
+
+---
+
+## 5. Scripts
+
+Condensed from the earlier plan; the design is unchanged except where the other 0.4 features touch it (tags in face inputs, mesh ops as wrappers, container-aware `save`).
+
+### Why
+
+Five uses recur across the Fusion API forum, the App Store, Onshape's FeatureScript library and the code-CAD tools: variants (change parameters, export, repeat), bulk export and archiving, generators (a part from a few inputs), repetitive modelling tasks, and code-CAD (the model as text, rebuilt by a machine, checked in CI). Ferrender's JSON command API already gives every operation a shape; scripts add control flow, files, inputs and a place in the timeline.
+
+### What ships
+
+- **Rhai** scripts with a `META` block (name, description, inputs, shortcut) and `run(inputs)`. Rhai is pure Rust and supports operation/size limits and a progress callback; Ferrender must explicitly disable filesystem imports and restrict host calls, and cancellation cannot interrupt a running native modeling call, and converts to and from `serde_json::Value` directly.
+- **Host functions:** one wrapper per API op generated from the same table as `REFERENCE` (a test asserts the two never drift); `command(map)` for dynamic command dispatch (the name `run` is reserved for the script entry point); reading functions `scene()`, `info(id)`, `params()`, `errors()`, `selection()`, `screenshot(path, opts)`, `measure(...)`; files `read_text`, `write_text`, `read_csv`, `write_csv`, `list_files`, `exists`, `mkdir`, `join`, `basename`, `document_dir()`, `script_dir()`, every path checked against an allowed set (script folder, document folder, folders chosen in the dialog, `--allow` headless); flow `log`, `progress`, `confirm`, `ask`, `fail`, `name_template`.
+- **Limits:** 50 M operations, 64 call levels, 1 MB strings, 1 M arrays, 100 k maps, no `eval`, no `import` in 0.4.
+- **Scripts menu** between Model and View: user scripts from `scripts/` beside `config.toml` and from a `scripts/` folder beside the open document, bundled **Samples** with Copy to My Scripts, New Script, Open Scripts Folder, Reload, Export Timeline as Script, Show Script Log. `META.shortcut` works anywhere outside a text box.
+- **Inputs dialog** generated from `META.inputs`: `length`/`angle` (the Extrude value box, with `inputs.expr` carrying the typed expression so parameters stay live), `number`, `integer`, `bool`, `choice`, `text`, `folder`, `file`, and `body`/`face`/`sketch` picks prefilled from the selection; last values remembered per script.
+- **Execution** on a worker thread against a copy of the session, progress window with Cancel, the main window refusing edits meanwhile, the result committed as one undo step; exports-only runs leave no step.
+- **`ScriptRun` timeline chip** owning the features a run made (`Feature.made_by`), storing inputs and the embedded source; Edit inputs and re-run, Re-run, Detach, Rename, Suppress (suppresses what it made), Delete. Re-run resumes `next_id` from the original first id so later features that referenced made bodies usually survive.
+- **Export Timeline as Script** writes a script that rebuilds the open document with every parameter as an input; the on-ramp to generators and the honest answer to "record a macro".
+- **CLI:** `ferrender run script.rhai [design.ferr] [--input k=v]... [--allow DIR]... [--yes] [--save] [--strict]` with exit codes 0/1/2/3, and `ferrender check design.ferr` (exit 1 with the error list when the timeline has errors; `--rebuild` and `--retag` from features 2 and 3).
+- **MCP:** `list_scripts`, `run_script` (`path` or `source`, `inputs`, `allow`), and a Scripts section in the reference so the Assistant writes and saves scripts.
+- **Samples,** one per use case and each a test fixture: `variants.rhai`, `export-folder.rhai`, `spur-gear.rhai`, `boss-at-points.rhai`, `ci-check.rhai`. A sixth, `face-relief.rhai`, scripts the mesh acceptance test end to end once feature 4 exists.
+
+### Data model
+
+`FeatureKind::ScriptRun { script_name, source, source_hash, inputs }`, `Feature.made_by: Option<Id>`; a `ScriptRun` builds nothing and suppressing or deleting it applies to everything with `made_by == id`. Validation: `made_by` names an earlier `ScriptRun`, source ≤ 1 MB, inputs is an object. Config: `[scripts] last_inputs`, `allowed_dirs`, `shortcuts`.
+
+### Risks
+
+Re-run id stability (mitigated by resuming `next_id`; dependency errors are the honest fallback). Sandbox friction (one-click Allow this folder, remembered). Binary size (about 300 kB). The `inputs.t` versus `inputs.expr.t` awkwardness (revisit after the samples are written).
+
+---
+
+## Order of work
+
+Dependencies: the container (1) carries mesh blobs (4) and the cache (2); tags (3) are independent but scripts' face inputs and the mesh region references want them; scripts (5) are independent but `ferrender check` and the samples exercise everything else, so they land last. Each numbered step is a PR that leaves `main` releasable.
+
+1. **Container and spec** (feature 1). **Done on `0.4-dev`:** ZIP writer and reader with limits, blobs detached at the JSON layer (the in-memory model is unchanged), thumbnail, manifest, legacy-file backup, `docs/FILE_FORMAT.md`, the all-features fixture test, `container` reported over the API. Version 9. Recovery now wraps compact native payloads with bounded metadata and CRC; legacy plain recovery remains readable. JPEG passthrough for reference images is deferred.
+2. **Indexed mesh and large import** (feature 4, part 1). **Done on `0.4-dev`:** `Mesh` itself became indexed (shared positions, `u32` triples, a `welded` flag, a BVH and vertex adjacency built on first use), so every consumer got the change without a second type; streaming STL/OBJ/3MF import through a welding reader; repair on import (degenerate and duplicate removal, orientation by edge walk, outward shells, a report); the `meshes/<id>.mesh` blob (32-byte header with CRC) at format version 9; `Mesh::ray`/`nearest_tri` through the BVH; bodies over 200 k triangles drawn from positions-only indexed buffers with the face plane from screen derivatives, and a vertex-clustered coarse copy for bodies over 2 M while the view moves; face spreading capped at 20 k triangles on kernel-less meshes. The stress harness is `crates/fr-core/tests/stress.rs` (real scans from `FERRENDER_STRESS_DIR`, a synthetic million otherwise). Measured, release build, on the development Mac with the scans in `~/Documents/3d/meshes/large-imports`: 1.0 M triangles import 0.33 s, save 0.21 s, open 0.08 s, 12 MB; 2.05 M import 0.66 s; 3.5 M import 1.32 s, BVH 0.79 s, ray pick 0.03 ms, save 0.31 s, open 0.27 s, 45 MB on disk; peak memory 1.7 GB for the whole run. Decimation and booleans are steps 5 and 6.
+3. **Tags** (feature 3). **Done on `0.4-dev`, strengthened during review:** schema-2 tags name sketch sweeps/caps, primitive and drill roles, generated faces by source ancestry, merged faces by their contributing identities, split pieces by boundary provenance, and pattern copies by copy identity. Boolean history is carried through cadrum face cleanup. Modern references never fall back to unrelated nearest surfaces. Legacy ordinal tags migrate only at a unique saved pick; unproven generated topology keeps a conservative geometric signature. Format 13 prevents older readers from silently treating these identities as optional. Tests cover upstream size/radius/thickness edits, inserted fillet edges, split movement, profile order, removed faces and ambiguous legacy copies. Vertex references and hole entry points remain position-only.
+4. **Geometry cache** (feature 2). **Done on `0.4-dev`, authenticated during review:** `cache.rs` captures exact BRep or indexed mesh bodies, tags, placements, planes, errors and resolutions in the container. Design CRC, kernel and geometry revision 2 still detect staleness. HMAC-SHA256 now authenticates the whole ZIP with a private per-installation key before compatible cache entries are parsed. Unsigned/foreign/changed files rebuild. Only locally evaluated or authenticated caches can be signed on save. Newer unsupported designs remain unverified read-only previews, with persistent UI/API/export warnings. Tests include coordinated cache/index forgery, payload mutations, key loss/rotation/permissions, signing-oracle refusal and export provenance. The whole-design key, Deflate and omission of modeled-thread caches remain deliberate simplifications.
+5. **Mesh operations** (feature 4, part 2). **Done on `0.4-dev`:** `meshops.rs` with quadric edge-collapse decimation (boundary-weighted, flip-guarded; vertex clustering as the fast method), Taubin smoothing with optional region masks, Loop and midpoint subdivision, plane cuts with capped loops and a two-body option, mirroring with a welded seam, offsetting (hollowing closed shells, thickening open ones with rim walls, optionally along a direction), region selection (sphere, box, plane side, normal cone, connected shell), region extrusion with walls, hole filling, a measure block, and `from_image` (luminance height field with blur, gamma, invert and a slab base). In the document they are `FeatureKind::MeshOp { body, op, region }` and `FeatureKind::Relief` (an embedded image like a sketch reference, written to `images/` in the container), format version 11; a mesh operation on an exact body turns it into a mesh, as a combine with a mesh does. `PlaneRef::Free` was added so cuts and mirrors can name a plane outright. API: `mesh_measure`, `mesh_repair`, `mesh_decimate`, `mesh_smooth`, `mesh_subdivide`, `mesh_cut`, `mesh_mirror`, `mesh_offset`, `mesh_extrude_region`, `mesh_from_image`, with a Mesh section in the reference. App: a Mesh menu with one dialog per operation and a Relief from Image dialog; command search knows them. Mesh repair now keeps cavities facing inward (a hollowed shell is two nested shells). Tests in `crates/fr-core/tests/meshops.rs`. Not done from the plan's table: `mesh_subdivide` within a region, `mesh_sculpt` (step 6), `project` from a mesh region onto a sketch, 16-bit depth PNGs (images are normalised to 8 bits, 256 height levels).
+6. **Mesh booleans and sculpt** (feature 4, part 3). **Done on `0.4-dev`, solver replaced during review:** `csg.rs` now uses pinned `manifold-rust` 0.16.0, not the original BSP. Auto selects symbolic perturbation or exact rational arrangements; a result that cannot survive file-precision validation is recomputed with the rational engine. Indexed topology crosses the boundary intact. Watertight/orientation/degeneracy checks run on the actual stored coordinates. Input, candidate, output and cooperative time budgets bound the job and failure preserves the design. Regression coverage includes analytic box volumes, curved lenses with point membership, torus topology, nested cavities, self-intersecting operands, rotated/translated thin overlaps and save/rebuild/STL round trips. Sculpt remains pull, push, inflate, smooth and flatten, one feature per stroke. See the review for real-scan and private relief evidence.
+7. **Scripts engine and CLI** (feature 5, part 1). **Done on `0.4-dev`:** `script.rs` on Rhai 1.26 (`serde` and `sync` features): `meta()` reads a script's `META` without running it; `run()` registers one host function per entry of `api::OPS` (a test checks that table against the dispatcher's match arms and the reference text), the reading, file, and flow helpers from the plan, a canonicalising sandbox over the allowed folders that also gates every command with a `path`, the limits (50 M operations, 64 call levels, 1 MB strings, 1 M arrays, 100 k maps, no `eval`, no `import`), a cancel flag checked from the progress hook, events for log and progress, and a pluggable `ask`. Inputs arrive as numbers in millimetres and degrees with the typed text under `inputs.expr`, so parameters stay live. Two commands are renamed for scripts because Rhai reserves the words: `new` is `new_design`, `thread` is `add_thread`; an input's starting value is `initial`, not `default`, for the same reason. `export_timeline` writes a script that replays a document feature by feature through the new `add_feature` command, with every parameter an input. API: `script_meta`, `run_script` (one undo step; a failing script leaves the document untouched), `add_feature`. CLI: `ferrender run` and `ferrender check` with the exit codes from the plan. MCP: `list_scripts` and `run_script`. All six samples are written and run headless in `crates/fr-core/tests/scripts.rs` (variants, export-folder, ci-check, spur-gear, boss-at-points, face-relief).
+8. **Scripts UI and chip** (feature 5, part 2). **Done on `0.4-dev`:** `crates/ferrender/src/scripts_ui.rs`: a Scripts menu (user scripts from `scripts/` beside `config.toml`, the open document's `scripts/`, a Samples submenu with Copy to My Scripts, New Script, Open Scripts Folder, Reload, Export Timeline as Script, Show Script Log); an inputs dialog made from META (length and angle through the expression boxes, number, integer, bool, choice, text, folder and file pickers, body/face/sketch prefilled from the selection), with the last values remembered per script in `config.toml`; runs on a worker thread against a fork of the session with a progress window and Cancel, committed as one undo step; the `ScriptRun` chip (`FeatureKind::ScriptRun`, `Feature.made_by`) with Edit Inputs and Re-run, Re-run, Detach, Suppress (cascades to what it made) and Delete (removes what it made); re-runs reuse compatible output IDs by persistent script output key, preserving later references even after outputs reorder, and allocate additional outputs above existing IDs; stale worker results cannot replace intervening document edits; Export Timeline as Script. Format version 13 includes output identity keys. Repeated modeling calls need unique `output_key` values; ambiguous legacy outputs are not matched by position. After the review: `confirm`/`ask` are answered in the progress window (Cancel declines them); Cancel offers to stop waiting when a modeling call cannot be interrupted; files a run writes are staged and moved into place only on success; the sandbox walks the allowed folders without following links when a file is used; `run_script` and `ferrender run` take a time limit; Export Timeline as Script writes large meshes and images as sidecar files, exports failed features suppressed and restores the timeline marker. Not done: `META.shortcut` key bindings, process isolation for scripts. UI tests in `uitest.rs`.
+9. **Release.** README, `docs/releases/0.4/0.4.0-release-notes.md`, the manual test plan, this document updated to say what shipped.
+
+Steps 1–2 and 3 can run in parallel; 4 needs 1; 5 needs 2; 6 needs 5; 7 can start any time after 1; 8 needs 7 and benefits from 3.
+
+## Release tests
+
+Automated, beyond each feature's own list above:
+
+- Round trip every fixture through JSON and through the container; byte-identical `design.json`; a 0.3.0 file opens unchanged; a plain design saved by 0.4 still opens in 0.3.0.
+- Container hostility: oversized entries, duplicate names, `../` names, lying sizes, truncated archives, all refused before decompression.
+- Cache: load from cache equals rebuild for every fixture (volumes, bounds, body count); a tampered cache is discarded; a changed kernel version string is discarded; the open-time benchmark.
+- Tags: the four relocation scenarios above, plus the 0.3.0 planes and direct-modelling suites re-run with tags on.
+- Mesh: the stress table with CI ceilings; watertightness of every op's output on the fixture set; boolean regression set from `csg.rs` tests; `mesh_from_image` on a gradient, a checkerboard and the fixture portrait depth map.
+- Scripts: the samples headless into temp folders; sandbox refusals; limits and Cancel; `ScriptRun` serialisation and suppression; Export Timeline as Script round trip within 1e-6; CLI exit codes.
+- MCP: every new command appears in `REFERENCE`, within the size split, and has a wrapper.
+
+Manual, in `docs/releases/0.4/test-plan.md` written at step 9 in the style of the 0.3.0 plan: open the gallery designs from westcot.io, save them as containers with thumbnails, break and repair a fillet's upstream geometry and watch it follow, import the 5 M scan and orbit it, make the face relief from a photo over MCP, run the gear script from the menu and re-run it with more teeth, run `ferrender check` on the fixtures.
+
+## Release checklist
+
+Version 0.4.0 in both `Cargo.toml`, `FORMAT_VERSION` at whatever the last 0.4 feature needed (9 after the container), README sections (Files, Mesh, Scripts, Faces and edges), `docs/releases/0.4/0.4.0-release-notes.md`, the file-format spec, the face-relief tutorial, `RELEASING.md` unchanged, tag after the manual plan passes.
+
+## Not in 0.4
+
+Always-ZIP; cached geometry as the primary representation; a binary design encoding; Zstandard in the container. Kernel-level persistent naming through cadrum attributes (tags are Ferrender's, propagated by history or matching). `mesh_to_solid` (mesh to B-rep fitting) and retopology; texture or colour painting; a neural depth model inside Ferrender; GPU-side sculpting. A live macro recorder; scripts that run while the user models; `import` between scripts; custom feature types that re-evaluate on rebuild; network access from scripts; an in-app code editor.
+
+## Sources
+
+File formats and naming: [ezf3d clean-room .f3d reader](https://github.com/AlexSabaka/ezf3d) · [Fusion entityToken](https://help.autodesk.com/cloudhelp/ENU/Fusion-360-API/files/BRepEdge_entityToken.htm) · [Inventor reference keys](https://help.autodesk.com/cloudhelp/2025/ENU/Inventor-API/files/ReferenceKeyManager.htm) · [Inventor compatibility](https://help.autodesk.com/cloudhelp/2024/ENU/Inventor-Help/files/GUID-489A3E1D-EB3E-4468-9592-F2EAD0E584DD.htm) · [SolidWorks persist references](https://help.solidworks.com/2020/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IModelDocExtension~GetPersistReference3.html) · [SolidWorks future-version viewing](https://help.solidworks.com/2013/English/SolidWorks/sldworks/c_previous_release_interoperability.htm) · [SolidWorks backwards compatibility](http://blogs.solidworks.com/products/solidworks/solidworks-backwards-compatibility) · [Onshape queries](https://cad.onshape.com/FsDoc/modeling.html) · [Onshape deterministic ids](https://forum.onshape.com/discussion/comment/110498) · [FreeCAD FCStd](https://github.com/FreeCAD/FreeCAD-documentation/blob/main/wiki/File_Format_FCStd.md) · [FreeCAD topological naming](https://github.com/realthunder/FreeCAD_assembly3/wiki/Topological-Naming) · [FreeCAD JSON request](https://tracker.freecad.org/view.php?id=1558) · [SolveSpace file.cpp](https://raw.githubusercontent.com/solvespace/solvespace/master/src/file.cpp) · [Dune3D versioning](https://docs.dune3d.org/en/latest/version.html) · [Dune3D fillets](https://docs.dune3d.org/en/latest/groups.html) · [CADmium](https://github.com/mattferraro/cadmium) · [NIST IR 7433](https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir7433.pdf) · [3MF core spec](https://github.com/3MFConsortium/spec_core/blob/master/3MF%20Core%20Specification.md).
+
+Scripts: [change parameter and export STL](https://forums.autodesk.com/t5/fusion-api-and-scripts-forum/script-api-to-change-parameter-and-then-export-as-stl/td-p/7038013) · [batch exporter for parameter configurations](https://forums.autodesk.com/t5/fusion-api-and-scripts-forum/batch-exporter-script-for-different-parameter-configurations/td-p/13784721) · [ParaParam](https://forums.autodesk.com/t5/fusion-api-and-scripts-forum/paraparam-script-for-fusion-360/m-p/7839482) · [ParametricExport](https://github.com/BrezinaAdam/Fusion360ParametricExportScript) · [Fusion360Exporter](https://github.com/tavdog/Fusion360Exporter) · [Autodesk App Store](https://apps.autodesk.com/FUSION/en/List/Search?page=14) · [Fusion Claude connector](https://www.autodesk.com/products/fusion-360/blog/how-to-improve-your-fusion-workflow-with-the-claude-desktop-connector/) · [Onshape FeatureScript](https://www.onshape.com/featurescript) · [Onshape custom features](https://www.onshape.com/en/features/custom-features-new) · [build123d](https://build123d.readthedocs.io/en/latest/introduction.html) · [CadQuery](https://pypi.org/project/cadquery/) · [Rhai](https://rhai.rs).
+
+Mesh: [Manifold mesh boolean](https://github.com/elalish/manifold) · [Garland and Heckbert quadric decimation](https://www.cs.cmu.edu/~garland/Papers/quadrics.pdf) · [Taubin smoothing](https://doi.org/10.1145/218380.218473) · [Loop subdivision](https://www.microsoft.com/en-us/research/publication/smooth-subdivision-surfaces-based-on-triangles/) · [Depth Anything](https://github.com/DepthAnything/Depth-Anything-V2) (for producing the depth map outside Ferrender).

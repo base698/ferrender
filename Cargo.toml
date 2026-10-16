@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fr-core", "crates/ferrender"]
+members = ["crates/fr-core", "crates/fr-structure", "crates/ferrender"]
 
 [profile.dev]
 opt-level = 1

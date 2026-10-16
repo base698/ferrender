@@ -19,17 +19,29 @@ def main():
     args = parser.parse_args()
     version = re.search(r'^version = "([0-9]+\.[0-9]+\.[0-9]+)"', (ROOT/'crates/ferrender/Cargo.toml').read_text(), re.M)[1]
     tag = os.environ.get('RELEASE_TAG', 'v' + version)
-    if tag != 'v' + version:
+    # A release candidate, v0.4.0-rc1, is built from the Cargo version of the release it precedes.
+    if not re.fullmatch('v' + re.escape(version) + r'(-rc\d+)?', tag):
         raise SystemExit('Release tag does not match Cargo version')
     commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     mac = args.platform.startswith('macos')
     binary = ROOT/('dist/Ferrender.app/Contents/MacOS/ferrender' if mac else 'target/release/ferrender')
     info = subprocess.check_output([str(binary), '--version'], text=True)
     target = {'macos-arm64': 'aarch64-apple-darwin', 'macos-x86_64': 'x86_64-apple-darwin', 'linux-x86_64': 'x86_64-unknown-linux-gnu'}[args.platform]
-    for expected in [f'Ferrender {version}', f'Commit: {commit}', 'Source: Clean checkout', 'Build: release', f'Platform: {target}']:
+    # The executable records at compile time which OpenCascade directory cadrum
+    # linked; a build that bypassed scripts/prepare-occt.py says "unverified".
+    pins = json.loads((ROOT/'scripts/occt-pins.json').read_text())
+    occt = f"OpenCascade: verified {pins['tag']} sha256:{pins['assets'][target]['sha256']}"
+    for expected in [f'Ferrender {version}', f'Commit: {commit}', 'Source: Clean checkout', 'Build: release', f'Platform: {target}', occt]:
         if expected not in info:
             raise SystemExit(f'Build metadata mismatch: expected {expected!r}; got {info!r}')
-    name = f'Ferrender-{version}-{args.platform}'
+    # CI and the macOS bundler prepare this exact native dependency before
+    # compiling. Recheck its archive when packaging instead of silently using
+    # an arbitrary pre-existing target/occt-* directory for release notices.
+    occt_root = Path(subprocess.check_output(['python3', str(ROOT/'scripts/prepare-occt.py'), '--target', target], text=True).strip())
+    selected_occt = os.environ.get('OCCT_ROOT')
+    if selected_occt and Path(selected_occt).resolve() != occt_root.resolve():
+        raise SystemExit('OCCT_ROOT differs from the verified release dependency; rebuild with scripts/prepare-occt.py')
+    name = f'Ferrender-{tag[1:]}-{args.platform}'
     stage = ROOT/'dist'/name
     if stage.exists():
         shutil.rmtree(stage)
@@ -50,14 +62,15 @@ def main():
     (stage/'BUILD-INFO.txt').write_text(info)
     licenses = stage/'licenses'
     licenses.mkdir()
+    subprocess.run(['python3', str(ROOT/'scripts/bundle-dependency-notices.py'), '--output', str(licenses/'rust-dependencies')], check=True)
     for filename in ['OFL.txt', 'PROVENANCE.txt']:
         shutil.copy2(ROOT/'crates/fr-core/assets/fonts'/filename, licenses/('NotoSans-'+filename))
     # Cadrum's pinned OCCT prebuilt archive ships the LGPL and additional exception.
     for filename in ['LICENSE_LGPL_21.txt', 'OCCT_LGPL_EXCEPTION.txt']:
-        candidates = sorted((ROOT/'target').glob('occt-*/share/doc/opencascade/'+filename))
-        if not candidates:
+        notice = occt_root/'share/doc/opencascade'/filename
+        if not notice.is_file():
             raise SystemExit(f'Missing bundled OpenCascade notice: {filename}')
-        shutil.copy2(candidates[0], licenses/filename)
+        shutil.copy2(notice, licenses/filename)
     registry = Path(os.environ.get('CARGO_HOME', str(Path.home()/'.cargo')))/'registry/src'
     cadrum = sorted(registry.glob('*/cadrum-0.8.20/LICENSE'))
     if not cadrum:

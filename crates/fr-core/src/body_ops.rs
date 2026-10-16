@@ -23,7 +23,8 @@ impl Split {
         match &self.plane {
             PlaneRef::Origin(_) => {},
             PlaneRef::Plane(id) if *id!=0 => {},
-            PlaneRef::Face {body,at,frame} if *body!=0 && at.is_finite() && at.as_vec3().is_finite()
+            PlaneRef::Free(plane) => Sketch::new(*plane).validate()?,
+            PlaneRef::Face {body,at,frame,..} if *body!=0 && at.is_finite() && at.as_vec3().is_finite()
                 && frame.is_none_or(|f|f.iter().all(|p|p.is_finite() && p.as_vec3().is_finite()) && f[0].cmple(f[1]).all()) => {},
             _ => return Err("the splitting plane reference is invalid".into()),
         }

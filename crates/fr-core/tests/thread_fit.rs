@@ -42,7 +42,7 @@ fn chamfer_before_thread_does_not_leave_a_blocking_collar() {
         assert_eq!(b.threads[0].open_edges(),0,"thread lead stays watertight");
         let bytes=fr_core::io::stl_bytes([b],fr_core::Unit::Mm);
         let imported=fr_core::io::parse_stl(&bytes,fr_core::Unit::Mm).unwrap();
-        assert!(imported.tris.iter().flatten().all(|v|v.is_finite()));
+        assert!(imported.tris().flatten().all(|v|v.is_finite()));
         println!("{size}: collar diameter {:.4}, thread root {root:.4}; head and length preserved",radial_diameter(&s,z,0.0));
     }
 }
@@ -53,7 +53,7 @@ fn a_free_thread_tip_has_a_lead_but_an_offset_thread_leaves_the_tip_alone() {
         let t=fr_core::threads::find(size).unwrap();
         let s=screw(size,false,0.0);
         let mesh=&s.built.body(2).unwrap().threads[0];
-        for v in mesh.tris.iter().flatten().filter(|v|(v.z-14.).abs()<1e-8) {
+        for v in mesh.tris().flatten().filter(|v|(v.z-14.).abs()<1e-8) {
             assert!(v.truncate().length() <= (t.minor()-0.2)/2.0+1e-6);
         }
         assert_eq!(mesh.open_edges(),0);

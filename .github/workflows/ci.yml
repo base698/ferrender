@@ -9,23 +9,54 @@ permissions:
   contents: read
 
 jobs:
+  dependencies:
+    name: RustSec advisories and crate sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # Exceptions, with their reasons, are listed in deny.toml. cargo-deny is installed as a
+      # prebuilt binary from its GitHub release: the cargo-deny-action builds a Docker image
+      # from Docker Hub on every run, and Docker Hub's pull rate limit (429) failed the job.
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check advisories sources
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-24.04]
+        include:
+          - os: macos-latest
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x86_64
+          - os: ubuntu-24.04
+            platform: linux-x86_64
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Verify pinned OpenCascade build dependency
+        run: |
+          python3 scripts/test_prepare_occt.py
+          python3 scripts/test_workflow_pins.py
+          python3 scripts/test_dependency_notices.py
+          python3 scripts/bundle-dependency-notices.py
+          python3 scripts/prepare-occt.py --github-env
       - name: Install Linux build and offscreen rendering prerequisites
         if: runner.os == 'Linux'
         run: |
@@ -35,7 +66,8 @@ jobs:
             libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev \
             libegl1-mesa-dev libgl1-mesa-dev libvulkan1 mesa-vulkan-drivers \
             xvfb xauth
-      # cadrum's build script downloads its pinned OpenCascade prebuilt archive.
+      # The verifier supplies OCCT_ROOT, so cadrum uses the checked archive and
+      # the executable records it (see crates/fr-core/build.rs).
       # macOS supplies its C++ compiler through the runner's Xcode installation.
       - name: Build all workspace targets
         run: cargo build --locked --workspace --all-targets
@@ -67,3 +99,15 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
           xvfb-run -a cargo test --locked --workspace --all-targets
+      # Exercise packaging before a release tag is created. These archives stay
+      # on the runner; this workflow cannot publish a GitHub release.
+      - name: Build macOS release app
+        if: runner.os == 'macOS'
+        run: sh scripts/bundle-macos.sh
+      - name: Build Linux release app
+        if: runner.os == 'Linux'
+        run: cargo build --locked --release -p ferrender
+      - name: Package and smoke-test native release
+        env:
+          PACKAGE_PLATFORM: ${{ matrix.platform }}
+        run: python3 scripts/package-release.py --platform "$PACKAGE_PLATFORM"

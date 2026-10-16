@@ -6,13 +6,16 @@
 //! every operation here checks its result against what the operation must
 //! do to the volume or the bounds.
 
+use std::cell::RefCell;
+
 use cadrum::{Boolean, Edge, Face, Solid, SurfaceKind, Tessellation};
 use glam::{DVec2, DVec3};
 
 use crate::csg::Bool;
 use crate::mesh::Mesh;
 use crate::profile::{Profile, Seg};
-use crate::sketch::Plane;
+use crate::sketch::{Id, Plane};
+use crate::tag::{EdgeTag, Kind, Level, Origin, Tag};
 
 /// A body's exact shape: one solid, or several when a cut has split it.
 pub type Lumps = Vec<Solid>;
@@ -40,21 +43,153 @@ pub fn bounds(lumps: &[Solid]) -> Option<(DVec3, DVec3)> {
     lumps.iter().map(|s| s.bounding_box()).map(|b| (g(b[0]), g(b[1]))).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
 }
 
+/// One sketch segment as a kernel edge, `z` off the plane.
+fn seg_edge(s: &Seg, plane: &Plane, z: f64) -> R<Edge> {
+    let at = |p: DVec2| c(plane.to_world(p) + plane.normal() * z);
+    let made = match *s {
+        Seg::Line(a, b) => Edge::line(at(a), at(b)),
+        Seg::Arc(a, m, b) => Edge::arc_3pts(at(a), at(m), at(b)),
+        Seg::Spline(points) => Edge::bspline(points.map(at).iter(), cadrum::BSplineEnd::NotAKnot),
+        Seg::Circle(centre, r) => Edge::circle(r, c(plane.normal())).map(|e| e.translate(at(centre))),
+        Seg::Ellipse(centre, u, v) => {
+            let (o, n) = (plane.to_world(centre) + plane.normal() * z, plane.normal());
+            return ellipse_edge(o, plane.to_world(centre + u) - plane.to_world(centre), plane.to_world(centre + v) - plane.to_world(centre), n);
+        }
+        Seg::EllipseArc(centre, u, v, t0, t1) => {
+            let o = plane.to_world(centre) + plane.normal() * z;
+            return ellipse_arc_edge(o, plane.to_world(centre + u) - plane.to_world(centre), plane.to_world(centre + v) - plane.to_world(centre), t0, t1);
+        }
+    };
+    made.map_err(|e| e.to_string())
+}
+
+/// An exact ellipse in the XY plane about the origin: `ratio` long along X, 1 along Y,
+/// starting at +X and running anticlockwise about +Z.
+///
+/// The kernel wrapper has no ellipse edge, but a plane cuts a cylinder in one: the edge
+/// of that cut is a true analytic ellipse, which the kernel measures and exports exactly.
+/// A closed spline through points of the curve looks the same but is measured two or
+/// three percent short, because the kernel integrates a many-span spline too coarsely.
+fn unit_ellipse(ratio: f64) -> R<Edge> {
+    thread_local! { static MADE: RefCell<Vec<(u64, Edge)>> = const { RefCell::new(Vec::new()) }; }
+    if let Some(edge) = MADE.with(|m| m.borrow().iter().find(|e| e.0 == ratio.to_bits()).map(|e| e.1.clone())) {
+        return Ok(edge);
+    }
+    if !ratio.is_finite() || !(1.0..=1e6).contains(&ratio) {
+        return Err("the ellipse is too thin for the kernel; its long axis may be at most a million times its short one".into());
+    }
+    // A unit cylinder along Z, cut by a plane tilted about Y until the cut is `ratio` long.
+    let tilt = (1.0 / ratio).acos();
+    let height = 2.0 * tilt.tan() + 2.0;
+    let (through, normal) = (DVec3::new(0.0, 0.0, height / 2.0), DVec3::new(-tilt.sin(), 0.0, tilt.cos()));
+    let cylinder = Solid::cylinder(1.0, c(DVec3::Z * height));
+    let cut: Boolean<Solid> = (&cylinder).into();
+    let parts = (cut - &Solid::half_space(c(through), c(normal))).build_vec().map_err(|e| format!("the kernel could not make the ellipse: {e}"))?;
+    let on_cut = |e: &Edge| {
+        let pts = e.approximation_segments(FINE);
+        pts.len() > 2 && pts.iter().all(|p| normal.dot(g(*p) - through).abs() < 1e-9) && g(e.start_point()).distance(g(e.end_point())) < 1e-9
+    };
+    let found: Vec<&Edge> = parts.iter().flat_map(|s| s.iter_edge()).filter(|e| on_cut(e)).collect();
+    let [edge] = found[..] else { return Err("the kernel did not make the ellipse as one closed edge".into()) };
+    // Lay the cut flat on XY about the origin, and make it run anticlockwise.
+    let mut edge = edge.clone().rotate(c(through), c(DVec3::Y), tilt).translate(c(-through));
+    if g(edge.start_tangent()).y < 0.0 { edge = edge.mirror(c(DVec3::ZERO), c(DVec3::Y)); }
+    let start = g(edge.start_point());
+    if start.distance(DVec3::X * ratio) > 1e-7 * ratio { return Err("the kernel made the ellipse somewhere unexpected".into()); }
+    MADE.with(|m| { let mut m = m.borrow_mut(); if m.len() == 64 { m.remove(0); } m.push((ratio.to_bits(), edge.clone())); });
+    Ok(edge)
+}
+
+/// Part of the exact unit ellipse of [`unit_ellipse`], anticlockwise from the angle `t0`
+/// to `t1` of `(ratio cos t, sin t)`. The same cut, made through a sector of the cylinder.
+fn unit_ellipse_arc(ratio: f64, t0: f64, t1: f64) -> R<Edge> {
+    use std::f64::consts::{PI, TAU};
+    type Made = Vec<([u64; 3], Edge)>;
+    thread_local! { static MADE: RefCell<Made> = const { RefCell::new(Vec::new()) }; }
+    let key = [ratio.to_bits(), t0.to_bits(), t1.to_bits()];
+    if let Some(edge) = MADE.with(|m| m.borrow().iter().find(|e| e.0 == key).map(|e| e.1.clone())) {
+        return Ok(edge);
+    }
+    let sweep = t1 - t0;
+    if !ratio.is_finite() || !(1.0..=1e6).contains(&ratio) {
+        return Err("the ellipse is too thin for the kernel; its long axis may be at most a million times its short one".into());
+    }
+    if !(sweep > 1e-9 && sweep < TAU - 1e-9) { return Err("that part of the ellipse has no length, or is the whole of it".into()); }
+    let fail = |e: cadrum::Error| format!("the kernel could not make part of the ellipse: {e}");
+    let tilt = (1.0 / ratio).acos();
+    let height = 2.0 * tilt.tan() + 2.0;
+    let (through, normal) = (DVec3::new(0.0, 0.0, height / 2.0), DVec3::new(-tilt.sin(), 0.0, tilt.cos()));
+    // The cylinder's seam is turned to the far side from the arc, so the arc is one edge.
+    let cylinder = Solid::cylinder(1.0, c(DVec3::Z * height)).rotate_z((t0 + t1) / 2.0 + PI);
+    // A sector around the arc, as a prism that reaches well past the cylinder.
+    let steps = (sweep / (PI / 3.0)).ceil().max(1.0) as usize;
+    let mut corners = vec![DVec3::new(0.0, 0.0, -1.0)];
+    corners.extend((0..=steps).map(|k| { let t = t0 + sweep * k as f64 / steps as f64; DVec3::new(3.0 * t.cos(), 3.0 * t.sin(), -1.0) }));
+    let sides: Vec<Edge> = (0..corners.len()).map(|k| Edge::line(c(corners[k]), c(corners[(k + 1) % corners.len()]))).collect::<Result<_, _>>().map_err(fail)?;
+    let sector = Solid::extrude(sides.iter(), c(DVec3::Z * (height + 2.0))).map_err(fail)?;
+    let whole: Boolean<Solid> = (&cylinder).into();
+    let wedge = (whole * &sector).build_vec().map_err(fail)?;
+    let Some(first) = wedge.first() else { return Err("the kernel made no part of the ellipse".into()) };
+    let mut cut: Boolean<Solid> = first.into();
+    for more in &wedge[1..] { cut = cut + more; }
+    let parts = (cut - &Solid::half_space(c(through), c(normal))).build_vec().map_err(fail)?;
+    // The arc is the edge of the cut that lies on the cylinder; the cut's other two edges run to its axis.
+    let on_arc = |e: &Edge| {
+        let pts = e.approximation_segments(FINE);
+        pts.len() > 2 && pts.iter().all(|p| { let p = g(*p); normal.dot(p - through).abs() < 1e-9 && (p.x * p.x + p.y * p.y - 1.0).abs() < 1e-9 })
+    };
+    let found: Vec<&Edge> = parts.iter().flat_map(|s| s.iter_edge()).filter(|e| on_arc(e)).collect();
+    let [edge] = found[..] else { return Err("the kernel did not make that part of the ellipse as one edge".into()) };
+    let edge = edge.clone().rotate(c(through), c(DVec3::Y), tilt).translate(c(-through));
+    let at = |t: f64| DVec3::new(ratio * t.cos(), t.sin(), 0.0);
+    if g(edge.start_point()).distance(at(t0)) > 1e-7 * ratio || g(edge.end_point()).distance(at(t1)) > 1e-7 * ratio {
+        return Err("the kernel made that part of the ellipse the wrong way round".into());
+    }
+    MADE.with(|m| { let mut m = m.borrow_mut(); if m.len() == 256 { m.remove(0); } m.push((key, edge.clone())); });
+    Ok(edge)
+}
+
+/// Puts an edge made about the unit ellipse (long axis X, short axis Y, in XY) where the
+/// ellipse with these long and short semi-axis vectors is.
+fn place_unit(edge: Edge, centre: DVec3, long: DVec3, short: DVec3) -> Edge {
+    let up = long.cross(short).normalize();
+    let turn = glam::DQuat::from_mat3(&glam::DMat3::from_cols(long.normalize(), short.normalize(), up));
+    let (axis, angle) = turn.to_axis_angle();
+    let mut edge = edge.scale(c(DVec3::ZERO), short.length());
+    if angle.abs() > 1e-12 { edge = edge.rotate(c(DVec3::ZERO), c(axis), angle); }
+    edge.translate(c(centre))
+}
+
+/// An ellipse as an exact kernel edge, from its centre and two perpendicular semi-axis
+/// vectors. It runs anticlockwise about `about` and starts at the end of its longer axis.
+fn ellipse_edge(centre: DVec3, u: DVec3, v: DVec3, about: DVec3) -> R<Edge> {
+    let (long, short) = if u.length() >= v.length() { (u, v) } else { (v, -u) };
+    if short.length() < 1e-9 { return Err("the ellipse has no width".into()); }
+    let short = if long.cross(short).dot(about) < 0.0 { -short } else { short };
+    Ok(place_unit(unit_ellipse(long.length() / short.length())?, centre, long, short))
+}
+
+/// Part of an ellipse as an exact kernel edge: from the angle `t0` to `t1` of
+/// `centre + u cos t + v sin t`, whichever way round that is.
+fn ellipse_arc_edge(centre: DVec3, u: DVec3, v: DVec3, t0: f64, t1: f64) -> R<Edge> {
+    // The same angles measured from the longer axis, as the unit ellipse has them.
+    let (long, short, shift) = if u.length() >= v.length() { (u, v, 0.0) } else { (v, -u, -std::f64::consts::FRAC_PI_2) };
+    if short.length() < 1e-9 { return Err("the ellipse has no width".into()); }
+    let (ratio, a, b) = (long.length() / short.length(), t0 + shift, t1 + shift);
+    // Clockwise is the mirror image of the anticlockwise arc between the mirrored angles.
+    let edge = if b > a { unit_ellipse_arc(ratio, a, b)? } else { unit_ellipse_arc(ratio, -a, -b)?.mirror(c(DVec3::ZERO), c(DVec3::Y)) };
+    Ok(place_unit(edge, centre, long, short))
+}
+
 /// One closed boundary as kernel edges, `z` off the plane.
 fn ring(path: &[Seg], plane: &Plane, z: f64) -> R<Vec<Edge>> {
-    let at = |p: DVec2| c(plane.to_world(p) + plane.normal() * z);
-    path.iter()
-        .map(|s| {
-            match *s {
-                Seg::Line(a, b) => Edge::line(at(a), at(b)),
-                Seg::Arc(a, m, b) => Edge::arc_3pts(at(a), at(m), at(b)),
-                Seg::Spline(points) => Edge::bspline(points.map(at).iter(), cadrum::BSplineEnd::NotAKnot),
-                Seg::Circle(centre, r) => Edge::circle(r, c(plane.normal())).map(|e| e.translate(at(centre))),
-            }
-            .map_err(|e| format!("the profile has an edge the kernel rejects: {e}"))
-        })
-        .collect()
+    path.iter().map(|s| seg_edge(s, plane, z).map_err(|e| format!("the profile has an edge the kernel rejects: {e}"))).collect()
 }
+
+mod pipe;
+pub use pipe::{sweep, sweep_spans, tag_swept};
+mod loft;
+pub use loft::{Section, loft, tag_loft};
 
 /// A profile's outer boundary followed by its holes.
 fn outline(p: &Profile, plane: &Plane, z: f64) -> R<Vec<Edge>> {
@@ -69,7 +204,7 @@ fn outline(p: &Profile, plane: &Plane, z: f64) -> R<Vec<Edge>> {
 }
 
 /// Joins solids that may or may not touch into as few lumps as they make.
-fn fuse(parts: Vec<Solid>) -> R<Lumps> {
+fn fuse_unmerged(parts: Vec<Solid>) -> R<Lumps> {
     let mut it = parts.iter();
     let Some(first) = it.next() else { return Ok(Vec::new()) };
     if parts.len() == 1 {
@@ -79,8 +214,10 @@ fn fuse(parts: Vec<Solid>) -> R<Lumps> {
     for s in it {
         all = all + s;
     }
-    tidy(all.build_vec().map_err(|e| format!("the kernel could not join the shapes: {e}"))?)
+    all.build_vec().map_err(|e| format!("the kernel could not join the shapes: {e}"))
 }
+
+fn fuse(parts: Vec<Solid>) -> R<Lumps> { tidy(fuse_unmerged(parts)?) }
 
 /// Merges faces that lie on the same surface, as a user expects after a join.
 fn tidy(lumps: Vec<Solid>) -> R<Lumps> {
@@ -109,6 +246,13 @@ pub fn extrude(profiles: &[&Profile], plane: &Plane, z0: f64, z1: f64) -> R<Lump
     fuse(parts)
 }
 
+/// The refusal for a profile with points on both sides of the axis, with how far the
+/// smaller overhang reaches: usually one point placed just past the axis by hand.
+pub fn crosses_axis(lo: f64, hi: f64, axis: DVec2) -> String {
+    let past = lo.abs().min(hi) / axis.length().max(1e-12);
+    format!("the profile crosses the axis by {} mm; move the points beyond it onto the axis (points snap to the axes when drawn near them)", crate::units::trim_num(past, 3))
+}
+
 /// Turns profiles around the line through `a` and `b` (sketch coordinates) by `degrees`.
 pub fn revolve(profiles: &[&Profile], plane: &Plane, a: DVec2, b: DVec2, degrees: f64) -> R<Lumps> {
     if a.distance(b) < 1e-9 {
@@ -122,7 +266,7 @@ pub fn revolve(profiles: &[&Profile], plane: &Plane, a: DVec2, b: DVec2, degrees
     for p in profiles {
         let (lo, hi) = p.outer.iter().map(|q| side(*q)).fold((0.0f64, 0.0f64), |(lo, hi), v| (lo.min(v), hi.max(v)));
         if lo < -1e-6 && hi > 1e-6 {
-            return Err("the profile crosses the axis".into());
+            return Err(crosses_axis(lo, hi, b - a));
         }
     }
     let (origin, dir) = (plane.to_world(a), plane.to_world(b) - plane.to_world(a));
@@ -134,11 +278,23 @@ pub fn revolve(profiles: &[&Profile], plane: &Plane, a: DVec2, b: DVec2, degrees
 }
 
 /// `a` joined with, cut by or intersected with `b`. An empty result means nothing is left.
-pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> {
+pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> { boolean_impl(a,b,op,true) }
+
+fn boolean_impl(a: &[Solid], b: &[Solid], op: Bool, clean: bool) -> R<Lumps> {
     let fail = |e: cadrum::Error| format!("the kernel could not combine the shapes: {e}");
     let (va, vb) = (volume(a), volume(b));
     let out = match op {
-        Bool::Union => fuse(a.iter().chain(b).cloned().collect())?,
+        Bool::Union => {
+            // Build from borrowed inputs: Solid::clone deep-copies topology and
+            // discards the face IDs needed to compose Boolean history.
+            let mut inputs=a.iter().chain(b);
+            let out=if let Some(first)=inputs.next() {
+                let mut expr:Boolean<Solid>=first.into();
+                for input in inputs {expr=expr+input;}
+                expr.build_vec().map_err(fail)?
+            } else {Vec::new()};
+            if clean {tidy(out)?} else {out}
+        },
         Bool::Subtract | Bool::Intersect => {
             let mut out = Vec::new();
             for lump in a {
@@ -154,7 +310,7 @@ pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> {
                     }
                 }
             }
-            tidy(out)?
+            if clean { tidy(out)? } else { out }
         }
     };
     let v = volume(&out);
@@ -174,8 +330,7 @@ pub fn boolean(a: &[Solid], b: &[Solid], op: Bool) -> R<Lumps> {
         // Deflection times surface area is a conservative volume error bound;
         // it also avoids false failures on tiny or very thin curved bodies.
         let (mesh,_)=tessellate(&out)?;
-        let origin=mesh.tris.first().map_or(DVec3::ZERO,|t|t[0]);
-        let mesh_volume=mesh.tris.iter().map(|t|(t[0]-origin).dot((t[1]-origin).cross(t[2]-origin))).sum::<f64>()/6.0;
+        let mesh_volume=mesh.volume();
         let tolerance=2.0*FINE.deflection_linear*out.iter().map(Solid::area).sum::<f64>()+slack;
         if !mesh_volume.is_finite() || mesh_volume < -slack || (mesh_volume-v).abs()>tolerance {
             return Err("the kernel could not make a reliable closed surface for that operation; try simplifying the intersecting faces".into());
@@ -198,15 +353,18 @@ pub fn tessellate(lumps: &[Solid]) -> R<(Mesh, Vec<Vec<DVec3>>)> {
         return Ok((Mesh::default(), Vec::new()));
     }
     let m = Solid::mesh(lumps.iter(), FINE).map_err(|e| format!("the kernel could not triangulate the body: {e}"))?;
-    let mut mesh = Mesh::default();
+    let mut tris = Vec::with_capacity(m.indices.len() / 3);
+    let mut face_ids = Vec::with_capacity(m.indices.len() / 3);
     for (i, t) in m.indices.chunks_exact(3).enumerate() {
         let tri = [g(m.vertices[t[0]]), g(m.vertices[t[1]]), g(m.vertices[t[2]])];
         // Blend surfaces can collapse a triangle to nothing at a pole.
         if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() > 1e-20 {
-            mesh.tris.push(tri);
-            mesh.face_ids.push(m.face_ids[i]);
+            tris.push(tri);
+            face_ids.push(m.face_ids[i]);
         }
     }
+    let mut mesh = Mesh::from_tris(tris);
+    mesh.face_ids = face_ids;
     let edges = lumps.iter().flat_map(real_edges).map(|e| e.approximation_segments(FINE).into_iter().map(g).collect::<Vec<_>>()).filter(|e| e.len() >= 2).collect();
     Ok((mesh, edges))
 }
@@ -285,48 +443,540 @@ pub fn candidates(lumps: &[Solid], points: &[DVec3], frame: Option<[DVec3; 2]>) 
         .collect()
 }
 
-/// The lump and edge nearest each point.
-fn find_edges<'a>(lumps: &'a [Solid], points: &[[DVec3; 2]]) -> R<Vec<(usize, &'a Edge)>> {
-    points
-        .iter()
-        .map(|tries| {
-            lumps
-                .iter()
-                .enumerate()
-                .flat_map(|(i, s)| real_edges(s).map(move |e| (i, e)))
-                .map(|(i, e)| (tries.iter().map(|p| g(e.project(c(*p)).0).distance(*p)).fold(f64::MAX, f64::min), i, e))
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-                .filter(|hit| hit.0 <= NEAR)
-                .map(|hit| (hit.1, hit.2))
-                .ok_or_else(|| "an edge it used is no longer there; the body changed shape under it".to_owned())
-        })
-        .collect()
+// ----- face and edge tags -----
+
+/// Face tags per lump, in the kernel's face order. Kept beside a body's lumps;
+/// the order survives clones and rigid moves, which is why tags are positional
+/// rather than keyed by the kernel's process-local face ids.
+pub type Tags = Vec<Vec<Option<Tag>>>;
+
+pub fn kind_of(face: &Face) -> Kind {
+    match face.surface().map(|s| s.kind) {
+        Some(SurfaceKind::Plane) => Kind::Plane,
+        Some(SurfaceKind::Cylinder { .. }) => Kind::Cylinder,
+        Some(SurfaceKind::Cone { .. }) => Kind::Cone,
+        Some(SurfaceKind::Sphere { .. }) => Kind::Sphere,
+        Some(SurfaceKind::Torus { .. }) => Kind::Torus,
+        None => Kind::Freeform,
+    }
 }
 
-fn find_faces<'a>(lumps: &'a [Solid], points: &[[DVec3; 2]]) -> R<Vec<(usize, &'a Face)>> {
-    points
-        .iter()
-        .map(|tries| {
-            lumps
-                .iter()
-                .enumerate()
-                .flat_map(|(i, s)| s.iter_face().map(move |f| (i, f)))
-                .map(|(i, f)| (tries.iter().map(|p| g(f.project(c(*p)).0).distance(*p)).fold(f64::MAX, f64::min), i, f))
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-                .filter(|hit| hit.0 <= NEAR)
-                .map(|hit| (hit.1, hit.2))
-                .ok_or_else(|| "a face it used is no longer there; the body changed shape under it".to_owned())
-        })
-        .collect()
+/// No tags: a body read from a file or made before tagging existed.
+pub fn no_tags(lumps: &[Solid]) -> Tags {
+    lumps.iter().map(|s| vec![None; s.iter_face().count()]).collect()
 }
 
-/// Rounds (or, with `chamfer`, bevels) the edges nearest `points` by `size`.
-pub fn blend(lumps: &[Solid], points: &[[DVec3; 2]], size: f64, chamfer: bool) -> R<Lumps> {
+/// A conservative geometric identity for faces without modeling provenance.
+/// It is independent of traversal order. Changes to these surfaces invalidate
+/// references, rather than allowing an unrelated face to inherit an ordinal.
+fn surface_tag(face: &Face, feature: Id) -> Tag {
+    let (at, normal) = face.project(face.center());
+    let quantize = |v: f64| (v * 1e7).round() as i64;
+    let mut signature: Vec<_> = g(face.center()).to_array().into_iter()
+        .chain(g(at).to_array()).chain(g(normal).to_array()).chain([face.area()])
+        .map(quantize).collect();
+    let mut edges: Vec<_> = face.iter_edge().map(|e| {
+        let p = e.approximation_segments(FINE);
+        let first = p.first().copied().unwrap_or_default();
+        let last = p.last().copied().unwrap_or_default();
+        let mut ends = [g(first).to_array().map(quantize), g(last).to_array().map(quantize)];
+        ends.sort();
+        (ends, g(e.project(face.center()).0).to_array().map(quantize))
+    }).collect();
+    edges.sort();
+    for (ends, middle) in edges { signature.extend(ends.into_iter().flatten()); signature.extend(middle); }
+    Tag::new(Origin::Surface { feature, signature }, kind_of(face))
+}
+
+pub fn fresh_tags(lumps: &[Solid], feature: Id) -> Tags {
+    lumps.iter().map(|s| s.iter_face().map(|f| Some(surface_tag(f, feature))).collect()).collect()
+}
+
+/// Primitive roles are defined in the constructor's local frame, so changing
+/// dimensions, rotation or kernel traversal never exchanges two plane faces.
+pub fn primitive_tags(lumps: &[Solid], primitive: &crate::primitives::Primitive, feature: Id) -> Tags {
+    use crate::primitives::PrimitiveShape;
+    let placement = crate::components::Placement { translate: primitive.position.clone(), rotate: primitive.rotate.clone() }.affine().inverse();
+    lumps.iter().map(|s| s.iter_face().map(|f| {
+        let (at, normal) = f.project(f.center());
+        let p = placement.transform_point3(g(at));
+        let n = placement.transform_vector3(g(normal));
+        let role = match &primitive.shape {
+            PrimitiveShape::Box { width, depth, height } => {
+                let dimensions = [width.v, depth.v, height.v];
+                let axis = (0..3).max_by(|a,b| n[*a].abs().total_cmp(&n[*b].abs())).unwrap();
+                format!("box:{}:{}", ["x","y","z"][axis], if p[axis] > dimensions[axis]/2. { "max" } else { "min" })
+            }
+            PrimitiveShape::Cylinder { height, .. } => if kind_of(f) == Kind::Plane { format!("cylinder:{}", if p.z > height.v/2. {"end"} else {"start"}) } else {"cylinder:side".into()},
+            PrimitiveShape::Cone { height, .. } => if kind_of(f) == Kind::Plane { format!("cone:{}", if p.z > height.v/2. {"end"} else {"start"}) } else {"cone:side".into()},
+            PrimitiveShape::Sphere { .. } => "sphere:surface".into(),
+            PrimitiveShape::Torus { .. } => "torus:surface".into(),
+        };
+        Some(Tag::new(Origin::Semantic { feature, role }, kind_of(f)))
+    }).collect()).collect()
+}
+
+/// A point on a segment away from its ends, lifted off the sketch plane by `lift`.
+fn probe(seg: &Seg, plane: &Plane, lift: f64) -> DVec3 {
+    let p = match *seg {
+        Seg::Line(a, b) => (a + b) / 2.0,
+        Seg::Arc(_, m, _) => m,
+        Seg::Circle(centre, r) => centre + DVec2::X * r,
+        Seg::Spline(points) => points[1],
+        Seg::Ellipse(centre, u, _) => centre + u,
+        Seg::EllipseArc(centre, u, v, t0, t1) => { let t = (t0 + t1) / 2.0; centre + u * t.cos() + v * t.sin() }
+    };
+    plane.to_world(p) + plane.normal() * lift
+}
+
+fn segments<'a>(profiles: &'a [&Profile]) -> impl Iterator<Item = (&'a Seg, Id)> + 'a {
+    profiles.iter().flat_map(|p| {
+        let outer = p.path.iter().zip(p.path_ids.iter().copied().chain(std::iter::repeat(0)));
+        let holes = p.hole_paths.iter().zip(p.hole_path_ids.iter().map(|v| v.as_slice()).chain(std::iter::repeat(&[][..]))).flat_map(|(path, ids)| path.iter().zip(ids.iter().copied().chain(std::iter::repeat(0))));
+        outer.chain(holes)
+    })
+}
+
+/// Names each face of a sweep: `Swept` from the sketch entity whose segment it
+/// contains, `Cap` where a plane matches an end, `Made` for anything else.
+/// `probes` give, per sketch segment, a point that lies only on that segment's face;
+/// `caps` give for each end a plane and a point on it.
+fn tag_sweep(lumps: &[Solid], probes: &[(DVec3, Id)], caps: [(Plane, DVec3); 2], feature: Id) -> Tags {
+    let mut tags: Tags = lumps.iter().map(|s| s.iter_face().map(|f| {
+        let kind = kind_of(f);
+        if kind == Kind::Plane && let Some(surface) = f.surface() {
+            for (end, (plane, _)) in caps.iter().enumerate() {
+                if g(surface.axis_z).dot(plane.normal()).abs() > 1.0 - 1e-8 && (g(surface.origin) - plane.origin).dot(plane.normal()).abs() < 1e-6 {
+                    return Some(Tag::new(Origin::Cap { feature, end: end == 1 }, kind));
+                }
+            }
+        }
+        let mut source:Vec<_>=probes.iter().filter(|(p,entity)|*entity!=0 && g(f.project(c(*p)).0).distance(*p)<1e-5)
+            .map(|(_,entity)|Tag::new(Origin::Swept {feature,entity:*entity},kind)).collect();
+        source.sort();source.dedup();
+        Some(match source.len() {0=>surface_tag(f,feature),1=>source.pop().unwrap(),_=>Tag::new(Origin::Merged {sources:source},kind)})
+    }).collect()).collect();
+    for (li,lump) in lumps.iter().enumerate() {
+        let mut edges=std::collections::HashMap::new();
+        for (fi,f) in lump.iter_face().enumerate() {for e in f.iter_edge(){edges.entry(edge_key(e)).or_insert_with(Vec::new).push(fi);}}
+        let before=tags[li].clone();
+        for (fi,f) in lump.iter_face().enumerate() {
+            if let Some(Tag {origin:Origin::Cap {end,..},..})=&before[fi] {
+                let mut entities:Vec<_>=f.iter_edge().flat_map(|e|edges.get(&edge_key(e)).into_iter().flatten()).filter(|&&i|i!=fi)
+                    .filter_map(|&i|match &before[i].as_ref()?.origin {Origin::Swept {entity,..}=>Some(*entity),_=>None}).collect();
+                entities.sort();entities.dedup();
+                tags[li][fi]=Some(if entities.is_empty(){surface_tag(f,feature)}else{Tag::new(Origin::ProfileCap {feature,end:*end,entities},Kind::Plane)});
+            }
+        }
+    }
+    tags
+}
+
+/// Tags for the result of [`extrude`] with the same arguments.
+pub fn tag_extrude(lumps: &[Solid], profiles: &[&Profile], plane: &Plane, z0: f64, z1: f64, feature: Id) -> Tags {
+    let (z0, z1) = (z0.min(z1), z0.max(z1));
+    let probes: Vec<(DVec3, Id)> = segments(profiles).map(|(seg, id)| (probe(seg, plane, (z0 + z1) / 2.0), id)).collect();
+    let on = |z: f64| profiles.first().map_or(plane.origin, |p| plane.to_world(p.centroid())) + plane.normal() * z;
+    let at = |z: f64| Plane { origin: plane.origin + plane.normal() * z, ..*plane };
+    tag_sweep(lumps, &probes, [(at(z0), on(z0)), (at(z1), on(z1))], feature)
+}
+
+/// Font outline order is deterministic for unchanged text. Give its segments
+/// explicit content-scoped identities before applying the normal sweep tags;
+/// resizing, depth, placement and spacing edits retain those identities while
+/// changing the text content invalidates them deliberately.
+pub fn tag_text(lumps:&[Solid],profiles:&[Profile],plane:&Plane,z0:f64,z1:f64,text:&str,feature:Id)->Tags {
+    let mut named=profiles.to_vec();let mut next=1;
+    let mut owners=std::collections::BTreeMap::new();
+    let topology:Vec<_>=profiles.iter().map(|p|(p.path.len(),p.hole_paths.iter().map(Vec::len).collect::<Vec<_>>())).collect();
+    for (profile,p) in named.iter_mut().enumerate() {
+        p.path_ids=(0..p.path.len()).map(|_|{let id=next;next+=1;owners.insert(id,profile);id}).collect();
+        p.hole_path_ids=p.hole_paths.iter().map(|path|(0..path.len()).map(|_|{let id=next;next+=1;owners.insert(id,profile);id}).collect()).collect();
+    }
+    fn scope(tag:&mut Tag,text:&str,topology:&str,owners:&std::collections::BTreeMap<Id,usize>) {
+        let role=match &mut tag.origin {
+            // Font curves are currently polygonized. A subdivision change must
+            // not let a different segment inherit an old side-face identity.
+            Origin::Swept {entity,..}=>Some(format!("text:{text:?}:outline:{topology}:{entity}")),
+            Origin::ProfileCap {end,entities,..}=>{
+                let profiles:std::collections::BTreeSet<_>=entities.iter().filter_map(|e|owners.get(e)).collect();
+                Some(format!("text:{text:?}:cap:{end}:{profiles:?}"))
+            },
+            Origin::Merged {sources}|Origin::Derived {sources,..}=>{for t in sources {scope(t,text,topology,owners);}None},
+            _=>None,
+        };
+        if let Some(role)=role {tag.origin=Origin::Semantic {feature:tag.feature(),role};}
+    }
+    let mut tags=tag_extrude(lumps,&named.iter().collect::<Vec<_>>(),plane,z0,z1,feature);
+    for t in tags.iter_mut().flatten().flatten(){scope(t,text,&format!("{topology:?}"),&owners);}
+    tags
+}
+
+/// Tags for the result of [`revolve`] with the same arguments.
+pub fn tag_revolve(lumps: &[Solid], profiles: &[&Profile], plane: &Plane, a: DVec2, b: DVec2, degrees: f64, feature: Id) -> Tags {
+    let degrees = degrees.clamp(-360.0, 360.0);
+    let (origin, axis) = (plane.to_world(a), (plane.to_world(b) - plane.to_world(a)).normalize_or_zero());
+    let turn = |p: DVec3, deg: f64| origin + glam::DQuat::from_axis_angle(axis, deg.to_radians()) * (p - origin);
+    let probes: Vec<(DVec3, Id)> = segments(profiles).map(|(seg, id)| (turn(probe(seg, plane, 0.0), degrees / 2.0), id)).collect();
+    let centroid = profiles.first().map_or(plane.origin, |p| plane.to_world(p.centroid()));
+    let end_plane = plane.transformed(glam::DAffine3::from_translation(origin) * glam::DAffine3::from_quat(glam::DQuat::from_axis_angle(axis, degrees.to_radians())) * glam::DAffine3::from_translation(-origin));
+    tag_sweep(lumps, &probes, [(*plane, centroid), (end_plane, turn(centroid, degrees))], feature)
+}
+
+/// Whether two faces lie on the same elementary surface.
+fn same_surface(a: &cadrum::Surface, b: &cadrum::Surface) -> bool {
+    let (oa, ob, za, zb) = (g(a.origin), g(b.origin), g(a.axis_z).normalize_or_zero(), g(b.axis_z).normalize_or_zero());
+    let parallel = za.dot(zb).abs() > 1.0 - 1e-9;
+    let on_axis = (ob - oa).cross(za).length() < 1e-6;
+    let close = |x: f64, y: f64| (x - y).abs() < 1e-6;
+    match (a.kind, b.kind) {
+        (SurfaceKind::Plane, SurfaceKind::Plane) => parallel && (ob - oa).dot(za).abs() < 1e-6,
+        (SurfaceKind::Cylinder { radius: ra }, SurfaceKind::Cylinder { radius: rb }) => parallel && on_axis && close(ra, rb),
+        (SurfaceKind::Sphere { radius: ra }, SurfaceKind::Sphere { radius: rb }) => oa.distance(ob) < 1e-6 && close(ra, rb),
+        (SurfaceKind::Cone { .. }, SurfaceKind::Cone { .. }) | (SurfaceKind::Torus { .. }, SurfaceKind::Torus { .. }) => parallel && on_axis && oa.distance(ob) < 1e-6 && format!("{:?}", a.kind) == format!("{:?}", b.kind),
+        _ => false,
+    }
+}
+
+/// Carries every source relation through an operation. Ambiguous/merged
+/// ancestry is represented explicitly; no result inherits the first match.
+/// Split regions and newly generated blend faces are named by their adjacent
+/// source faces, independent of result order. Unprovable identities fall back
+/// to a conservative geometric signature that invalidates on shape changes.
+pub fn carry(sources: &[(&[Solid], &Tags)], result: &[Solid], feature: Id) -> Tags {
+    struct Old<'a> { id: u64, face: &'a Face, surface: Option<cadrum::Surface>, tag: &'a Tag }
+    let old: Vec<Old> = sources.iter().flat_map(|(lumps, tags)| lumps.iter().zip(tags.iter()).flat_map(|(s,t)| s.iter_face().zip(t.iter()).filter_map(|(f,tag)| Some(Old {id:f.id(),face:f,surface:f.surface(),tag:tag.as_ref()?})))).collect();
+    let mut faces = Vec::new();
+    let mut parents: Vec<Option<Tag>> = Vec::new();
+    for lump in result {
+        let history: Vec<_> = lump.iter_history().collect();
+        for f in lump.iter_face() {
+            let surface = f.surface(); let centre = f.project(f.center()).0;
+            let overlaps = |o: &&Old<'_>| {
+                match (&surface, &o.surface) { (Some(a),Some(b)) if same_surface(a,b) => {}, _ => return false }
+                g(o.face.project(centre).0).distance(g(centre)) < 1e-5
+                    || g(f.project(o.face.center()).0).distance(g(o.face.center())) < 1e-5
+            };
+            let history_old: Vec<_> = old.iter().filter(|o| history.iter().any(|h| h[0]==f.id() && h[1]==o.id)).collect();
+            let mut ancestors: Vec<_> = old.iter().filter(overlaps).map(|o| o.tag.clone()).collect();
+            // Modified surfaces can move (shell offsets). Trust a history relation
+            // only when both source and result IDs are spatially unambiguous.
+            let mut offset_source=false;
+            if ancestors.is_empty() && history_old.len()==1
+                && result.iter().flat_map(|s|s.iter_face()).filter(|other|other.id()==f.id()).count()==1
+                && kind_of(history_old[0].face)==kind_of(f) {
+                let source=history_old[0];
+                ancestors.push(source.tag.clone());
+                // Boolean trimming of a freeform surface keeps its provenance.
+                // Only an actual displacement (such as a shell offset) creates
+                // a generated face identity. History alone does not mean moved.
+                offset_source=g(source.face.project(centre).0).distance(g(centre))>1e-5;
+            }
+            ancestors.sort(); ancestors.dedup();
+            parents.push(if offset_source {Some(Tag::new(Origin::Derived {feature,sources:ancestors},kind_of(f)))} else {match ancestors.len() { 0=>None, 1=>ancestors.pop(), _=>Some(Tag::new(Origin::Merged {sources:ancestors},kind_of(f))) }});
+            faces.push(f);
+        }
+    }
+    let mut by_edge = std::collections::HashMap::new();
+    for (i,f) in faces.iter().enumerate() { for e in f.iter_edge() { by_edge.entry(edge_key(e)).or_insert_with(Vec::new).push(i); } }
+    let adjacent:Vec<Vec<usize>>=faces.iter().enumerate().map(|(i,f)|f.iter_edge().flat_map(|e|by_edge.get(&edge_key(e)).into_iter().flatten()).copied().filter(|&j|j!=i).collect()).collect();
+    let mut named=parents.clone();
+    // Corner patches often touch only other generated fillet faces. Establish
+    // their source identities after the edge blends, flattening same-operation
+    // provenance so a radius edit does not depend on intermediate face order.
+    for _ in 0..32 {
+        let before=named.clone();let mut changed=false;
+        for i in 0..faces.len() {
+            if before[i].is_some(){continue;}
+            let mut source=Vec::new();
+            for &j in &adjacent[i] {if let Some(t)=&before[j] {
+                match &t.origin {Origin::Derived {feature:made,sources} if *made==feature=>source.extend(sources.iter().cloned()),_=>source.push(t.clone())}
+            }}
+            source.sort();source.dedup();
+            if source.len()>=2 {named[i]=Some(Tag::new(Origin::Derived {feature,sources:source},kind_of(faces[i])));changed=true;}
+        }
+        if !changed {break;}
+    }
+    let boundaries:Vec<Vec<Tag>>=adjacent.iter().enumerate().map(|(i,neighbors)| {
+        let mut boundary:Vec<_>=neighbors.iter().filter_map(|&j|named[j].clone()).filter(|t|parents[i].as_ref()!=Some(t)).collect();
+        boundary.sort();boundary.dedup();boundary
+    }).collect();
+    let mut counts = std::collections::HashMap::new();
+    for p in parents.iter().flatten() { *counts.entry(p.clone()).or_insert(0usize)+=1; }
+    let mut candidates: Vec<Tag> = faces.iter().enumerate().map(|(i,f)| match &parents[i] {
+        Some(p) if counts[p]>1 => Tag::new(Origin::Patch {of:Box::new(p.clone()),boundary:boundaries[i].clone(),cycles:Vec::new()},kind_of(f)),
+        Some(p)=>p.clone(),
+        None=>named[i].clone().unwrap_or_else(||surface_tag(f,feature)),
+    }).collect();
+    // Equal boundary provenance cannot distinguish symmetric/generated pieces.
+    // Keep them distinct by verified geometry; never number them by iteration.
+    let mut uses = std::collections::HashMap::new();
+    for t in &candidates { *uses.entry(t.clone()).or_insert(0usize)+=1; }
+    for (i,t) in candidates.iter_mut().enumerate() {
+        if uses[t]>1 {
+            if let Origin::Patch {cycles,..}=&mut t.origin {
+                if let Some(oriented)=boundary_cycles(i,&faces,&named,&by_edge) {*cycles=oriented;}
+            }
+        }
+    }
+    // Cycles distinguish complementary pieces of a ring without ranking their
+    // positions or areas. If orientation/connectivity is unavailable or still
+    // identical, retain the conservative geometry identity.
+    let mut resolved=std::collections::HashMap::new();
+    for t in &candidates {*resolved.entry(t.clone()).or_insert(0usize)+=1;}
+    for (i,t) in candidates.iter_mut().enumerate() {if resolved[t]>1 {*t=surface_tag(faces[i],feature);}}
+    let mut all=candidates.into_iter();
+    result.iter().map(|s|s.iter_face().map(|_|Some(all.next().unwrap())).collect()).collect()
+}
+
+/// Recover oriented face wires from endpoint connectivity and the local inside
+/// of each known boundary. The binding exposes neither wires nor edge-use
+/// orientation. Geometry is used only to orient/connect adjacent edges; identity
+/// is exclusively the cyclic sequence of source tags, never coordinates.
+fn boundary_cycles(index:usize,faces:&[&Face],named:&[Option<Tag>],by_edge:&std::collections::HashMap<(u64,[[i64;3];3]),Vec<usize>>)->Option<Vec<Vec<Tag>>> {
+    let face=faces[index];
+    let mut edges=Vec::new();
+    for edge in face.iter_edge() {
+        let mut neighbors:Vec<_>=by_edge.get(&edge_key(edge))?.iter().copied().filter(|&j|j!=index).collect();neighbors.sort();neighbors.dedup();
+        if neighbors.is_empty() {continue;} // periodic seam, not a region boundary
+        if neighbors.len()!=1 {return None;}
+        let tag=named[neighbors[0]].clone()?;
+        let points=edge.approximation_segments(FINE);
+        let sample=*points.get(points.len()/2)?;
+        let (point,tangent)=edge.project(sample);let point=g(point);let tangent=g(tangent).try_normalize()?;
+        let normal=g(face.project(c(point)).1);let left=normal.cross(tangent).try_normalize()?;
+        let length: f64=points.windows(2).map(|p|g(p[1]).distance(g(p[0]))).sum();
+        let epsilon=(length*1e-4).clamp(1e-6,1e-3);
+        let plus=point+left*epsilon;let minus=point-left*epsilon;
+        let dp=g(face.project(c(plus)).0).distance(plus);let dm=g(face.project(c(minus)).0).distance(minus);
+        let (mut start,mut end)=(g(edge.start_point()),g(edge.end_point()));
+        if dp<epsilon*0.25 && dm>epsilon*0.75 {} else if dm<epsilon*0.25 && dp>epsilon*0.75 {std::mem::swap(&mut start,&mut end);} else {return None;}
+        edges.push((start,end,tag));
+    }
+    let mut cycles=Vec::new();
+    while let Some((start,mut end,tag))=edges.pop() {
+        let mut cycle=vec![tag];
+        while end.distance(start)>1e-6 {
+            let next:Vec<_>=edges.iter().enumerate().filter(|(_,e)|e.0.distance(end)<=1e-6).map(|(i,_)|i).collect();
+            if next.len()!=1 {return None;}
+            let (_,to,tag)=edges.swap_remove(next[0]);end=to;
+            if cycle.last()!=Some(&tag) {cycle.push(tag);}
+        }
+        if cycle.len()>1 && cycle.first()==cycle.last() {cycle.pop();}
+        let canonical=(0..cycle.len()).map(|i|cycle[i..].iter().chain(&cycle[..i]).cloned().collect::<Vec<_>>()).min()?;
+        cycles.push(canonical);
+    }
+    cycles.sort();(!cycles.is_empty()).then_some(cycles)
+}
+
+/// The planar cut is a semantic output of Split, qualified by the source
+/// boundary so disconnected pieces cannot exchange identities when reordered.
+pub fn split_tags(source:&[Solid],source_tags:&Tags,result:&[Solid],plane:Plane,feature:Id)->Tags {
+    let mut tags=carry(&[(source,source_tags)],result,feature);
+    let old:Vec<_>=source.iter().zip(source_tags).flat_map(|(s,t)|s.iter_face().zip(t).filter_map(|(f,t)|Some((f,t.as_ref()?)))).collect();
+    for (li,lump) in result.iter().enumerate(){for (fi,f) in lump.iter_face().enumerate(){
+        let (at,n)=f.project(f.center());let at=g(at);let n=g(n);
+        if kind_of(f)!=Kind::Plane || n.dot(plane.normal()).abs()<1.-1e-7 || (at-plane.origin).dot(plane.normal()).abs()>1e-5 {continue;}
+        let mut boundary=Vec::new();
+        for edge in f.iter_edge(){
+            let pts=edge.approximation_segments(FINE);let Some(p)=pts.get(pts.len()/2) else {continue};
+            for (face,tag) in &old {if g(face.project(*p).0).distance(g(*p))<1e-5 {boundary.push((*tag).clone());}}
+        }
+        boundary.sort();boundary.dedup();
+        tags[li][fi]=Some(Tag::new(Origin::Section {feature,positive:n.dot(plane.normal())>0.,boundary},Kind::Plane));
+    }}tags
+}
+
+/// An edge's identity within one solid. A fresh prism's top edges share their
+/// underlying shape with the bottom ones (moved by a location), so the kernel
+/// id alone is ambiguous; the edge's sampled ends and middle settle it.
+fn edge_key(e: &Edge) -> (u64, [[i64; 3]; 3]) {
+    let pts = e.approximation_segments(FINE);
+    let at = |i: usize| pts.get(i).map_or([0; 3], |p| g(*p).to_array().map(|c| (c * 1e6).round() as i64));
+    let mut ends = [at(0), at(pts.len().saturating_sub(1))]; ends.sort();
+    (e.id(), [ends[0], at(pts.len() / 2), ends[1]])
+}
+
+/// Every edge of the lumps with the tags of the two faces it separates.
+fn edge_table<'a>(lumps: &'a [Solid], tags: &Tags) -> Vec<(usize, &'a Edge, Option<EdgeTag>)> {
+    let mut out = Vec::new();
+    for (i, s) in lumps.iter().enumerate() {
+        let mut faces: std::collections::HashMap<(u64, [[i64; 3]; 3]), Vec<(usize, Option<Tag>)>> = std::collections::HashMap::new();
+        for (fi, f) in s.iter_face().enumerate() {
+            for e in f.iter_edge() {
+                let list = faces.entry(edge_key(e)).or_default();
+                if !list.iter().any(|(k, _)| *k == fi) {
+                    list.push((fi, tags.get(i).and_then(|t| t.get(fi)).cloned().flatten()));
+                }
+            }
+        }
+        for e in real_edges(s) {
+            let tag = match faces.get(&edge_key(e)).map(Vec::as_slice) {
+                Some([(_, Some(a)), (_, Some(b)), ..]) => Some(EdgeTag::new(a.clone(), b.clone())),
+                _ => None,
+            };
+            out.push((i, e, tag));
+        }
+    }
+    out
+}
+
+/// The edge nearest a point, for a reference that has none yet: the point moved onto
+/// that edge, and the edge's tag. A reported or clicked point lies a little off the true
+/// curve (rounded, or on the drawn polyline); the moved point tells the edge apart from
+/// another with the same tag, which proximity alone must not do.
+pub fn edge_at(lumps: &[Solid], tags: &Tags, point: DVec3) -> Option<(DVec3, Option<EdgeTag>)> {
+    edge_table(lumps, tags).into_iter().map(|(_, e, t)| { let on = g(e.project(c(point)).0); (on.distance(point), on, t) })
+        .filter(|h| h.0 <= NEAR).min_by(|a, b| a.0.total_cmp(&b.0)).map(|h| (h.1, h.2))
+}
+
+/// The tag of the edge nearest a point, for a reference that has none yet.
+pub fn edge_tag_at(lumps: &[Solid], tags: &Tags, point: DVec3) -> Option<EdgeTag> {
+    edge_at(lumps, tags, point).and_then(|h| h.1)
+}
+
+/// The face nearest a point: the point moved onto it, and its tag (see [`edge_at`]).
+pub fn face_at(lumps: &[Solid], tags: &Tags, point: DVec3) -> Option<(DVec3, Option<Tag>)> {
+    lumps.iter().enumerate().flat_map(|(i, s)| s.iter_face().enumerate().map(move |(fi, f)| (i, fi, f)))
+        .map(|(i, fi, f)| { let on = g(f.project(c(point)).0); (on.distance(point), on, tags.get(i).and_then(|t| t.get(fi)).cloned().flatten()) })
+        .filter(|h| h.0 <= NEAR).min_by(|a, b| a.0.total_cmp(&b.0)).map(|h| (h.1, h.2))
+}
+
+/// The tag of the face nearest a point.
+pub fn face_tag_at(lumps: &[Solid], tags: &Tags, point: DVec3) -> Option<Tag> {
+    face_at(lumps, tags, point).and_then(|h| h.1)
+}
+
+/// A stored edge reference: where it was (and where it would be in the body's current bounds), and its tag.
+#[derive(Clone, Debug)]
+pub struct EdgePick { pub points: [DVec3; 2], pub tag: Option<EdgeTag> }
+
+#[derive(Clone, Debug)]
+pub struct FacePick { pub points: [DVec3; 2], pub tag: Option<Tag> }
+
+/// Select a unique identity. Multiple descendants can only be chosen when
+/// the saved/mapped point still lies on exactly one; proximity is not identity.
+fn choose_pick<'a,T>(hits: Vec<&'a T>, distance: impl Fn(&T)->f64) -> R<Option<&'a T>> {
+    if hits.len()==1 { return Ok(hits.into_iter().next()); }
+    let mut located=hits.into_iter().filter(|h|distance(h)<=1e-5);
+    let first=located.next();
+    if first.is_some() && located.next().is_none() {return Ok(first);}
+    Err("the topology reference is ambiguous after the body changed; select the intended face or edge again".into())
+}
+
+fn find_edges<'a>(lumps: &'a [Solid], tags: &Tags, picks: &[EdgePick]) -> R<Vec<(usize, &'a Edge, Level, Option<EdgeTag>)>> {
+    let table=edge_table(lumps,tags);
+    let dist=|e:&Edge,points:&[DVec3]|points.iter().map(|p|g(e.project(c(*p)).0).distance(*p)).fold(f64::MAX,f64::min);
+    picks.iter().map(|pick| {
+        if let Some(tag)=&pick.tag {
+            if tag.legacy() {
+                let hits:Vec<_>=table.iter().filter(|t|t.2.as_ref().is_some_and(|new|tag.legacy_compatible(new)) && dist(t.1,&pick.points[..1])<=1e-5).collect();
+                if hits.len()==1 {let h=hits[0];return Ok((h.0,h.1,Level::Position,h.2.clone()));}
+                return Err("this legacy edge reference is missing or ambiguous; select the intended edge again".into());
+            }
+            let hits:Vec<_>=table.iter().filter(|t|t.2.as_ref()==Some(tag)).collect();
+            if !hits.is_empty() {let h=choose_pick(hits,|t|dist(t.1,&pick.points))?.unwrap();return Ok((h.0,h.1,Level::Tag,h.2.clone()));}
+            let hits:Vec<_>=table.iter().filter(|t|t.2.as_ref().is_some_and(|new|new.same_family(tag))).collect();
+            if !hits.is_empty() {let h=choose_pick(hits,|t|dist(t.1,&pick.points))?.unwrap();return Ok((h.0,h.1,Level::Origin,h.2.clone()));}
+            return Err("an edge it used is no longer there; the body changed shape under it".into());
+        }
+        // Pre-tag designs may learn a reference from the original pick, but a
+        // junction/tie must not silently choose whichever edge is enumerated first.
+        let mut hits:Vec<_>=table.iter().map(|t|(dist(t.1,&pick.points),t)).filter(|h|h.0<=NEAR).collect();
+        hits.sort_by(|a,b|a.0.total_cmp(&b.0));
+        let Some((d,h))=hits.first() else {return Err("an edge it used is no longer there; the body changed shape under it".into())};
+        if hits.get(1).is_some_and(|other|(other.0-d).abs()<1e-7) {return Err("the edge pick is ambiguous; select a point away from a vertex".into());}
+        Ok((h.0,h.1,Level::Position,h.2.clone()))
+    }).collect()
+}
+
+fn find_faces<'a>(lumps: &'a [Solid], tags: &Tags, picks: &[FacePick]) -> R<Vec<(usize, &'a Face, Level, Option<Tag>)>> {
+    let table:Vec<_>=lumps.iter().enumerate().flat_map(|(i,s)|s.iter_face().enumerate().map(move |(fi,f)|(i,f,fi))).map(|(i,f,fi)|(i,f,tags.get(i).and_then(|t|t.get(fi)).and_then(|t|t.as_ref()))).collect();
+    let dist=|f:&Face,points:&[DVec3]|points.iter().map(|p|g(f.project(c(*p)).0).distance(*p)).fold(f64::MAX,f64::min);
+    picks.iter().map(|pick| {
+        if let Some(tag)=&pick.tag {
+            if tag.legacy() {
+                let hits:Vec<_>=table.iter().filter(|t|t.2.is_some_and(|new|tag.legacy_compatible(new)) && dist(t.1,&pick.points[..1])<=1e-5).collect();
+                if hits.len()==1 {let h=hits[0];return Ok((h.0,h.1,Level::Position,h.2.cloned()));}
+                return Err("this legacy face reference is missing or ambiguous; select the intended face again".into());
+            }
+            let hits:Vec<_>=table.iter().filter(|t|t.2==Some(tag)).collect();
+            if !hits.is_empty() {let h=choose_pick(hits,|t|dist(t.1,&pick.points))?.unwrap();return Ok((h.0,h.1,Level::Tag,h.2.cloned()));}
+            let hits:Vec<_>=table.iter().filter(|t|t.2.is_some_and(|new|new.descends_from(tag))).collect();
+            if !hits.is_empty() {let h=choose_pick(hits,|t|dist(t.1,&pick.points))?.unwrap();return Ok((h.0,h.1,Level::Origin,h.2.cloned()));}
+            return Err("a face it used is no longer there; the body changed shape under it".into());
+        }
+        let mut hits:Vec<_>=table.iter().map(|t|(dist(t.1,&pick.points),t)).filter(|h|h.0<=NEAR).collect();
+        hits.sort_by(|a,b|a.0.total_cmp(&b.0));
+        let Some((d,h))=hits.first() else {return Err("a face it used is no longer there; the body changed shape under it".into())};
+        if hits.get(1).is_some_and(|other|(other.0-d).abs()<1e-7) {return Err("the face pick is ambiguous; select a point inside the face".into());}
+        Ok((h.0,h.1,Level::Position,h.2.cloned()))
+    }).collect()
+}
+
+/// Shared reference resolution for exact operations, text and construction
+/// planes. Keeping one resolver prevents a UI feature from quietly falling back
+/// to a different nearest face when strict provenance resolution failed.
+pub fn resolve_face(lumps:&[Solid],tags:&Tags,pick:&FacePick)->R<(FaceInfo,Level)> {
+    let picked=find_faces(lumps,tags,std::slice::from_ref(pick))?;
+    let (_,f,level,tag)=&picked[0]; let (at,normal)=f.project(f.center());
+    Ok((FaceInfo {at:g(at),normal:g(normal),area:f.area(),kind:match kind_of(f) {Kind::Plane=>"plane",Kind::Cylinder=>"cylinder",Kind::Cone=>"cone",Kind::Sphere=>"sphere",Kind::Torus=>"torus",Kind::Freeform=>"freeform"},tag:tag.clone()},*level))
+}
+
+/// What resolving picks produced: the new lumps and tags, the weakest level any pick needed,
+/// and the tag of what each pick found (for a reference to learn).
+pub struct Blended<T> {
+    pub lumps: Lumps,
+    pub tags: Tags,
+    pub level: Level,
+    pub picked: Vec<Option<T>>,
+    /// Each pick's point moved onto the edge or face it found, one per pick.
+    pub points: Vec<DVec3>,
+}
+
+/// The pick's point moved onto what it found: whichever of its two points
+/// (as picked, and mapped into the body's current bounds) lands nearest.
+fn settled(points: &[DVec3; 2], onto: impl Fn(DVec3) -> DVec3) -> DVec3 {
+    points.iter().map(|p| (onto(*p), *p)).min_by(|a, b| a.0.distance(a.1).total_cmp(&b.0.distance(b.1))).map_or(points[0], |h| h.0)
+}
+
+/// A boolean whose result carries the tags of both inputs.
+pub fn boolean_tagged(a: (&[Solid], &Tags), b: (&[Solid], &Tags), op: Bool, feature: Id) -> R<(Lumps, Tags)> {
+    let out = boolean_impl(a.0,b.0,op,false)?;
+    let tags = carry(&[a,b],&out,feature);
+    // clean() only reports history against its immediate input. Compose tags
+    // before cleaning so boolean provenance is not discarded by unification.
+    let mut cleaned=Vec::with_capacity(out.len());
+    let mut cleaned_tags=Vec::with_capacity(out.len());
+    for (original,original_tags) in out.into_iter().zip(tags) {
+        // Keep the independent original as the safe fallback. A BRep copy has
+        // identical face traversal but fresh IDs, so associate its tags before
+        // cleaning and compose history against that immediate input.
+        let working=original.clone();
+        let before=original.volume();
+        match working.clean() {
+            Ok(result) if result.volume().is_finite() && (result.volume()-before).abs()<=1e-7*before.abs().max(1.) => {
+                let input_tags=vec![original_tags];
+                let mut result_tags=carry(&[(std::slice::from_ref(&working),&input_tags)],std::slice::from_ref(&result),feature);
+                cleaned.push(result);cleaned_tags.push(result_tags.remove(0));
+            }
+            _ => {cleaned.push(original);cleaned_tags.push(original_tags);}
+        }
+    }
+    Ok((cleaned,cleaned_tags))
+}
+
+/// Rounds (or, with `chamfer`, bevels) the picked edges by `size`. Returns the
+/// result, its tags, and the weakest level any pick needed.
+pub fn blend(lumps: &[Solid], tags: &Tags, picks: &[EdgePick], size: f64, chamfer: bool, feature: Id) -> R<Blended<EdgeTag>> {
     let what = if chamfer { "chamfer" } else { "fillet" };
     if size <= 0.0 {
         return Err(format!("the {what} size must be greater than zero"));
     }
-    let picks = find_edges(lumps, points)?;
+    let asked = picks;
+    let picks = find_edges(lumps, tags, picks)?;
+    let points = asked.iter().zip(&picks).map(|(pick, found)| settled(&pick.points, |p| g(found.1.project(c(p)).0))).collect();
+    let level = crate::tag::weakest(picks.iter().map(|p| p.2)).unwrap_or(Level::Tag);
     let mut out = Vec::new();
     for (i, lump) in lumps.iter().enumerate() {
         let mut edges: Vec<&Edge> = picks.iter().filter(|p| p.0 == i).map(|p| p.1).collect();
@@ -349,18 +999,219 @@ pub fn blend(lumps: &[Solid], points: &[[DVec3; 2]], size: f64, chamfer: bool) -
         }
         out.push(made);
     }
-    Ok(out)
+    let mut out_tags = carry(&[(lumps, tags)], &out, feature);
+    // Unselected lumps are exact deep copies, whose kernel history is empty.
+    // Their traversal is unchanged, so preserve their existing identities.
+    for i in 0..out.len() {if !picks.iter().any(|p|p.0==i) {out_tags[i]=tags[i].clone();}}
+    Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect(), points })
 }
 
-/// Hollows the body to a wall of `thickness`, open at the faces nearest `points`.
-pub fn shell(lumps: &[Solid], points: &[[DVec3; 2]], thickness: f64) -> R<Lumps> {
+/// A point for a message, in millimetres.
+fn point_text(p: DVec3) -> String {
+    format!("({}, {}, {}) mm", crate::units::trim_num(p.x, 2), crate::units::trim_num(p.y, 2), crate::units::trim_num(p.z, 2))
+}
+
+/// Whether a face picked to be opened is still in the result, unchanged: same surface,
+/// same extent. A face that became an opening's rim keeps its surface but not its area.
+fn face_kept(made: &Solid, face: &Face) -> bool {
+    let (at, normal) = face.project(face.center());
+    let (at, normal) = (g(at), g(normal));
+    made.iter_face().any(|f| {
+        if kind_of(f) != kind_of(face) { return false; }
+        let (on, n) = f.project(c(at));
+        g(on).distance(at) < 1e-6 && g(n).dot(normal) > 1.0 - 1e-7 && (f.area() - face.area()).abs() <= 1e-6 * face.area().abs().max(1.0)
+    })
+}
+
+/// Opens flat faces of a shell the kernel could not: hollows the body into a sealed
+/// shell with an inner void, then cuts the cap over each face away with a prism of the
+/// face's outline, a little deeper than the wall so the void is reached.
+fn open_through_cap(lump: &Solid, thickness: f64, faces: &[&Face]) -> R<Solid> {
+    if let Some(f) = faces.iter().find(|f| kind_of(f) != Kind::Plane) {
+        let (at, _) = f.project(f.center());
+        return Err(format!("the face at {} meets a fillet or a tangent face and is not flat, so it cannot be opened; shell before filleting the edges around it, or choose a flat face", point_text(g(at))));
+    }
+    let mut made = lump.shell(-thickness, std::iter::empty()).map_err(|_| "the body cannot be hollowed to that wall thickness".to_owned())?;
+    for face in faces {
+        let (at, normal) = face.project(face.center());
+        let (at, normal) = (g(at), g(normal).normalize_or_zero());
+        if normal == DVec3::ZERO { return Err("the face to open has no normal".into()); }
+        let reach = thickness + 0.02;
+        let outline = ordered_loops(face).ok_or("the kernel could not trace the outline of the face to open")?;
+        let prism = Solid::extrude(outline.iter(), c(-normal * reach)).map_err(|e| format!("the kernel could not build the opening: {e}"))?.translate(c(normal * 0.01));
+        let cut = boolean(std::slice::from_ref(&made), std::slice::from_ref(&prism), Bool::Subtract)?;
+        made = cut.into_iter().max_by(|a, b| a.volume().total_cmp(&b.volume())).ok_or("the opening left nothing of the body")?;
+        let _ = at;
+    }
+    Ok(made)
+}
+
+/// A face's boundary as edges in order, each starting where the one before ended and each
+/// loop returning to its start, which is how the kernel takes a profile. A face lists its
+/// edges in no order and each runs its own way. A straight edge that runs backwards is
+/// made again the other way round; a loop in which a curved edge runs backwards is given
+/// up on, since the kernel cannot turn one round.
+fn ordered_loops(face: &Face) -> Option<Vec<Edge>> {
+    const MEET: f64 = 1e-6;
+    let straight = |e: &Edge| {
+        let (a, b) = (g(e.start_point()), g(e.end_point()));
+        a.distance(b) > MEET && e.approximation_segments(FINE).iter().all(|p| (b - a).cross(g(*p) - a).length() <= 1e-9 * (b - a).length_squared().max(1.0))
+    };
+    let mut rest: Vec<Edge> = face.iter_edge().cloned().collect();
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        // A curved edge sets which way round its loop goes, since only straight ones can be turned.
+        let first = rest.remove(rest.iter().position(|e| !straight(e)).unwrap_or(0));
+        let (start, mut end) = (g(first.start_point()), g(first.end_point()));
+        out.push(first);
+        while end.distance(start) > MEET {
+            if let Some(i) = rest.iter().position(|e| g(e.start_point()).distance(end) <= MEET) {
+                let next = rest.remove(i);
+                end = g(next.end_point());
+                out.push(next);
+            } else if let Some(i) = rest.iter().position(|e| g(e.end_point()).distance(end) <= MEET) {
+                let back = rest.remove(i);
+                if !straight(&back) { return None; }
+                let to = g(back.start_point());
+                out.push(Edge::line(c(end), c(to)).ok()?);
+                end = to;
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Tilts a flat face about a hinge lying in it, by `degrees` right-handed about `axis`
+/// (seen looking along the axis, clockwise). The side of the face that rises is carried
+/// straight out along the face's own direction, as the end of a rod or the wall of a box
+/// continues; the side that sinks is cut away. Only the column of material over and under
+/// the face is touched. `only` puts the hinge at the edge of the face instead of its
+/// middle: `Some(true)` so that material is only cut, `Some(false)` so that it is only added.
+pub fn tilt(lumps: &[Solid], tags: &Tags, pick: &FacePick, axis: DVec3, degrees: f64, only: Option<bool>, feature: Id) -> R<Blended<Tag>> {
+    if !(degrees.abs() > 1e-6 && degrees.abs() <= 85.0) {
+        return Err("the tilt should be between 0 and 85 degrees, either way".into());
+    }
+    let found = find_faces(lumps, tags, std::slice::from_ref(pick))?;
+    let (li, face, level, tag) = (found[0].0, found[0].1, found[0].2, found[0].3.clone());
+    if kind_of(face) != Kind::Plane {
+        return Err("only a flat face can be tilted".into());
+    }
+    let point = settled(&pick.points, |p| g(face.project(c(p)).0));
+    let (at, normal) = face.project(face.center());
+    let (centre, mut n) = (g(at), g(normal).normalize());
+    // Outward is the side with no material just off the face.
+    if lumps[li].contains(c(centre + n * 1e-4)) && !lumps[li].contains(c(centre - n * 1e-4)) { n = -n; }
+    let along = (axis - n * axis.dot(n)).try_normalize().ok_or("the hinge points straight out of the face; choose a direction that lies along it")?;
+    let across = n.cross(along);
+    let outline: Vec<f64> = face.iter_edge().flat_map(|e| e.approximation_segments(FINE)).map(|p| (g(p) - centre).dot(across)).collect();
+    let (lo, hi) = outline.iter().fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+    if !(hi - lo > 1e-9) { return Err("the face has no width across that hinge".into()); }
+    let turn = degrees.to_radians();
+    // A point `t` across the hinge rises by `(t - hinge) tan`.
+    let hinge = match only { None => (lo + hi) / 2.0, Some(cut) => if (turn > 0.0) == cut { hi } else { lo } };
+    let (rise, sink) = (((hi - hinge) * turn.tan()).max((lo - hinge) * turn.tan()).max(0.0), (-((hi - hinge) * turn.tan()).min((lo - hinge) * turn.tan())).max(0.0));
+    let (through, tilted) = (centre + across * hinge, n * turn.cos() - across * turn.sin());
+    let role = |solids: &[Solid]| -> Tags {
+        solids.iter().map(|s| s.iter_face().map(|f| {
+            let (on, facing) = f.project(f.center());
+            let is_face = kind_of(f) == Kind::Plane && g(facing).dot(tilted).abs() > 1.0 - 1e-7 && (g(on) - through).dot(tilted).abs() < 1e-6;
+            Some(Tag::new(Origin::Semantic { feature, role: if is_face { "tilt:face".into() } else { "tilt:side".into() } }, kind_of(f)))
+        }).collect()).collect()
+    };
+    let fail = |e: cadrum::Error| format!("the kernel could not tilt that face: {e}");
+    let (mut body, mut body_tags) = (vec![lumps[li].clone()], vec![tags[li].clone()]);
+    // The face whose outline bounds the cut: the picked one, or where it is once carried out.
+    let mut top: Option<Solid> = None;
+    let lift = if rise > 1e-9 { rise * 1.02 + 1e-3 } else { 0.0 };
+    if lift > 0.0 {
+        // The kernel moves the face out and lets its neighbours follow, as a wall or a rod
+        // continues. Where it cannot, the face is carried straight out along its own direction.
+        let before = lumps[li].volume();
+        // Only among flat and round neighbours: the kernel spends a long time on a swept
+        // surface and then gives up.
+        let rim: Vec<u64> = face.iter_edge().map(|e| e.id()).collect();
+        let simple = lumps[li].iter_face().filter(|f| f.iter_edge().any(|e| rim.contains(&e.id()))).all(|f| matches!(kind_of(f), Kind::Plane | Kind::Cylinder | Kind::Cone));
+        let pushed = if simple { lumps[li].offset(lift, std::iter::once(face), 1e-6).ok().filter(|s| s.volume().is_finite() && s.volume() > before + 1e-12) } else { None };
+        match pushed {
+            Some(solid) => {
+                body_tags = carry(&[(&body, &body_tags)], std::slice::from_ref(&solid), feature);
+                body = vec![solid];
+            }
+            None => {
+                let outline = ordered_loops(face).ok_or("that face's outline cannot be carried outward; set the pivot so that the tilt only cuts")?;
+                let more = vec![Solid::extrude(outline.iter(), c(n * lift)).map_err(fail)?];
+                (body, body_tags) = boolean_tagged((&body, &body_tags), (&more, &role(&more)), Bool::Union, feature)?;
+            }
+        }
+        top = body.first().cloned();
+    }
+    // What lies beyond the tilted plane, within the column under the face: the face as it
+    // now is, when it was carried out, since its neighbours may have widened it.
+    let raised = top.as_ref().and_then(|solid| solid.iter_face().find(|f| {
+        let (on, facing) = f.project(f.center());
+        kind_of(f) == Kind::Plane && g(facing).dot(n).abs() > 1.0 - 1e-7 && ((g(on) - centre).dot(n) - lift).abs() < 1e-6
+    }));
+    let depth = lift + sink * 1.02 + 1e-3;
+    let spread: Vec<DVec3> = raised.unwrap_or(face).iter_edge().flat_map(|e| e.approximation_segments(FINE)).map(g).collect();
+    let (a, b): (Vec<f64>, Vec<f64>) = spread.iter().map(|p| ((*p - centre).dot(along), (*p - centre).dot(across))).unzip();
+    let range = |v: &[f64]| v.iter().fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+    let ((a0, a1), (b0, b1)) = (range(&a), range(&b));
+    // A box around the face, in the hinge's frame, wider than the face by `margin`.
+    let boxed = |margin: f64| {
+        let boxed = Solid::cube(c(DVec3::new(a0 - margin, b0 - margin, lift - depth)), c(DVec3::new(a1 + margin, b1 + margin, lift + margin.max(1e-3))));
+        let (axis, angle) = glam::DQuat::from_mat3(&glam::DMat3::from_cols(along, across, n)).to_axis_angle();
+        let boxed = if angle.abs() > 1e-12 { boxed.rotate(c(DVec3::ZERO), c(axis), angle) } else { boxed };
+        boxed.translate(c(centre))
+    };
+    // Where the body falls away all round the face, as at the end of a rod or the top of
+    // a block, the tool is a box a little wider than the face. A column drawn from the
+    // face's own outline would share its sides with the body's, which is slow to cut and,
+    // on a curved rod, can come out wrong. Where material continues beside the face, as
+    // at the foot of a wall, only the column under the face may be cut.
+    let margin = (0.02 * (a1 - a0).hypot(b1 - b0)).max(1e-3);
+    let outline: Vec<DVec3> = face.iter_edge().flat_map(|e| e.approximation_segments(FINE)).map(g).collect();
+    let middle = outline.iter().sum::<DVec3>() / outline.len().max(1) as f64;
+    let free = outline.iter().all(|p| {
+        let Some(out) = ((*p - middle) - n * (*p - middle).dot(n)).try_normalize() else { return true };
+        !lumps[li].contains(c(*p + out * margin - n * 1e-4f64.max(margin * 0.05)))
+    });
+    let column = if free { boxed(margin) } else {
+        match ordered_loops(raised.unwrap_or(face)) {
+            // A little above the face, so that the face itself is inside the cut.
+            Some(outline) => Solid::extrude(outline.iter(), c(-n * (depth + 1e-3))).map_err(fail)?.translate(c(n * 1e-3)),
+            // An outline that cannot be put in order: the box that just holds the face.
+            None => boxed(1e-3),
+        }
+    };
+    // A half-space has no volume to check a cut against, so this one goes straight to the kernel.
+    let beyond = (&column - &Solid::half_space(c(through), c(-tilted))).build_vec().map_err(fail)?;
+    if beyond.is_empty() { return Err("the tilt left nothing to cut".into()); }
+    (body, body_tags) = boolean_tagged((&body, &body_tags), (&beyond, &role(&beyond)), Bool::Subtract, feature)?;
+    let made = volume(&body);
+    if body.is_empty() || !made.is_finite() || made <= 1e-9 {
+        return Err("the tilt left nothing of the body".into());
+    }
+    let (mut out, mut out_tags) = (Vec::new(), Vec::new());
+    for (i, lump) in lumps.iter().enumerate() {
+        if i == li { out.append(&mut body); out_tags.append(&mut body_tags); } else { out.push(lump.clone()); out_tags.push(tags[i].clone()); }
+    }
+    Ok(Blended { lumps: out, tags: out_tags, level, picked: vec![tag], points: vec![point] })
+}
+
+/// Hollows the body to a wall of `thickness`, open at the picked faces.
+pub fn shell(lumps: &[Solid], tags: &Tags, picks: &[FacePick], thickness: f64, feature: Id) -> R<Blended<Tag>> {
     if thickness <= 0.0 {
         return Err("the wall thickness must be greater than zero".into());
     }
-    if points.is_empty() {
+    if picks.is_empty() {
         return Err("choose at least one face to leave open".into());
     }
-    let picks = find_faces(lumps, points)?;
+    let asked = picks;
+    let picks = find_faces(lumps, tags, picks)?;
+    let points = asked.iter().zip(&picks).map(|(pick, found)| settled(&pick.points, |p| g(found.1.project(c(p)).0))).collect();
+    let level = crate::tag::weakest(picks.iter().map(|p| p.2)).unwrap_or(Level::Tag);
     let mut out = Vec::new();
     for (i, lump) in lumps.iter().enumerate() {
         let mut faces: Vec<&Face> = picks.iter().filter(|p| p.0 == i).map(|p| p.1).collect();
@@ -370,14 +1221,41 @@ pub fn shell(lumps: &[Solid], points: &[[DVec3; 2]], thickness: f64) -> R<Lumps>
             out.push(lump.clone());
             continue;
         }
-        let made = lump.shell(-thickness, faces).map_err(|_| "the body cannot be hollowed to that wall thickness".to_owned())?;
+        let mut made = lump.shell(-thickness, faces.iter().copied()).map_err(|_| "the body cannot be hollowed to that wall thickness".to_owned())?;
         // A shell that did not carve anything out is the kernel failing quietly.
         if !(made.volume() > 0.0) || made.volume() > lump.volume() * (1.0 - 1e-9) {
             return Err("the wall is too thick to leave a cavity".into());
         }
+        // The kernel also fails quietly when an open face meets a fillet or another tangent
+        // face: it keeps the face and seals an offset of it underneath. Open it ourselves then.
+        if faces.iter().any(|f| face_kept(&made, f)) {
+            made = open_through_cap(lump, thickness, &faces)?;
+            if let Some(f) = faces.iter().find(|f| face_kept(&made, f)) {
+                let (at, _) = f.project(f.center());
+                return Err(format!("the face at {} could not be opened; shell before filleting the edges around it, or choose another face", point_text(g(at))));
+            }
+        }
         out.push(made);
     }
-    Ok(out)
+    let mut out_tags = carry(&[(lumps, tags)], &out, feature);
+    for i in 0..out.len() {if !picks.iter().any(|p|p.0==i) {out_tags[i]=tags[i].clone();}}
+    // Cadrum's thick-solid bridge does not expose every offset Generated face.
+    // Recover the operation's exact normal-offset relation, not a nearest face:
+    // the inner face must lie one wall thickness inward, with opposite normals,
+    // and have exactly one qualifying source. This survives wall/size edits.
+    let sources:Vec<_>=lumps.iter().zip(tags).flat_map(|(s,t)|s.iter_face().zip(t).filter_map(|(f,t)|Some((f,t.as_ref()?)))).collect();
+    for (li,lump) in out.iter().enumerate() {for (fi,face) in lump.iter_face().enumerate() {
+        if !matches!(out_tags[li][fi].as_ref().map(|t|&t.origin),Some(Origin::Surface {..})) {continue;}
+        let (point,normal)=face.project(face.center());let point=g(point);let normal=g(normal);
+        let mut found:Vec<_>=sources.iter().filter(|(old,_)| {
+            if kind_of(old)!=kind_of(face) {return false;}
+            let (on,outward)=old.project(c(point));let on=g(on);let outward=g(outward);
+            normal.dot(outward) < -1.+1e-7 && (on-point-outward*thickness).length()<1e-5
+        }).map(|(_,tag)|(*tag).clone()).collect();
+        found.sort();found.dedup();
+        if found.len()==1 {out_tags[li][fi]=Some(Tag::new(Origin::Derived {feature,sources:found},kind_of(face)));}
+    }}
+    Ok(Blended { lumps: out, tags: out_tags, level, picked: picks.into_iter().map(|p| p.3).collect(), points })
 }
 
 /// What a drill and its countersink or counterbore take out, in millimetres and degrees.
@@ -447,6 +1325,31 @@ pub fn drill(at: DVec3, dir: DVec3, d: &Drill) -> R<Lumps> {
     Ok(tool)
 }
 
+/// Each drill location has explicit barrel/head/tip roles. Point coordinates
+/// scope repeated holes without relying on their order in the feature's list;
+/// changing diameter/depth keeps the role, removing/replacing a point does not.
+pub fn drill_tags(lumps:&[Solid],feature:Id,at:DVec3,dir:DVec3,drill:&Drill)->Tags {
+    lumps.iter().map(|s|s.iter_face().map(|f| {
+        let z=(g(f.center())-at).dot(dir);
+        let role=match f.surface().map(|s|s.kind) {
+            Some(SurfaceKind::Cylinder {radius})=>if (radius-drill.diameter/2.).abs()<1e-6 {"barrel"} else {"counterbore"},
+            Some(SurfaceKind::Cone {..})=>if z>=drill.depth-1e-6 {"tip"} else {"countersink"},
+            Some(SurfaceKind::Plane)=>if z>=drill.depth-1e-6 {"bottom"} else if z<0. {"entry"} else {"shoulder"},
+            _=>return Some(surface_tag(f,feature)),
+        };
+        Some(Tag::new(Origin::Semantic {feature,role:format!("drill:{:?}:{:?}:{role}",at.to_array(),dir.to_array())},kind_of(f)))
+    }).collect()).collect()
+}
+
+/// Named portions of a cylinder used internally by a thread feature.
+pub fn cylinder_tags(lumps:&[Solid],feature:Id,from:DVec3,to:DVec3,scope:&str)->Tags {
+    let axis=(to-from).normalize();let length=from.distance(to);
+    lumps.iter().map(|s|s.iter_face().map(|f| {
+        let role=if kind_of(f)==Kind::Plane {if (g(f.center())-from).dot(axis)>length/2. {"end"} else {"start"}} else {"barrel"};
+        Some(Tag::new(Origin::Semantic {feature,role:format!("{scope}:{role}")},kind_of(f)))
+    }).collect()).collect()
+}
+
 /// A plain cylinder from `from` to `to`.
 pub fn cylinder(from: DVec3, to: DVec3, radius: f64) -> R<Lumps> {
     if from.distance(to) < 1e-9 || !(radius > 0.0) {
@@ -469,7 +1372,12 @@ pub struct Barrel {
 
 /// The cylindrical face nearest the point, with any other pieces of the same cylinder.
 pub fn barrel(lumps: &[Solid], tries: &[DVec3; 2]) -> R<Barrel> {
-    let (_, face) = find_faces(lumps, std::slice::from_ref(tries))?[0];
+    barrel_tagged(lumps, &no_tags(lumps), &FacePick { points: *tries, tag: None }).map(|b| b.0)
+}
+
+/// [`barrel`] for a stored reference, with how the face was found.
+pub fn barrel_tagged(lumps: &[Solid], tags: &Tags, pick: &FacePick) -> R<(Barrel, Level, Option<Tag>)> {
+    let (_, face, level, found) = find_faces(lumps, tags, std::slice::from_ref(pick))?.remove(0);
     let (Some(surface), Some(radius)) = (face.surface(), face.surface().and_then(|s| if let SurfaceKind::Cylinder { radius } = s.kind { Some(radius) } else { None })) else {
         return Err("a thread goes on a cylindrical face; that face is not one".into());
     };
@@ -491,10 +1399,10 @@ pub fn barrel(lumps: &[Solid], tries: &[DVec3; 2]) -> R<Barrel> {
         return Err("that cylindrical face has no length".into());
     }
     // The kernel's normals point out of the material, so on a hole they point at the axis.
-    let (on, normal) = face.project(c(tries[0]));
+    let (on, normal) = face.project(c(pick.points[0]));
     let (on, normal) = (g(on), g(normal));
     let outward = on - origin - axis * (on - origin).dot(axis);
-    Ok(Barrel { start: origin + axis * lo, axis, length: hi - lo, radius, internal: normal.dot(outward) < 0.0 })
+    Ok((Barrel { start: origin + axis * lo, axis, length: hi - lo, radius, internal: normal.dot(outward) < 0.0 }, level, found))
 }
 
 /// The shrinking conical chamfer immediately beyond a rod's cylindrical end.
@@ -574,6 +1482,7 @@ pub struct EdgeInfo {
     pub mid: DVec3,
     pub length: f64,
     pub straight: bool,
+    pub tag: Option<EdgeTag>,
 }
 
 pub struct FaceInfo {
@@ -582,13 +1491,17 @@ pub struct FaceInfo {
     pub normal: DVec3,
     pub area: f64,
     pub kind: &'static str,
+    pub tag: Option<Tag>,
 }
 
 pub fn edges(lumps: &[Solid]) -> Vec<EdgeInfo> {
-    lumps
-        .iter()
-        .flat_map(real_edges)
-        .filter_map(|e| {
+    edges_tagged(lumps, &no_tags(lumps))
+}
+
+pub fn edges_tagged(lumps: &[Solid], tags: &Tags) -> Vec<EdgeInfo> {
+    edge_table(lumps, tags)
+        .into_iter()
+        .filter_map(|(_, e, tag)| {
             let pts: Vec<DVec3> = e.approximation_segments(FINE).into_iter().map(g).collect();
             let length: f64 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
             // Halfway along, by length, so that it lies on the edge itself.
@@ -602,16 +1515,25 @@ pub fn edges(lumps: &[Solid]) -> Vec<EdgeInfo> {
                 }
                 left -= d;
             }
-            Some(EdgeInfo { mid, length, straight: pts.len() == 2 })
+            // The polyline is an approximation; a curved edge passes some way from it.
+            // Put the point on the edge itself, so that a reference made from it can be
+            // told from another edge with the same tag by where it is.
+            let mid = g(e.project(c(mid)).0);
+            Some(EdgeInfo { mid, length, straight: pts.len() == 2, tag })
         })
         .collect()
 }
 
 pub fn faces(lumps: &[Solid]) -> Vec<FaceInfo> {
+    faces_tagged(lumps, &no_tags(lumps))
+}
+
+pub fn faces_tagged(lumps: &[Solid], tags: &Tags) -> Vec<FaceInfo> {
     lumps
         .iter()
-        .flat_map(|s| s.iter_face())
-        .map(|f| {
+        .enumerate()
+        .flat_map(|(i, s)| s.iter_face().enumerate().map(move |(fi, f)| (f, tags.get(i).and_then(|t| t.get(fi)).cloned().flatten())))
+        .map(|(f, tag)| {
             let (at, normal) = f.project(f.center());
             let kind = match f.surface().map(|s| s.kind) {
                 Some(SurfaceKind::Plane) => "plane",
@@ -621,7 +1543,7 @@ pub fn faces(lumps: &[Solid]) -> Vec<FaceInfo> {
                 Some(SurfaceKind::Torus { .. }) => "torus",
                 None => "freeform",
             };
-            FaceInfo { at: g(at), normal: g(normal), area: f.area(), kind }
+            FaceInfo { at: g(at), normal: g(normal), area: f.area(), kind, tag }
         })
         .collect()
 }

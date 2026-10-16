@@ -195,6 +195,12 @@ The bundled [Noto Sans Bold font](https://github.com/base698/ferrender/blob/0.4-
 
 ## Built to be driven
 
+The 0.4 development branch also has a first-pass [structural member analysis API](docs/STRUCTURAL_ANALYSIS.md)
+for rectangular lumber extrusions: measured sections and spacing, 2D frame loads/supports,
+stress ratios and sampled deflection. Start with [the Rhai joist example](examples/structural-joist.rhai).
+Inspect → Loads runs it in the app for a deck over a row of joists and draws each member bent and coloured by how near its limit it is.
+Results are preliminary estimates with explicit material inputs; full design checks are follow-up work.
+
 Everything above is also a command. These are some of the commands behind the bearing block, as Claude would send
 them over MCP:
 
@@ -226,10 +232,10 @@ been tried against the live API.
 
 | | |
 |---|---|
-| **Sketch** | Line, rectangle, circle, ellipse, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
+| **Sketch** | Line, rectangle (two corners, or centre and corner), circle, ellipse, center/three-point/tangent arc, four-point spline, point, polygon; coordinate entry; reference images; open-end highlighting; trim, offset, mirror, fillet, chamfer; project a body's face; construction geometry; copy and paste |
 | **Constrain** | Coincident, collinear, concentric, midpoint, fix, equal, parallel, perpendicular, horizontal, vertical, tangent, symmetric; signed X/Y position, length, distance, radius, diameter and angle dimensions |
 | **Parameters** | Named expressions with units (`mm`, `cm`, `in`), usable in every size box |
-| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, loft through sections, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell |
+| **Solids** | Extrude (distance, through all, to face, taper, symmetric), revolve, sweep along a path, loft through sections, box, cylinder, sphere, cone/frustum, torus; join / cut / intersect, fillet, chamfer, shell, tilt a face |
 | **Text** | Editable 3D lettering, raised text and engraving on flat exact faces, alignment, offsets, rotation, spacing and parameter-driven dimensions |
 | **Holes and threads** | Simple, counterbore, countersink; clearance or tapped from the catalog; modeled threads inside and out |
 | **Arrange** | Move, rotate, scale, combine bodies; circular, linear and mirror patterns |
@@ -331,7 +337,9 @@ exactly so. **3-Point Arc** uses start, end, then through/bulge points; **Tangen
 continues from a line or arc endpoint. **Spline** passes through four editable
 fit points. **Ellipse** takes its centre, the end of one axis, then a click that
 sets its width; the ends of its two axes are points you can drag, dimension
-from the centre, or make horizontal or vertical with it. **Point Coordinates…** creates a point or edits a selected one
+from the centre, or make horizontal or vertical with it. While drawing, a
+visible point of another sketch or a corner of a body can be clicked: the new
+point lands where it falls on this sketch's plane and is fixed there. **Point Coordinates…** creates a point or edits a selected one
 with signed X/Y expressions; double-click a point to reopen it. Position
 dimensions keep the coordinates attached to parameters. Drag with Select (V);
 geometry moves as far as its constraints allow. While drawing a line, **Shift**
@@ -499,6 +507,18 @@ Fillet and Chamfer round or bevel the edges of a
 body: click edges to add or remove them (with a face selected first, its edges
 start selected). Shell hollows a body to a wall thickness, open at the faces
 you click. A size that cannot fit is refused in the preview.
+
+### Tilt Face
+
+Tilt Face turns a flat face about a hinge lying in it: the slanted end of a
+rod, a leaning wall. Look along the line the face should hinge about and click
+the face; the dashed line shows the hinge. Drag the round handle or type the
+angle: a positive angle turns the face clockwise as you saw it, and an outline
+shows where it will lie. The body is rebuilt when you press OK. **From view** takes the hinge from the current view
+again and **Turn 90°** turns it a quarter turn within the face. The pivot
+puts the hinge through the middle of the face, or at the edge where the tilt
+only cuts or only adds material. Flat and round faces around it are extended
+to meet it.
 
 ### Timeline
 
