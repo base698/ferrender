@@ -18,22 +18,22 @@ use crate::profile::Chain;
 
 const PATH: Tessellation = Tessellation { deflection_linear: 0.005, deflection_angular: 0.05, relative_linear: false };
 /// Pieces whose tangents differ by more than this (radians) meet at a corner.
-const KINK: f64 = 1e-3;
+pub(super) const KINK: f64 = 1e-3;
 /// A corner may turn the path by at most this much (radians); beyond it the mitre runs away.
 const SHARPEST: f64 = 150.0 * std::f64::consts::PI / 180.0;
 
 /// One piece of the path in the feature's frame.
-struct Leg {
-    edge: Edge,
+pub(super) struct Leg {
+    pub(super) edge: Edge,
     /// The sketch segment the piece was made from, for cutting part of it out.
-    seg: Seg,
+    pub(super) seg: Seg,
     /// The piece as points from its start to its end.
-    pts: Vec<DVec3>,
+    pub(super) pts: Vec<DVec3>,
     /// Unit tangents at the start and the end, pointing along the path.
-    t0: DVec3,
-    t1: DVec3,
+    pub(super) t0: DVec3,
+    pub(super) t1: DVec3,
     id: Id,
-    len: f64,
+    pub(super) len: f64,
     /// How far the piece turns to the left about the path plane's normal, signed.
     turning: f64,
 }
@@ -102,7 +102,7 @@ fn leg(edge: Edge, seg: Seg, id: Id, n: DVec3, measured: Option<f64>) -> R<Leg> 
     Ok(Leg { edge, seg, len: measured.unwrap_or_else(|| chords.iter().map(|d| d.length()).sum()), pts, t0, t1, id, turning })
 }
 
-fn legs(path: &Chain, plane: &Plane) -> R<Vec<Leg>> {
+pub(super) fn legs(path: &Chain, plane: &Plane) -> R<Vec<Leg>> {
     let n = plane.normal();
     path.segs.iter().zip(&path.ids).map(|(seg, id)| {
         let edge = seg_edge(seg, plane, 0.0).map_err(|e| format!("the path has an edge the kernel rejects: {e}"))?;

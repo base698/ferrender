@@ -344,12 +344,14 @@ pub struct TextDlg {
     pub body: Option<Id>,
     pub face: Option<DVec3>,
     pub frame: Option<[DVec3; 2]>,
+    /// The face is curved: the lettering is projected onto it.
+    pub curved: bool,
 }
 
 impl TextDlg {
     pub fn feature(&self, d: &mut Document) -> Result<Text, String> {
         if self.op != Op::New && self.body.zip(self.face).is_none() {
-            return Err("Click a flat face to raise or engrave text.".into());
+            return Err("Click a face to raise or engrave text.".into());
         }
         Ok(Text {
             tag: None,
@@ -361,6 +363,7 @@ impl TextDlg {
             body: if self.op == Op::New { None } else { self.body },
             face: if self.op == Op::New { None } else { self.face },
             frame: if self.op == Op::New { None } else { self.frame },
+            curved: self.op != Op::New && self.curved,
         })
     }
 }
@@ -1896,7 +1899,7 @@ impl App {
                     editing: Some(id), owner: self.doc().feature(id).map_or(0, |f| f.owner), text: t.text.clone(), plane: t.plane,
                     height: shown(&t.height), depth: shown(&t.depth), spacing: shown(&t.spacing),
                     angle: shown(&t.angle), x: shown(&t.x), y: shown(&t.y), align: t.align,
-                    op: t.op, body: t.body, face: t.face, frame: t.frame,
+                    op: t.op, body: t.body, face: t.face, frame: t.frame, curved: t.curved,
                 });
                 self.fit_pending = true;
             }
@@ -2001,19 +2004,22 @@ impl App {
     /// Uses the actual clicked point as the baseline origin, keeping offsets editable.
     pub fn text_on_face(&mut self, face: Face) -> Result<(), String> {
         self.prepare_text_source();
+        let world = face.at;
         let face = self.local_face(face);
-        let mut plane = face.plane.ok_or("Text / Emboss supports flat faces only; curved wrapping is not available.")?;
         let body = self.text_source().body(face.body).ok_or("Choose a face that exists before this text feature in the timeline.")?;
         if !body.is_exact() {
-            return Err("Text / Emboss needs a flat face of a solid; imported mesh faces are not supported.".into());
+            return Err("Text / Emboss needs a face of a solid; imported mesh faces are not supported.".into());
         }
+        // A curved face takes the plane touching it where it was clicked; the text is projected onto it.
+        let curved = face.plane.is_none();
+        let mut plane = match face.plane { Some(plane) => plane, None => Text::curved_plane(body, world)? };
         let (frame, owner) = (self.text_source().frame(face.body), body.component);
         let Dialog::Text(t) = &mut self.dialog else { return Err("Open Text / Emboss first.".into()) };
         if t.editing.is_some() && t.owner != owner { return Err("An existing text feature cannot move to another component. Create new text in the target component instead.".into()); }
         t.owner = owner;
         let n = plane.normal();
         plane.origin = face.at - n * (face.at - plane.origin).dot(n);
-        (t.plane, t.body, t.face, t.frame) = (plane, Some(face.body), Some(plane.origin), frame);
+        (t.plane, t.body, t.face, t.frame, t.curved) = (plane, Some(face.body), Some(plane.origin), frame, curved);
         if t.op == Op::New { t.op = Op::Join; }
         self.preview = None;
         Ok(())
@@ -2026,7 +2032,7 @@ impl App {
             editing: None, owner: self.doc().active_component, text: "Text".into(), plane: Plane::XY,
             height: "5 mm".into(), depth: "1 mm".into(), spacing: "0 mm".into(),
             angle: "0 deg".into(), x: "0 mm".into(), y: "0 mm".into(),
-            align: fr_core::text::Align::Left, op: Op::New, body: None, face: None, frame: None,
+            align: fr_core::text::Align::Left, op: Op::New, body: None, face: None, frame: None, curved: false,
         });
         if let Some(face) = face && let Err(e) = self.text_on_face(face) { self.toast(e); }
     }

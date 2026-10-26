@@ -251,7 +251,7 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
         Ok(())
     };
     let body=|id:Id| -> Result<(),String> {
-        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Sweep(_)|FeatureKind::Loft(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
+        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Sweep(_)|FeatureKind::Loft(_)|FeatureKind::Pipe(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
         else if id>=1000 && d.feature(id/1000).is_some() {earlier(id/1000,"pattern or split",|k|matches!(k,FeatureKind::Pattern(_)|FeatureKind::Split(_)))}
         else {Ok(())}
     };
@@ -275,6 +275,24 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
             if r.bodies.first().and_then(|id|d.body_owner(*id)).is_some_and(|owner|owner!=f.owner) {return Err("a remove feature must belong to its first target's component".into());}
         },
         FeatureKind::Sketch(s)=>{if let Some(id)=s.on {earlier(id,"construction plane",|k|matches!(k,FeatureKind::Plane(_)))?;}},
+        FeatureKind::Pipe(p)=>{
+            if p.path.is_empty() {return Err("a pipe needs a path".into());}
+            for run in &p.path {
+                earlier(run.sketch,"sketch",|k|matches!(k,FeatureKind::Sketch(_)))?;
+                if let Some(id)=run.onto {body(id)?;}
+            }
+            for v in std::iter::once(&p.diameter).chain(&p.bore) {
+                expression(&v.expr)?;
+                if !v.v.is_finite() || !(v.v as f32).is_finite() {return Err("pipe sizes must be finite and representable".into());}
+            }
+        },
+        FeatureKind::Emboss(e)=>{
+            earlier(e.sketch,"sketch",|k|matches!(k,FeatureKind::Sketch(_)))?;
+            body(e.body)?;
+            expression(&e.depth.expr)?;
+            if !e.depth.v.is_finite() || !(e.depth.v as f32).is_finite() {return Err("emboss depth must be finite and representable".into());}
+            if !matches!(e.op,crate::doc::Op::Join|crate::doc::Op::Cut) {return Err("emboss raises (join) or sinks (cut) the shapes".into());}
+        },
         FeatureKind::Plane(p)=>match &p.kind {
             PlaneKind::Offset {base,distance}=>{
                 plane(base)?; expression(&distance.expr)?;

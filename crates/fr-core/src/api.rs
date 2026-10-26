@@ -15,7 +15,7 @@ use base64::Engine;
 use glam::{DVec2, DVec3};
 use serde_json::{Value as J, json};
 
-use crate::doc::{Axis, Blend, Combine, Document, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Loft, LoftSection, Op, Pattern, Pivot, Tilt, PatternKind, Revolve, Session, Shell, Sweep, SweepOrient, Text, Thread, Transform};
+use crate::doc::{Axis, Blend, Combine, Document, Emboss, Extrude, FeatureKind, Hole, HoleFit, HoleShape, LinearDirection, Loft, LoftSection, Op, Pattern, Pipe, PipePath, Pivot, Tilt, PatternKind, Revolve, Session, Shell, Sweep, SweepOrient, Text, Thread, Transform};
 use crate::measure::{self, Item};
 use crate::threads;
 use crate::exact;
@@ -121,7 +121,7 @@ FEATURES
 {"op":"text","text":"CAD","height":"6 mm","depth":"1 mm","operation":"new","plane":"XY"}
    Creates parametric solid lettering. plane: XY | XZ | YZ, with optional origin:[x,y,z] in document units. height defaults to 6 mm, depth to 1 mm. spacing, x, y default to 0; angle defaults to 0 degrees. align: left | center | right (default left). x/y shift the lettering within its plane; angle rotates it there. Numeric fields accept units and parameter expressions.
 {"op":"text","text":"CAD","operation":"join","body":BODY,"face":[x,y,z],"height":"6 mm","depth":"1 mm"}
-   join embosses outward and cut engraves inward on the selected exact body's flat face; only that body changes. face must be a point on the face, in document units, and anchors the text plane there. Attached text cannot also specify plane/origin. Use operation:new without body/face for free-standing lettering. Unsupported characters and failed placement are rejected without changing the document.
+   join embosses outward and cut engraves inward on the selected exact body's face; only that body changes. On a flat face the lettering lies in the face. On a curved face (a ball, a can, a fillet) it is drawn on the plane touching the face at the point, reading level (along the horizontal), and projected onto the surface along that plane's normal: its sides run along the normal and its top follows the surface at the depth; get_object_info reports "surface":"curved". Lettering that reaches past the surface, or onto surface facing away from it, is refused; reduce the height or move it. face must be a point on the face, in document units, and anchors the text plane there. Attached text cannot also specify plane/origin. Use operation:new without body/face for free-standing lettering. Unsupported characters and failed placement are rejected without changing the document.
    edit_feature can change text, height, depth, spacing, x, y, angle, align, or operation. To attach previously free-standing text, also supply body and face; changing attached text to new detaches it while keeping its placement. New text can also change plane/origin.
    When editing body/face, coordinates refer to the base body immediately before the text feature. If later timeline features changed that body's geometry, first rollback to immediately before or after the text feature, choose its base face again, edit it, then rollback to "end". Face edits reject ambiguous downstream coordinates and cannot attach to the text's own raised faces. Text and dimension edits do not require rolling back.
 {"op":"extrude","sketch":ID,"distance":V,"operation":"new","symmetric":false,"profiles":[indices]}
@@ -132,6 +132,10 @@ FEATURES
    carries the profile along a path drawn in ANOTHER sketch: lines, arcs and splines joined end to end, or one circle. Draw the path first, then the profile on a plane that crosses it (for a path on XY starting along X, a profile on YZ). "path" names the entities to follow; omitted, it is every non-construction entity of path_sketch, which must then be one unbranched run. A closed path gives a ring or a frame. Pieces that meet tangentially are followed exactly; a sharp corner is mitred like a picture frame (it may turn by at most 150 degrees). The profile may sit anywhere along the path and off to one side of it. orientation: follow (the profile turns with the path) | fixed (it keeps its orientation; the path may not run sideways to it). Refused with a reason when a bend is tighter than the profile reaches on its inside, or a stretch between corners is too short. get_object_info on the feature lists the path in the order it is walked. Each side face is named by its profile entity and path entity. "spans" sweeps only parts of the path: each pair is a start and an end as fractions of the path's length, 0 at its start and 1 at its end, in walking order ([[0,0.5]] is the first half, [[0.1,0.3],[0.6,0.7]] two separate pieces in one body). Omitted or [] is the whole path. Each piece is the part of the whole sweep that lies there, so the profile stays where it would be on the full sweep. Pieces that touch or overlap are joined. On a circle, 0 is at the sketch's +X side and the fractions run anticlockwise.
    extrude also takes "extent":"all" (go through bodies in its component; the sign of distance picks the side), "taper":DEGREES (walls lean outward, negative inward), and instead of a sketch, "face":{"body":BODY,"point":[x,y,z]} to pull the flat face nearest that point out (or, with a negative distance, push it in and cut).
 {"op":"create_sketch","face":{"body":BODY,"point":[x,y,z]}}   sketch on a flat face
+{"op":"pipe","path":SKETCH | [SKETCH | {"sketch":SKETCH,"entities":[ids],"onto":BODY,"flip":false}, ...],"diameter":V,"bore":V,"operation":"new"}
+   a round section of the diameter carried along a path, square to it: a rod, with "bore" a tube, or with operation cut a groove. No profile sketch is needed. The path is one or more runs, each a sketch's lines, arcs and splines joined end to end (or one circle); "entities" picks them, omitted it is every non-construction entity of that sketch. Runs in different sketches on different planes join where their ends meet, so a path can leave the plane: four arcs on four planes make a tennis-ball seam. Where runs or pieces meet at an angle the pipe gets a ball joint; open ends are cut square. "onto":BODY lays the run onto that body: each point is carried along the sketch's normal, from the side the normal points to ("flip":true for the other side), until it meets the surface, so a circle drawn above a ball becomes a ring on the ball. operation: new | join | cut | intersect (default join when the component has bodies). Refused when the diameter is wider than a bend of the path, or part of a laid run misses the body. edit_feature changes path, diameter, bore (false removes it) and operation.
+{"op":"emboss","sketch":ID,"body":BODY,"depth":V,"operation":"join","profiles":[indices],"flip":false}
+   presses closed regions of a sketch onto a body's surface: each region is projected along the sketch's normal onto the surface facing the sketch ("flip":true for the surface behind it), then raised off it (join) or sunk into it (cut) by the depth, following the surface. Works on curved faces (spheres, cylinders, fillets) and flat ones; the sides of the shapes run along the sketch's normal. The sketch may be on any plane, in front of the body or through it. Shapes that reach past the body, or onto surface facing away from the sketch, are refused. "profiles" picks regions as for extrude; holes inside regions stay holes. edit_feature changes depth, profiles, flip and operation. For lettering use text with a curved face.
 {"op":"loft","sections":[SKETCH,SKETCH,{"sketch":SKETCH,"profile":INDEX},{"sketch":SKETCH,"point":POINT}],"ruled":false,"operation":"new"}
    skins one solid through closed outlines drawn in sketches on DIFFERENT planes, in the order given: two or more sections, each a sketch id (the sketch's one outer region), a sketch with the index of a region from get_object_info, or a sketch with the id of one of its points, which makes the loft come to a tip there (a cone or pyramid whose tip is a flat 0.001 mm across). Stack the sketches with create_sketch's "offset", on construction planes, or on faces. Every section needs the same number of edges: four lines to four lines, a circle to a circle; a mismatch is refused with both counts. Sections are matched corner to nearest corner, so it does not matter where each outline was started or which way round it was drawn. A region with a hole cannot be a section. "ruled":true joins neighbouring sections with straight walls (a frustum between two squares); otherwise the surface curves smoothly through all of them, which only differs from ruled with three or more sections. The ends are flat caps on the first and last sections. Returns the feature and the body it made or changed.
 {"op":"pattern","feature":ID,"type":"circular","axis":"z","count":6,"angle":360}   repeats an extrude, revolve, sweep, loft, primitive, import or standalone text around a component-local axis through its origin; count includes the original
@@ -199,7 +203,7 @@ pub const OPS: &[&str] = &[
     "export_stl", "export_step", "get_reference", "text", "rollback", "fillet_edges", "chamfer_edges", "shell", "tilt_face", "measure",
     "list_threads", "hole", "thread", "move", "set_units", "set_parameter", "delete_parameter", "create_component",
     "activate_component", "move_component", "create_plane", "create_sketch", "add_geometry", "point_coordinates",
-    "add_constraint", "set_dimension", "delete", "extrude", "revolve", "sweep", "loft", "remove_body", "split_body", "primitive", "pattern",
+    "add_constraint", "set_dimension", "delete", "extrude", "revolve", "sweep", "loft", "pipe", "emboss", "remove_body", "split_body", "primitive", "pattern",
     "trim", "mirror", "offset", "fillet", "chamfer", "project", "edit_feature", "delete_feature", "import_stl", "import_mesh",
     "mesh_measure", "mesh_repair", "mesh_decimate", "mesh_smooth", "mesh_subdivide", "mesh_cut", "mesh_mirror", "mesh_offset",
     "mesh_extrude_region", "mesh_sculpt", "mesh_from_image", "transform", "combine", "set_visible", "rename_body", "run_script", "script_meta", "add_feature",
@@ -590,6 +594,27 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["ruled"] = json!(l.ruled);
             o["operation"] = json!(l.op.name());
         }
+        FeatureKind::Pipe(p) => {
+            o["path"] = J::Array(p.path.iter().map(|run| {
+                let mut out = json!({"sketch": run.sketch});
+                match doc.sketch(run.sketch).ok_or_else(|| "its sketch was deleted".to_owned()).and_then(|sk| crate::profile::chain(sk, &run.entities)) {
+                    Ok(chain) => { out["entities"] = json!(chain.ids); out["closed"] = json!(chain.closed); }
+                    Err(e) => { out["entities"] = json!(run.entities); out["error"] = json!(e); }
+                }
+                if let Some(body) = run.onto { out["onto"] = json!(body); out["flip"] = json!(run.flip); }
+                out
+            }).collect());
+            o["diameter"] = json!({"expr": p.diameter.expr, "value": len_out(doc, p.diameter.v)});
+            if let Some(b) = &p.bore { o["bore"] = json!({"expr": b.expr, "value": len_out(doc, b.v)}); }
+            o["operation"] = json!(p.op.name());
+        }
+        FeatureKind::Emboss(e) => {
+            o["sketch"] = json!(e.sketch);
+            o["body"] = json!(e.body);
+            o["depth"] = json!({"expr": e.depth.expr, "value": len_out(doc, e.depth.v)});
+            o["flip"] = json!(e.flip);
+            o["operation"] = json!(e.op.name());
+        }
         FeatureKind::Text(t) => {
             o["text"] = json!(t.text);
             for (key, v) in [("height", &t.height), ("depth", &t.depth), ("spacing", &t.spacing), ("x", &t.x), ("y", &t.y)] {
@@ -601,6 +626,7 @@ fn feature_info(s: &Session, id: Id) -> R<J> {
             o["plane"] = json!({"origin": (t.plane.origin / doc.units.mm()).to_array(), "x": t.plane.x.to_array(), "y": t.plane.y.to_array(), "normal": t.plane.normal().to_array()});
             if let Some(body) = t.body { o["body"] = json!(body); }
             if let Some(face) = t.face { o["face"] = json!((face / doc.units.mm()).to_array()); }
+            if t.curved { o["surface"] = json!("curved"); }
         }
         FeatureKind::Import(m) => { o["triangles"] = json!(m.len()); o["vertices"] = json!(m.vertex_count()); }
         FeatureKind::Transform(t) => {
@@ -885,6 +911,34 @@ fn pick_profiles(doc: &Document, sid: Id, c: &J) -> R<Vec<Vec<Id>>> {
     }
 }
 
+/// A pipe's "path": a sketch id, or a list of runs, each a sketch id or
+/// {"sketch": ID, "entities": [...], "onto": BODY, "flip": false}.
+fn pipe_path_of(doc: &Document, c: &J) -> R<Vec<PipePath>> {
+    let wrong = "\"path\" should be a sketch id or a list of runs, each a sketch id or {\"sketch\": ID, \"entities\": [ids], \"onto\": BODY, \"flip\": false}";
+    let runs: Vec<&J> = match &c["path"] {
+        J::Null => return Err("pipe needs a \"path\": the sketch (or sketches) holding it".into()),
+        J::Array(list) => list.iter().collect(),
+        v => vec![v],
+    };
+    if runs.is_empty() { return Err(wrong.into()); }
+    runs.into_iter().enumerate().map(|(i, v)| {
+        let n = i + 1;
+        let run = match v {
+            J::Number(_) => PipePath { sketch: v.as_u64().ok_or(wrong)? as Id, entities: Vec::new(), onto: None, flip: false },
+            J::Object(o) => PipePath {
+                sketch: o.get("sketch").and_then(J::as_u64).ok_or(wrong)? as Id,
+                entities: match o.get("entities") { None | Some(J::Null) => Vec::new(), Some(_) => ids_of(v, "entities")? },
+                onto: match o.get("onto") { None | Some(J::Null) => None, Some(b) => Some(b.as_u64().ok_or("\"onto\" should be a body id")? as Id) },
+                flip: match o.get("flip") { None | Some(J::Null) => false, Some(J::Bool(f)) => *f, _ => return Err("\"flip\" should be true or false".into()) },
+            },
+            _ => return Err(wrong.into()),
+        };
+        let sk = doc.sketch(run.sketch).ok_or(format!("path {n}: feature {} is not a sketch", run.sketch))?;
+        crate::profile::chain(sk, &run.entities).map_err(|e| format!("path {n}: {e}"))?;
+        Ok(run)
+    }).collect()
+}
+
 /// A loft's "sections": sketches, each with the one closed region to use. A bare
 /// sketch id means the sketch's only outer region.
 fn loft_sections_of(doc: &Document, c: &J) -> R<Vec<LoftSection>> {
@@ -1003,10 +1057,21 @@ fn text_fields(s: &Session, c: &J, t: &mut Text) -> R<()> {
             let point = xyz(&c["face"]).map_err(|e| format!("attached text needs \"face\": [x, y, z]: {e}"))? * s.doc.units.mm();
             if !point.is_finite() { return Err("the text face point must be finite".into()); }
             let face = Face::near(body, point).ok_or("the body has no faces")?;
-            let mut plane = face.plane.ok_or("text can only attach to a flat face")?;
-            let surface = Item::Surface(face.tris.iter().map(|i| body.mesh.tri(*i)).collect());
-            if measure::between(&Item::Point(point), &surface).distance > 1e-5 { return Err("the text face point must lie on the body's flat face".into()); }
-            plane.origin = point - plane.normal() * (point - plane.origin).dot(plane.normal());
+            let plane = match face.plane {
+                Some(mut plane) => {
+                    let surface = Item::Surface(face.tris.iter().map(|i| body.mesh.tri(*i)).collect());
+                    if measure::between(&Item::Point(point), &surface).distance > 1e-5 { return Err("the text face point must lie on the body's flat face".into()); }
+                    plane.origin = point - plane.normal() * (point - plane.origin).dot(plane.normal());
+                    t.curved = false;
+                    plane
+                }
+                None => {
+                    // A curved face: the lettering is drawn on the plane touching the
+                    // surface there, reading level, and projected onto the surface.
+                    t.curved = true;
+                    Text::curved_plane(body, point)?.transformed(body.placement)
+                }
+            };
             t.plane = body.plane_to_local(plane);
             t.body = Some(id);
             t.face = Some(body.to_local(plane.origin));
@@ -1269,7 +1334,7 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 text: content, plane: Plane::XY,
                 height: s.doc.value("6 mm", Kind::Length)?, depth: s.doc.value("1 mm", Kind::Length)?,
                 spacing: zero(&s.doc, Kind::Length), angle: zero(&s.doc, Kind::Angle), x: zero(&s.doc, Kind::Length), y: zero(&s.doc, Kind::Length),
-                align: crate::text::Align::Left, op: Op::New, body: None, face: None, frame: None, tag: None,
+                align: crate::text::Align::Left, op: Op::New, body: None, face: None, frame: None, tag: None, curved: false,
             };
             text_fields(s, c, &mut text)?;
             let id = s.edit_feature(|doc| {
@@ -1811,6 +1876,44 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             out["feature"] = json!(id);
             Ok(out)
         }
+        "pipe" => {
+            let owner = s.doc.active_component;
+            let has_bodies = s.built.bodies.iter().any(|b| b.component == owner);
+            let c = c.clone();
+            let id = s.edit_feature(|d| {
+                let path = pipe_path_of(d, &c)?;
+                let diameter = d.value(&text_of(&c["diameter"]).map_err(|_| "pipe needs a \"diameter\"")?, Kind::Length)?;
+                let bore = match &c["bore"] { J::Null => None, v => Some(d.value(&text_of(v).map_err(|e| format!("\"bore\": {e}"))?, Kind::Length)?) };
+                let sketches: Vec<Id> = path.iter().map(|run| run.sketch).collect();
+                let kind = FeatureKind::Pipe(Pipe { path, diameter, bore, op: op_of(&c, if has_bodies { Op::Join } else { Op::New })? });
+                let id = d.add_feature_to(owner, kind)?;
+                for sid in sketches { sk_mut(d, sid).visible = false; }
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            Ok(out)
+        }
+        "emboss" => {
+            let c = c.clone();
+            let body = id_of(&c, "body")?;
+            let b = s.built.body(body).ok_or(format!("there is no body {body}"))?;
+            if !b.is_exact() { return Err("emboss needs an exact body".into()); }
+            let id = s.edit_feature(|d| {
+                let sid = sketch_id(d, &c)?;
+                let profiles = pick_profiles(d, sid, &c)?;
+                let depth = d.value(&text_of(&c["depth"]).map_err(|_| "emboss needs a \"depth\"")?, Kind::Length)?;
+                let op = match op_of(&c, Op::Join)? { op @ (Op::Join | Op::Cut) => op, _ => return Err("emboss \"operation\" should be join (raise) or cut (sink)".into()) };
+                let flip = match &c["flip"] { J::Null => false, J::Bool(v) => *v, _ => return Err("\"flip\" should be true or false".into()) };
+                let id = d.add_feature(FeatureKind::Emboss(Emboss { sketch: sid, profiles, body, depth, op, flip }));
+                if let Some(name) = c["name"].as_str() { d.feature_mut(id).unwrap().name = name.to_owned(); }
+                sk_mut(d, sid).visible = false;
+                Ok((id, id))
+            })?;
+            let mut out = changed(s, &before);
+            out["feature"] = json!(id);
+            Ok(out)
+        }
         "loft" => {
             let owner = s.doc.active_component;
             let has_bodies = s.built.bodies.iter().any(|b| b.component == owner);
@@ -2042,6 +2145,22 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                             _ => return Err("\"ruled\" should be true or false".into()),
                         }
                         l.op = op_of(&c, l.op)?;
+                    }
+                    FeatureKind::Pipe(p) => {
+                        if !c["path"].is_null() { p.path = pipe_path_of(&probe, &c)?; }
+                        if !c["diameter"].is_null() { p.diameter = probe.value(&text_of(&c["diameter"])?, Kind::Length)?; }
+                        match &c["bore"] {
+                            J::Null => {}
+                            J::Bool(false) => p.bore = None,
+                            v => p.bore = Some(probe.value(&text_of(v).map_err(|e| format!("\"bore\": {e}"))?, Kind::Length)?),
+                        }
+                        p.op = op_of(&c, p.op)?;
+                    }
+                    FeatureKind::Emboss(e) => {
+                        if !c["depth"].is_null() { e.depth = probe.value(&text_of(&c["depth"])?, Kind::Length)?; }
+                        if !c["profiles"].is_null() { e.profiles = pick_profiles(&probe, e.sketch, &c)?; }
+                        match &c["flip"] { J::Null => {} J::Bool(v) => e.flip = *v, _ => return Err("\"flip\" should be true or false".into()) }
+                        e.op = match op_of(&c, e.op)? { op @ (Op::Join | Op::Cut) => op, _ => return Err("emboss \"operation\" should be join (raise) or cut (sink)".into()) };
                     }
                     _ => {}
                 }

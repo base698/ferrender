@@ -255,6 +255,49 @@ pub struct Sweep {
     pub op: Op,
 }
 
+/// One run of a pipe's path: pieces of a sketch joined end to end, optionally laid
+/// onto a body by carrying each point along the sketch's normal until it meets it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PipePath {
+    pub sketch: Id,
+    /// The entities that make up the run. Empty means every entity of the sketch that
+    /// is not construction geometry, which must then be one unbroken run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<Id>,
+    /// The body the run is laid onto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onto: Option<Id>,
+    /// Lay it onto the body from the side behind the sketch instead of in front of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flip: bool,
+}
+
+/// A round section carried along a path: a rod or tube, or with Cut a groove.
+/// The path may be made of runs in several sketches, joined where their ends meet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pipe {
+    pub path: Vec<PipePath>,
+    pub diameter: Value,
+    /// A hollow pipe's bore. None is a solid rod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bore: Option<Value>,
+    pub op: Op,
+}
+
+/// Regions of a sketch pressed onto a body: projected along the sketch's normal onto
+/// the surface facing the sketch, raised off it (Join) or sunk into it (Cut) by the depth.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Emboss {
+    pub sketch: Id,
+    pub profiles: Vec<Vec<Id>>,
+    pub body: Id,
+    pub depth: Value,
+    pub op: Op,
+    /// Mark the surface behind the sketch instead of in front of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flip: bool,
+}
+
 /// One closed outline of a loft: a region of a sketch, named by the entities on its boundary.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LoftSection {
@@ -542,9 +585,24 @@ pub struct Text {
     pub frame: Option<[DVec3; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<Tag>,
+    /// Attached to a curved face: `plane` touches the face where it was picked and the
+    /// lettering is projected onto the surface along its normal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub curved: bool,
 }
 
 impl Text {
+    /// For text on a curved face: the plane touching the body's surface nearest `point`
+    /// (both in the document's frame), reading level, in the body's own frame.
+    pub fn curved_plane(body: &Body, point: DVec3) -> Result<Plane, String> {
+        if !body.is_exact() { return Err("text on a curved face needs an exact body".into()); }
+        let (at, normal) = exact::surface_at(&body.solids, point).ok_or("the body has no faces")?;
+        if at.distance(point) > 0.05 { return Err("the text face point must lie on the body's surface".into()); }
+        let n = normal.normalize();
+        let x = if n.z.abs() < 0.999 { DVec3::Z.cross(n).normalize() } else { DVec3::X };
+        Ok(body.plane_to_local(Plane { origin: at, x, y: n.cross(x) }))
+    }
+
     /// Resolve an attached face before applying local offsets and rotation. Like
     /// other face features, this uses the original and bounds-mapped anchor; reject
     /// candidates off a flat face or facing a different direction.
@@ -557,7 +615,7 @@ impl Text {
         let mut plane = self.plane;
         let mut learned = None;
         let mut level = Level::Position;
-        if let Some(body) = body {
+        if let Some(body) = body.filter(|_| !self.curved) {
             if !body.is_exact() { return Err("text on a surface needs an exact body with a flat face".into()); }
             let anchor = self.face.ok_or("select a flat face for the text")?;
             let mut found = None;
@@ -736,6 +794,8 @@ pub enum FeatureKind {
     Revolve(Revolve),
     Sweep(Sweep),
     Loft(Loft),
+    Pipe(Pipe),
+    Emboss(Emboss),
     /// A mesh brought in from a file, already in millimetres.
     Import(Mesh),
     Transform(Transform),
@@ -784,6 +844,8 @@ impl Feature {
             FeatureKind::Revolve(_) => "revolve",
             FeatureKind::Sweep(_) => "sweep",
             FeatureKind::Loft(_) => "loft",
+            FeatureKind::Pipe(_) => "pipe",
+            FeatureKind::Emboss(_) => "emboss",
             FeatureKind::Import(_) => "import",
             FeatureKind::Transform(_) => "transform",
             FeatureKind::Combine(_) => "combine",
@@ -1225,7 +1287,7 @@ impl Document {
         let target=match &kind {
             FeatureKind::Transform(t)=>Some(t.body), FeatureKind::Combine(c)=>Some(c.target),
             FeatureKind::Blend(b)=>Some(b.body), FeatureKind::Shell(s)=>Some(s.body), FeatureKind::Tilt(t)=>Some(t.body),
-            FeatureKind::Hole(h)=>Some(h.body), FeatureKind::Thread(t)=>Some(t.body), FeatureKind::Text(t)=>t.body,
+            FeatureKind::Hole(h)=>Some(h.body), FeatureKind::Thread(t)=>Some(t.body), FeatureKind::Text(t)=>t.body, FeatureKind::Emboss(e)=>Some(e.body),
             FeatureKind::Split(s)=>Some(s.body), FeatureKind::Remove(r)=>r.bodies.first().copied(),
             FeatureKind::MeshOp(m)=>Some(m.body),
             _=>None,
@@ -1470,6 +1532,40 @@ impl Document {
                 let t = exact::tag_loft(&solids, &sections, f.id);
                 Ok(Some((Shape::Exact(solids, t), l.op)))
             }
+            FeatureKind::Pipe(p) => {
+                if p.path.is_empty() { return Err("the pipe has no path".into()); }
+                let mut chains = Vec::with_capacity(p.path.len());
+                for (i, run) in p.path.iter().enumerate() {
+                    let which = if p.path.len() == 1 { "its path sketch".to_owned() } else { format!("path {}'s sketch", i + 1) };
+                    let s = sk(run.sketch).map_err(|e| e.replace("its sketch", &which))?;
+                    let plane = s.plane.transformed(context.component_placement(f.owner).inverse() * context.component_placement(self.feature(run.sketch).unwrap().owner));
+                    let onto = match run.onto {
+                        None => None,
+                        Some(id) => {
+                            let b = bodies.iter().find(|b| b.id == id).ok_or("the body its path is laid onto no longer exists")?;
+                            if b.component != f.owner { return Err("a path can only be laid onto a body in the pipe's own component".into()); }
+                            if !b.is_exact() { return Err("a path can only be laid onto an exact body".into()); }
+                            Some((b, if run.flip { plane.normal() } else { -plane.normal() }))
+                        }
+                    };
+                    chains.push((profile::chain(s, &run.entities)?, plane, onto));
+                }
+                let parts: Vec<exact::PathPart> = chains.iter().map(|(chain, plane, onto)| exact::PathPart {
+                    chain, plane: *plane,
+                    onto: onto.map(|(b, toward)| exact::Onto { solids: &b.solids, mesh: &b.mesh, toward }),
+                }).collect();
+                let mut made = exact::tubes(&parts, p.diameter.v, p.bore.as_ref().map(|b| b.v))?;
+                // A pipe laid onto a body is built more than one way; take the first that the
+                // kernel combines correctly with every body it reaches.
+                let l = if made.len() > 1 && p.op != Op::New {
+                    let how = match p.op { Op::Join => Bool::Union, Op::Cut => Bool::Subtract, _ => Bool::Intersect };
+                    let reached = |l: &exact::Lumps| { let (lo, hi) = exact::bounds(l).unwrap_or_default(); bodies.iter().filter(move |b| b.component == f.owner && b.is_exact() && overlap(b.mesh.bbox(), Some((lo, hi)))).collect::<Vec<_>>() };
+                    let pick = made.iter().position(|l| reached(l).iter().all(|b| exact::agrees(&b.solids, l, how).unwrap_or(false)));
+                    made.swap_remove(pick.ok_or("the kernel could not combine the laid pipe with the body correctly; try a slightly different path, diameter or side")?)
+                } else { made.swap_remove(0) };
+                let t = exact::fresh_tags(&l, f.id);
+                Ok(Some((Shape::Exact(l, t), p.op)))
+            }
             FeatureKind::Text(t) if t.op == Op::New => {
                 let profiles = t.outlines()?;
                 let plane = t.placement(None)?;
@@ -1591,6 +1687,11 @@ impl Document {
                         set(v, Kind::Length);
                     }
                 }
+                FeatureKind::Pipe(p) => {
+                    set(&mut p.diameter, Kind::Length);
+                    if let Some(b) = &mut p.bore { set(b, Kind::Length); }
+                }
+                FeatureKind::Emboss(e) => set(&mut e.depth, Kind::Length),
                 FeatureKind::Text(t) => {
                     for v in [&mut t.height, &mut t.depth, &mut t.spacing, &mut t.x, &mut t.y] { set(v, Kind::Length); }
                     set(&mut t.angle, Kind::Angle);
@@ -1733,6 +1834,44 @@ impl Document {
                     bodies.push(Shape::Exact(vec![solid],vec![tags]).body(id*1000+offset as Id+1,format!("Body{count}"),component)?);
                 }
                 Ok(level)
+            }
+            FeatureKind::Emboss(e) => {
+                let i = find(bodies, e.body)?;
+                if !bodies[i].is_exact() { return Err(MESH_ONLY.into()); }
+                if !self.features.iter().take(self.active()).take_while(|p| p.id != id).any(|p| p.id == e.sketch && !self.is_suppressed(p.id)) { return Err("its sketch was deleted, suppressed, or comes later in the timeline".into()); }
+                if let Some(err) = context.errors.get(&e.sketch) { return Err(format!("its sketch could not be placed: {err}")); }
+                let s = self.sketch(e.sketch).ok_or("its sketch was deleted")?;
+                let plane = s.plane.transformed(context.component_placement(bodies[i].component).inverse() * context.component_placement(self.feature(e.sketch).unwrap().owner));
+                let all = profile::profiles(s);
+                let picked = Self::pick(&all, &e.profiles)?;
+                let from = if e.flip { -plane.normal() } else { plane.normal() };
+                let raise = match e.op { Op::Join => true, Op::Cut => false, _ => return Err("emboss raises (join) or sinks (cut) the shapes".into()) };
+                let tool = exact::emboss(&picked, &plane, &bodies[i].solids, &bodies[i].mesh, e.depth.v, raise, from)?;
+                if !exact::agrees(&bodies[i].solids, &tool, if raise { Bool::Union } else { Bool::Subtract })? {
+                    return Err("the kernel could not press the shapes onto the body correctly; try a slightly different depth or position".into());
+                }
+                let tool_tags = exact::fresh_tags(&tool, id);
+                let (made, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&tool, &tool_tags), if raise { Bool::Union } else { Bool::Subtract }, id)?;
+                bodies[i].set_exact(made, tags)?;
+                bodies.retain(|b| !b.mesh.is_empty());
+                Ok(None)
+            }
+            FeatureKind::Text(t) if t.op != Op::New && t.curved => {
+                let profiles = t.outlines()?;
+                let i = find(bodies, t.body.ok_or("select a body and face for the text")?)?;
+                if !bodies[i].is_exact() { return Err(MESH_ONLY.into()); }
+                let plane = t.placement(None)?;
+                let raise = match t.op { Op::Join => true, Op::Cut => false, _ => return Err("text supports New Body, Raise, or Engrave".into()) };
+                let refs: Vec<_> = profiles.iter().collect();
+                let tool = exact::emboss(&refs, &plane, &bodies[i].solids, &bodies[i].mesh, t.depth.v, raise, plane.normal())?;
+                if !exact::agrees(&bodies[i].solids, &tool, if raise { Bool::Union } else { Bool::Subtract })? {
+                    return Err("the kernel could not put the lettering onto the curved face correctly; try a slightly different height, depth or position".into());
+                }
+                let tool_tags = exact::fresh_tags(&tool, id);
+                let (made, tags) = exact::boolean_tagged((&bodies[i].solids, &bodies[i].tags), (&tool, &tool_tags), if raise { Bool::Union } else { Bool::Subtract }, id)?;
+                bodies[i].set_exact(made, tags)?;
+                bodies.retain(|b| !b.mesh.is_empty());
+                Ok(None)
             }
             FeatureKind::Text(t) if t.op != Op::New => {
                 let profiles = t.outlines()?;

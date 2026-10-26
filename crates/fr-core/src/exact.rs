@@ -190,6 +190,8 @@ mod pipe;
 pub use pipe::{sweep, sweep_spans, tag_swept};
 mod loft;
 pub use loft::{Section, loft, tag_loft};
+mod tube;
+pub use tube::{Onto, PathPart, emboss, land, surface_at, tubes};
 
 /// A profile's outer boundary followed by its holes.
 fn outline(p: &Profile, plane: &Plane, z: f64) -> R<Vec<Edge>> {
@@ -337,6 +339,22 @@ fn boolean_impl(a: &[Solid], b: &[Solid], op: Bool, clean: bool) -> R<Lumps> {
         }
     }
     Ok(out)
+}
+
+/// Whether the exact Boolean of `a` and `b` changes `a` by the same volume as the same
+/// Boolean of their meshes does. The exact kernel's Booleans against freeform surfaces
+/// can return a closed, plausible shape that is wrong by a good part of `b`; the mesh
+/// Boolean is robust, so it is the referee. Tessellation errors in the parts of `a` that
+/// `b` does not touch cancel in the change.
+pub fn agrees(a: &[Solid], b: &[Solid], op: Bool) -> R<bool> {
+    let exact = boolean(a, b, op)?;
+    // Without a referee the exact result stands on its own checks.
+    let (Ok((ma, _)), Ok((mb, _))) = (tessellate(a), tessellate(b)) else { return Ok(true) };
+    let Ok(mesh) = crate::meshops::boolean(&ma, &mb, op) else { return Ok(true) };
+    let change = volume(&exact) - volume(a);
+    let mesh_change = mesh.volume() - ma.volume();
+    let tolerance = 0.1 * volume(b) + 2.0 * FINE.deflection_linear * b.iter().map(Solid::area).sum::<f64>();
+    Ok((change - mesh_change).abs() <= tolerance)
 }
 
 /// A boolean that leaves nothing reports "not one solid"; that is a valid empty result.

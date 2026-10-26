@@ -340,7 +340,7 @@ fn toolbar_buttons(app: &mut App, ui: &mut Ui, ctx: &Context) {
                 if big(ui, icon::CUBE, "Primitive", matches!(app.dialog, Dialog::Primitive(_)), "Create a box, cylinder, sphere, cone or torus").clicked() {
                     app.run(&ctx, Action::Primitive(0));
                 }
-                if big(ui, icon::TEXT_T, "Text", matches!(app.dialog, Dialog::Text(_)), "Create solid text, or raise or engrave it on a flat face").clicked() {
+                if big(ui, icon::TEXT_T, "Text", matches!(app.dialog, Dialog::Text(_)), "Create solid text, or raise or engrave it on a face, flat or curved").clicked() {
                     app.run(&ctx, Action::Text);
                 }
             });
@@ -472,6 +472,8 @@ fn feature_icon(kind: &FeatureKind) -> &'static str {
         FeatureKind::Revolve(_) => icon::ARROWS_CLOCKWISE,
         FeatureKind::Sweep(_) => icon::PATH,
         FeatureKind::Loft(_) => icon::STACK,
+        FeatureKind::Pipe(_) => icon::PATH,
+        FeatureKind::Emboss(_) => icon::TEXT_T,
         FeatureKind::Import(_) => icon::DOWNLOAD_SIMPLE,
         FeatureKind::Transform(_) => icon::ARROWS_OUT_CARDINAL,
         FeatureKind::Remove(_) => icon::MINUS_CIRCLE,

@@ -182,6 +182,8 @@ pub fn geometry(s: &Session, body: Id, tag: &MemberTag) -> R<Geometry> {
                 v.target == body || (!v.keep_tools && v.tools.contains(&body))
             }
             FeatureKind::Text(v) => v.body == Some(body),
+            FeatureKind::Emboss(v) => v.body == body,
+            FeatureKind::Pipe(v) => v.op != Op::New && f.owner == feature.owner,
             FeatureKind::Extrude(v) => v.op != Op::New && f.owner == feature.owner,
             FeatureKind::Revolve(v) => v.op != Op::New && f.owner == feature.owner,
             FeatureKind::Primitive(v) => v.op != Op::New && f.owner == feature.owner,

@@ -2684,7 +2684,7 @@ fn text_face_click_raises_and_timeline_edit_engraves() {
 }
 
 #[test]
-fn text_rejects_curved_and_mesh_faces_without_changing_placement() {
+fn text_takes_curved_faces_and_rejects_mesh_faces_without_changing_placement() {
     let mut h = state_harness();
     for cmd in [
         json!({"op":"create_sketch", "plane":"XY"}),
@@ -2693,18 +2693,34 @@ fn text_rejects_curved_and_mesh_faces_without_changing_placement() {
     ] { h.state_mut().execute(&cmd).unwrap(); }
     run(&mut h, Action::Text);
     let original = h.state().dialog.clone();
-    let body = &h.state().session.built.bodies[0];
-    let curved = fr_core::face::Face::near(body, DVec3::new(10.0, 0.0, 5.0)).unwrap();
-    assert!(curved.plane.is_none());
-    assert!(h.state_mut().text_on_face(curved).unwrap_err().contains("curved"));
-    assert_eq!(h.state().dialog, original);
+    // An imported mesh face is refused, leaving the dialog as it was.
     let body = &h.state().session.built.bodies[0];
     let mesh = body.mesh.clone();
     let mut flat = fr_core::face::Face::near(body, DVec3::new(0.0, 0.0, 10.0)).unwrap();
+    let before = h.state().session.doc.clone();
     let id = h.state_mut().session.edit(|d| Ok(d.add_feature(fr_core::FeatureKind::Import(mesh)))).unwrap();
     flat.body = id;
     assert!(h.state_mut().text_on_face(flat).unwrap_err().contains("mesh"));
     assert_eq!(h.state().dialog, original);
+    h.state_mut().session.edit(|d| { *d = before.clone(); Ok(()) }).unwrap();
+    // The can's round side takes the text on the plane touching it where it was clicked.
+    let body = &h.state().session.built.bodies[0];
+    let mut curved = fr_core::face::Face::near(body, DVec3::new(10.0, 0.0, 5.0)).unwrap();
+    curved.at = DVec3::new(10.0, 0.0, 5.0);
+    assert!(curved.plane.is_none());
+    h.state_mut().text_on_face(curved).unwrap();
+    let Dialog::Text(mut t) = h.state().dialog.clone() else { panic!("still the text dialog") };
+    assert!(t.curved && t.op == fr_core::Op::Join);
+    assert!(t.plane.normal().distance(DVec3::X) < 1e-6, "{:?}", t.plane.normal());
+    assert!(t.plane.origin.distance(DVec3::new(10.0, 0.0, 5.0)) < 1e-6);
+    t.text = "A".into();
+    t.height = "4 mm".into();
+    t.align = fr_core::text::Align::Center;
+    h.state_mut().dialog = Dialog::Text(t);
+    h.state_mut().apply_dialog();
+    assert!(h.state().session.built.errors.is_empty(), "{:?}", h.state().session.built.errors);
+    let hi = h.state().session.built.bodies[0].mesh.bbox().unwrap().1;
+    assert!(hi.x > 10.5, "raised off the round side: {}", hi.x);
 }
 
 /// Optional visual check of the text editor and its live solid preview.
