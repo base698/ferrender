@@ -194,7 +194,12 @@ pub fn document(d: &Document) -> Result<(), String> {
                     MeshOpKind::Decimate { target, .. } => if *target < 4 { return Err("a decimation target must be at least 4 triangles".into()) },
                     MeshOpKind::Smooth { iterations, strength } => if *iterations > 500 || !strength.is_finite() || !(0.0..=1.0).contains(strength) { return Err("smoothing takes at most 500 iterations and a strength from 0 to 1".into()) },
                     MeshOpKind::Subdivide { levels, .. } => if *levels == 0 || *levels > 6 { return Err("subdivision takes 1 to 6 levels".into()) },
-                    MeshOpKind::Cut { plane, .. } | MeshOpKind::Mirror { plane, .. } => crate::body_ops::Split { body: m.body, plane: plane.clone() }.validate()?,
+                    MeshOpKind::Cut { plane, .. } | MeshOpKind::Mirror { plane, blend: None, .. } => crate::body_ops::Split { body: m.body, plane: plane.clone() }.validate()?,
+                    MeshOpKind::Mirror { plane, blend: Some(blend), .. } => {
+                        crate::body_ops::Split { body: m.body, plane: plane.clone() }.validate()?;
+                        expression(&blend.expr)?;
+                        if !blend.v.is_finite() || blend.v < 0.0 { return Err("the mirror blend must be a finite distance of zero or more".into()); }
+                    }
                     MeshOpKind::Offset { distance, direction } | MeshOpKind::ExtrudeRegion { distance, direction } => {
                         expression(&distance.expr)?;
                         if !distance.v.is_finite() || direction.is_some_and(|d| !d.is_finite()) { return Err("the mesh offset needs finite values".into()); }

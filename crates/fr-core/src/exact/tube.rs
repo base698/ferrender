@@ -372,27 +372,24 @@ pub fn emboss(profiles: &[&Profile], plane: &Plane, solids: &[Solid], mesh: &Mes
     if !zmin.is_finite() { return Err("there are no shapes to emboss".into()); }
     // Offsetting the whole body is slow and, on a busy body, fragile. Only the patch
     // under the shapes is needed: cut out a block a margin wider than them, reaching
-    // a margin past the surface on both sides, and offset just that.
+    // a margin past the surface on both sides, and offset just that. A wide patch can
+    // take in a rim or a step near the shapes that cannot be moved; a narrower one,
+    // still wider than the depth, is tried before giving up.
     let margin = 2.0 * depth + 0.5;
     let (lo_z, hi_z) = (zmin - 2.0 * depth - margin, zmax + 2.0 * depth + margin);
-    let (lo2, hi2) = (lo2 - DVec2::splat(margin), hi2 + DVec2::splat(margin));
-    let corners = [lo2, DVec2::new(hi2.x, lo2.y), hi2, DVec2::new(lo2.x, hi2.y)].map(|q| c(plane.to_world(q) + n * lo_z));
-    let rim = Edge::polygon(corners.iter()).map_err(|e| format!("the kernel could not outline the shapes: {e}"))?;
-    let block = Solid::extrude(&rim, c(n * (hi_z - lo_z))).map_err(|e| format!("the kernel could not outline the shapes: {e}"))?;
-    let patch = boolean(solids, std::slice::from_ref(&block), Bool::Intersect)?;
     // The layer between the surface and the surface moved out (or in) by the depth.
     let thickness = if raise { depth } else { -depth };
-    let mut skin = Vec::new();
-    for s in &patch {
-        match s.shell(thickness, std::iter::empty::<&Face>()) {
-            Ok(layer) => skin.push(layer),
-            Err(_) => {
-                let moved = s.offset(thickness, s.iter_face(), 1e-6).map_err(|_| format!("the body's surface cannot be moved {} by {} mm there; use a smaller depth", if raise { "out" } else { "in" }, crate::units::trim_num(depth, 4)))?;
-                let layer = if raise { boolean(&[moved], std::slice::from_ref(s), Bool::Subtract)? } else { boolean(std::slice::from_ref(s), &[moved], Bool::Subtract)? };
-                skin.extend(layer);
-            }
-        }
+    let mut skin = None;
+    for side in [margin, depth + 0.25, depth + 0.05] {
+        let (lo, hi) = (lo2 - DVec2::splat(side), hi2 + DVec2::splat(side));
+        let corners = [lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)].map(|q| c(plane.to_world(q) + n * lo_z));
+        let rim = Edge::polygon(corners.iter()).map_err(|e| format!("the kernel could not outline the shapes: {e}"))?;
+        let block = Solid::extrude(&rim, c(n * (hi_z - lo_z))).map_err(|e| format!("the kernel could not outline the shapes: {e}"))?;
+        let patch = boolean(solids, std::slice::from_ref(&block), Bool::Intersect)?;
+        let layers: R<Vec<Lumps>> = patch.iter().map(|s| super::sealed_shell(s, thickness)).collect();
+        if let Ok(layers) = layers { skin = Some(layers.concat()); break; }
     }
+    let skin = skin.ok_or_else(|| format!("the body's surface cannot be moved {} by {} mm there; use a smaller depth, or keep the shapes clear of edges and rims", if raise { "out" } else { "in" }, crate::units::trim_num(depth, 4)))?;
     // The shapes as a prism through that layer, clear of the block's cut face on the far side.
     let (z0, z1) = if from.dot(n) > 0.0 { (lo_z + depth + margin / 2.0, hi_z + depth + 1.0) } else { (lo_z - depth - 1.0, hi_z - depth - margin / 2.0) };
     let prism = extrude(profiles, plane, z0, z1)?;

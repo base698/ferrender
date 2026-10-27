@@ -53,7 +53,7 @@ Mesh editing. Each is a timeline feature that takes a mesh body and replaces it 
 {"op":"mesh_smooth","body":BODY,"iterations":10,"strength":0.5,"region":REGION}   Taubin smoothing (no shrink); region optional
 {"op":"mesh_subdivide","body":BODY,"levels":1,"scheme":"loop"}   loop | midpoint; each level quadruples the triangles
 {"op":"mesh_cut","body":BODY,"plane":PLANE,"keep":"negative","cap":true}   plane as for split_body; keep negative | positive | both (both makes a second body); cap closes the cut flat
-{"op":"mesh_mirror","body":BODY,"plane":PLANE,"weld":true}   adds the mirror image; weld joins the halves along the plane
+{"op":"mesh_mirror","body":BODY,"plane":PLANE,"weld":true,"blend":2}   adds the mirror image; weld joins the halves along the plane. A half cut from a shape that is not itself symmetric meets its image at a crease wherever its surface leans toward or away from the plane; "blend" (a length, optional) bends the surface within that distance of the plane so it meets the plane square, and the halves join smoothly. Detail in that strip keeps its shape; the strip is moved, not smoothed
 {"op":"mesh_offset","body":BODY,"distance":2,"direction":[0,0,-1]}   thickens an open surface into a closed solid (walls along its rim), or hollows a closed one; direction optional, else along the surface normals
 {"op":"mesh_extrude_region","body":BODY,"region":REGION,"distance":3,"direction":[0,0,1]}   moves the region's triangles with walls around it
    REGION is {"sphere":{"centre":[x,y,z],"radius":r}} | {"box":{"lo":[..],"hi":[..]}} | {"side":{"plane":PLANE}} (the plane's positive side) | {"normal":{"direction":[x,y,z],"degrees":30}} | {"connected":{"seed":[x,y,z]}}
@@ -2297,7 +2297,10 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
                 "mesh_smooth" => MeshOpKind::Smooth { iterations: int("iterations", 10)?, strength: num("strength", 0.5)? },
                 "mesh_subdivide" => MeshOpKind::Subdivide { levels: int("levels", 1)?, scheme: match c["scheme"].as_str().unwrap_or("loop") { "loop" => Scheme::Loop, "midpoint" => Scheme::Midpoint, other => return Err(format!("unknown subdivision scheme {other}; use loop or midpoint")) } },
                 "mesh_cut" => MeshOpKind::Cut { plane: planes_api::base(s, &c["plane"])?, keep: match c["keep"].as_str().unwrap_or("negative") { "negative" => Keep::Negative, "positive" => Keep::Positive, "both" => Keep::Both, other => return Err(format!("unknown side {other}; keep negative, positive or both")) }, cap: c["cap"].as_bool().unwrap_or(true) },
-                "mesh_mirror" => MeshOpKind::Mirror { plane: planes_api::base(s, &c["plane"])?, weld: c["weld"].as_bool().unwrap_or(true) },
+                "mesh_mirror" => MeshOpKind::Mirror {
+                    plane: planes_api::base(s, &c["plane"])?, weld: c["weld"].as_bool().unwrap_or(true),
+                    blend: if c["blend"].is_null() { None } else { Some(s.doc.value(&text_of(&c["blend"])?, Kind::Length)?) },
+                },
                 "mesh_offset" => MeshOpKind::Offset { distance: distance()?, direction },
                 "mesh_sculpt" => {
                     let b = s.built.body(body).ok_or(format!("there is no body {body}"))?;

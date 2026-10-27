@@ -706,7 +706,7 @@ impl Dialog {
                     2 => MeshOpKind::Smooth { iterations: m.count.max(1), strength: m.amount },
                     3 => MeshOpKind::Subdivide { levels: m.count.clamp(1, 6), scheme: if m.choice == 1 { Scheme::Midpoint } else { Scheme::Loop } },
                     4 => MeshOpKind::Cut { plane: plane()?, keep: [Keep::Negative, Keep::Positive, Keep::Both][m.choice.min(2)], cap: m.flag },
-                    5 => MeshOpKind::Mirror { plane: plane()?, weld: m.flag },
+                    5 => MeshOpKind::Mirror { plane: plane()?, weld: m.flag, blend: None },
                     _ => MeshOpKind::Offset { distance: offset, direction: m.flag.then_some(glam::DVec3::NEG_Z) },
                 };
                 Ok(d.add_feature(FeatureKind::MeshOp(MeshOp { body, op, region: None })))

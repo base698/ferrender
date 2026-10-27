@@ -62,9 +62,9 @@ fn invalid_region_mask_returns_error() { assert!(meshops::extrude_region(&unit()
 #[test]
 fn mirror_weld_setting_preserves_separate_halves() {
     let m=cube(DVec3::ZERO,DVec3::ONE); let half=meshops::cut(&m,Plane::XY.offset(0.5),Keep::Positive,false).unwrap().remove(0);
-    let separate=meshops::mirror(&half,Plane::XY.offset(0.5),false).unwrap();
+    let separate=meshops::mirror(&half,Plane::XY.offset(0.5),false,0.0).unwrap();
     assert_eq!(separate.inspect().components,2); assert!(separate.open_edges()>0);
-    solid(&meshops::mirror(&half,Plane::XY.offset(0.5),true).unwrap(),1.);
+    solid(&meshops::mirror(&half,Plane::XY.offset(0.5),true,0.0).unwrap(),1.);
 }
 #[test]
 fn box_boolean_grid_matches_analytic_volumes() {
@@ -276,4 +276,44 @@ fn translated_oblique_cuts_cap_closed_boxes_and_thin_cavities() {
             }
         }
     }
+}
+/// A ball of radius 1 about the origin as a latitude-longitude mesh.
+fn ball(rings: usize, around: usize) -> Mesh {
+    use std::f64::consts::PI;
+    let mut p = vec![DVec3::NEG_Z];
+    for i in 1..rings { let t = PI * i as f64 / rings as f64 - PI / 2.0; for j in 0..around { let a = 2.0 * PI * j as f64 / around as f64; p.push(DVec3::new(t.cos() * a.cos(), t.cos() * a.sin(), t.sin())); } }
+    p.push(DVec3::Z);
+    let top = (p.len() - 1) as u32;
+    let at = |i: usize, j: usize| (1 + (i - 1) * around + j % around) as u32;
+    let mut t = Vec::new();
+    for j in 0..around { t.push([0, at(1, j + 1), at(1, j)]); t.push([top, at(rings - 1, j), at(rings - 1, j + 1)]); }
+    for i in 1..rings - 1 { for j in 0..around { t.push([at(i, j), at(i, j + 1), at(i + 1, j + 1)]); t.push([at(i, j), at(i + 1, j + 1), at(i + 1, j)]); } }
+    Mesh::from_indexed(p, t, true).unwrap()
+}
+/// The sharpest bend, in degrees, between triangles meeting along the plane z = `at`.
+fn seam_crease(m: &Mesh, at: f64) -> f64 {
+    let (pos, tris) = (m.positions(), m.indices());
+    let normal = |t: &[u32; 3]| { let [a, b, c] = t.map(|i| pos[i as usize]); (b - a).cross(c - a).normalize() };
+    let mut by_edge: std::collections::HashMap<(u32, u32), Vec<DVec3>> = Default::default();
+    for t in tris { for k in 0..3 { let (a, b) = (t[k], t[(k + 1) % 3]); if (pos[a as usize].z - at).abs() < 1e-6 && (pos[b as usize].z - at).abs() < 1e-6 { by_edge.entry((a.min(b), a.max(b))).or_default().push(normal(t)); } } }
+    assert!(by_edge.len() > 50, "the seam should have edges");
+    by_edge.values().filter(|n| n.len() == 2).map(|n| n[0].dot(n[1]).clamp(-1.0, 1.0).acos().to_degrees()).fold(0.0, f64::max)
+}
+#[test]
+fn mirror_blend_takes_the_crease_out_of_an_off_centre_cut() {
+    // Cut a ball above its middle and mirror the top: the halves meet at about 35 degrees.
+    let plane = Plane::XY.offset(0.3);
+    let half = meshops::cut(&ball(96, 192), plane, Keep::Positive, false).unwrap().remove(0);
+    let plain = meshops::mirror(&half, plane, true, 0.0).unwrap();
+    assert!(seam_crease(&plain, 0.3) > 30.0, "{}", seam_crease(&plain, 0.3));
+    let blended = meshops::mirror(&half, plane, true, 0.3).unwrap();
+    assert!(seam_crease(&blended, 0.3) < 6.0, "{}", seam_crease(&blended, 0.3));
+    assert!(blended.inspect().watertight, "{:?}", blended.inspect());
+    // Only the strip is moved: points farther than the blend from the plane stay put.
+    let far = |m: &Mesh| m.positions().iter().filter(|p| p.z > 0.65).map(|p| p.length()).fold(0.0, f64::max);
+    assert!((far(&blended) - 1.0).abs() < 1e-6, "{}", far(&blended));
+    // The plane's points stay on it, pulled in by about half the blend times the lean.
+    let rim = blended.positions().iter().filter(|p| (p.z - 0.3).abs() < 1e-6).map(|p| p.truncate().length()).fold(0.0, f64::max);
+    let lean = 0.3 / (1.0f64 - 0.09).sqrt();
+    assert!((rim - ((1.0f64 - 0.09).sqrt() - lean * 0.15)).abs() < 0.02, "{rim}");
 }

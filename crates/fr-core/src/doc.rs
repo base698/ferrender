@@ -692,7 +692,9 @@ pub enum MeshOpKind {
     Smooth { iterations: u32, strength: f64 },
     Subdivide { levels: u32, #[serde(default)] scheme: crate::meshops::Scheme },
     Cut { plane: PlaneRef, #[serde(default)] keep: crate::meshops::Keep, #[serde(default)] cap: bool },
-    Mirror { plane: PlaneRef, #[serde(default)] weld: bool },
+    /// `blend` bends the surface within that distance of the plane so it meets the
+    /// plane square and the halves join without a crease (see `meshops::blend_to_plane`).
+    Mirror { plane: PlaneRef, #[serde(default)] weld: bool, #[serde(default, skip_serializing_if = "Option::is_none")] blend: Option<Value> },
     Offset { distance: Value, #[serde(default, skip_serializing_if = "Option::is_none")] direction: Option<DVec3> },
     ExtrudeRegion { distance: Value, #[serde(default, skip_serializing_if = "Option::is_none")] direction: Option<DVec3> },
     /// One brush stroke (see `meshops::sculpt`).
@@ -1702,7 +1704,7 @@ impl Document {
                     c.placement.rotate.iter_mut().for_each(|v|set(v,Kind::Angle));
                 }
                 FeatureKind::MeshOp(m) => match &mut m.op {
-                    MeshOpKind::Offset { distance, .. } | MeshOpKind::ExtrudeRegion { distance, .. } => set(distance, Kind::Length),
+                    MeshOpKind::Offset { distance, .. } | MeshOpKind::ExtrudeRegion { distance, .. } | MeshOpKind::Mirror { blend: Some(distance), .. } => set(distance, Kind::Length),
                     MeshOpKind::Sculpt { brush, radius, strength, .. } => {
                         set(radius, Kind::Length);
                         set(strength, if matches!(brush, crate::meshops::Brush::Smooth | crate::meshops::Brush::Flatten) { Kind::Scalar } else { Kind::Length });
@@ -1916,7 +1918,7 @@ impl Document {
                     MeshOpKind::Decimate { target, method, preserve_boundary } => mo::decimate_by(&src, *target as usize, *method, *preserve_boundary)?,
                     MeshOpKind::Smooth { iterations, strength } => mo::smooth(&src, *iterations, *strength, mask.as_deref())?,
                     MeshOpKind::Subdivide { levels, scheme } => mo::subdivide(&src, *levels, *scheme)?,
-                    MeshOpKind::Mirror { plane, weld } => { let (plane, _) = self.plane_reference_in(plane, context, bodies, component)?; mo::mirror(&src, plane, *weld)? }
+                    MeshOpKind::Mirror { plane, weld, blend } => { let (plane, _) = self.plane_reference_in(plane, context, bodies, component)?; mo::mirror(&src, plane, *weld, blend.as_ref().map_or(0.0, |b| b.v))? }
                     MeshOpKind::Offset { distance, direction } => mo::offset(&src, distance.v, *direction)?,
                     MeshOpKind::ExtrudeRegion { distance, direction } => mo::extrude_region(&src, mask.as_deref().ok_or("extruding a region needs a \"region\"")?, distance.v, *direction)?,
                     MeshOpKind::Sculpt { brush, at, radius, strength } => mo::sculpt(&src, *brush, *at, radius.v, strength.v)?,

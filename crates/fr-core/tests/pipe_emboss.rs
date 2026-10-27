@@ -250,6 +250,52 @@ fn text_raises_on_a_ball_and_engraves_into_it() {
     assert!(!t.curved);
 }
 
+/// A trophy base: a drum between two rim beads, under a turned pedestal.
+fn trophy_base(s: &mut Session) -> Id {
+    let profile = sketch(s, json!({"origin": [0, 0, 0], "normal": [0, -1, 0], "x": [1, 0, 0]}), json!([
+        {"type": "line", "from": [0, -38.5], "to": [21, -38.5]},
+        {"type": "line", "from": [21, -38.5], "to": [21, -37.5]},
+        {"type": "arc3", "start": [21, -37.5], "through": [21.5, -37], "end": [21, -36.5]},
+        {"type": "line", "from": [21, -36.5], "to": [19, -36.5]},
+        {"type": "line", "from": [19, -36.5], "to": [19, -26]},
+        {"type": "line", "from": [19, -26], "to": [20, -26]},
+        {"type": "arc3", "start": [20, -26], "through": [20.5, -25.5], "end": [20, -25]},
+        {"type": "line", "from": [20, -25], "to": [14, -25]},
+        {"type": "line", "from": [14, -25], "to": [14, -24]},
+        {"type": "arc3", "start": [14, -24], "through": [15.2, -23], "end": [14, -22]},
+        {"type": "line", "from": [14, -22], "to": [12, -22]},
+        {"type": "arc3", "start": [12, -22], "through": [8.1, -20.2], "end": [6, -16]},
+        {"type": "line", "from": [6, -16], "to": [5, -14.5]},
+        {"type": "line", "from": [5, -14.5], "to": [6.5, -14.5]},
+        {"type": "arc3", "start": [6.5, -14.5], "through": [8.5, -12], "end": [6.5, -9.5]},
+        {"type": "line", "from": [6.5, -9.5], "to": [4.5, -9.5]},
+        {"type": "line", "from": [4.5, -9.5], "to": [4.5, -8.5]},
+        {"type": "arc3", "start": [4.5, -8.5], "through": [6.4, -3.8], "end": [11, -1.5]},
+        {"type": "line", "from": [11, -1.5], "to": [12, 4.5]},
+        {"type": "arc3", "start": [12, 4.5], "through": [13, 5.25], "end": [12, 6]},
+        {"type": "line", "from": [12, 6], "to": [0, 6]},
+        {"type": "line", "from": [0, 6], "to": [0, -38.5]},
+    ]));
+    id(&cmd(s, json!({"op": "revolve", "sketch": profile, "axis": "y", "angle": 360})), "feature")
+}
+
+#[test]
+fn lettering_near_a_rim_is_refused_and_two_lines_fit_on_a_drum() {
+    let mut s = Session::default();
+    trophy_base(&mut s);
+    let b = s.built.bodies[0].id;
+    // Running up against the drum's top step: the surface there cannot be moved out.
+    // The kernel's own sealed shell used to crash the process on this.
+    let e = refused(&mut s, json!({"op": "text", "text": "JANUS", "operation": "join", "body": b, "face": [0, -19, -30.4], "height": 4, "depth": 0.6, "align": "center"}));
+    assert!(e.contains("clear of edges and rims"), "{e}");
+    let before = volume(&s);
+    // Two lines, the J's tail clear of the line below.
+    cmd(&mut s, json!({"op": "text", "text": "JANUS", "operation": "join", "body": b, "face": [0, -19, -30.8], "height": 3.6, "depth": 0.6, "align": "center"}));
+    cmd(&mut s, json!({"op": "text", "text": "FIRST CUSTOMER", "operation": "join", "body": b, "face": [0, -19, -35.2], "height": 2.3, "depth": 0.6, "align": "center"}));
+    clean(&s);
+    assert!(volume(&s) > before + 5.0, "{} after {before}", volume(&s));
+}
+
 #[test]
 fn pipes_and_embossing_save_and_open() {
     let mut s = Session::default();

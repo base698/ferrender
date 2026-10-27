@@ -92,7 +92,7 @@ pub struct Saved {
 
 /// The lowest format version that can read this design, which is what a plain file is stamped with.
 pub fn design_version(doc: &Document) -> u32 {
-    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Pipe(_) | FeatureKind::Emboss(_) | FeatureKind::Text(crate::doc::Text { curved: true, .. }))) { 20 }
+    if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Pipe(_) | FeatureKind::Emboss(_) | FeatureKind::Text(crate::doc::Text { curved: true, .. }) | FeatureKind::MeshOp(crate::doc::MeshOp { op: crate::doc::MeshOpKind::Mirror { blend: Some(_), .. }, .. }))) { 20 }
     else if !doc.structural_members.is_empty() || doc.structural_case.is_some() { 19 }
     else if !doc.body_names.is_empty() { 18 }
     else if doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Tilt(_))) { 17 }

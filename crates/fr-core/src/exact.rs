@@ -1041,6 +1041,15 @@ fn face_kept(made: &Solid, face: &Face) -> bool {
     })
 }
 
+/// The layer between a body's surface and that surface moved by `thickness`: outward
+/// when positive, inward (a sealed shell around a void) when negative. The kernel's own
+/// shell with no open faces dereferences a null shape when its offset fails, which
+/// crashes the process, so this builds the layer from the checked offset and a boolean.
+pub(crate) fn sealed_shell(lump: &Solid, thickness: f64) -> R<Lumps> {
+    let moved = lump.offset(thickness, lump.iter_face(), 1e-6).map_err(|e| format!("the surface cannot be moved by {}: {e}", crate::units::trim_num(thickness.abs(), 4)))?;
+    if thickness > 0.0 { boolean(&[moved], std::slice::from_ref(lump), Bool::Subtract) } else { boolean(std::slice::from_ref(lump), &[moved], Bool::Subtract) }
+}
+
 /// Opens flat faces of a shell the kernel could not: hollows the body into a sealed
 /// shell with an inner void, then cuts the cap over each face away with a prism of the
 /// face's outline, a little deeper than the wall so the void is reached.
@@ -1049,7 +1058,8 @@ fn open_through_cap(lump: &Solid, thickness: f64, faces: &[&Face]) -> R<Solid> {
         let (at, _) = f.project(f.center());
         return Err(format!("the face at {} meets a fillet or a tangent face and is not flat, so it cannot be opened; shell before filleting the edges around it, or choose a flat face", point_text(g(at))));
     }
-    let mut made = lump.shell(-thickness, std::iter::empty()).map_err(|_| "the body cannot be hollowed to that wall thickness".to_owned())?;
+    let mut made = sealed_shell(lump, -thickness).map_err(|_| "the body cannot be hollowed to that wall thickness".to_owned())?
+        .into_iter().max_by(|a, b| a.volume().total_cmp(&b.volume())).ok_or("the body cannot be hollowed to that wall thickness")?;
     for face in faces {
         let (at, normal) = face.project(face.center());
         let (at, normal) = (g(at), g(normal).normalize_or_zero());

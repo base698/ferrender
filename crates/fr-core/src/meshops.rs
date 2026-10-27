@@ -526,8 +526,9 @@ pub fn cut(m: &Mesh, plane: Plane, keep: Keep, cap: bool) -> R<Vec<Mesh>> {
 }
 
 /// Adds the mirror image across a plane; with `weld`, vertices on the plane join their images.
-pub fn mirror(m: &Mesh, plane: Plane, weld: bool) -> R<Mesh> {
-    let m = welded(m);
+pub fn mirror(m: &Mesh, plane: Plane, weld: bool, blend: f64) -> R<Mesh> {
+    let mut m = welded(m);
+    if blend > 0.0 { m = blend_to_plane(&m, plane, blend); }
     let n = plane.normal();
     let mut copy = m.clone();
     copy.map(|p| p - n * 2.0 * (p - plane.origin).dot(n));
@@ -554,6 +555,75 @@ pub fn mirror(m: &Mesh, plane: Plane, weld: bool) -> R<Mesh> {
     let mut out = Mesh::welded_from_tris(&all);
     out.repair();
     finish(out)
+}
+
+/// Bends the surface within `width` of the plane so that it meets the plane square.
+/// A half cut from a shape that is not itself symmetric leans toward or away from the
+/// plane where it was cut, and meets its mirror image at a crease. Along the cut, the
+/// lean is measured over the surface within `width` (so bumps do not count); a point
+/// `u` from the plane is then moved across, parallel to the plane, by
+/// `lean * (width - u)^2 / (2 width)`, which takes the lean out at the plane and fades
+/// to nothing, with no kink, at `width`. Points on the plane stay on it, and detail in
+/// the strip is carried along unchanged rather than smoothed away.
+pub fn blend_to_plane(m: &Mesh, plane: Plane, width: f64) -> Mesh {
+    const ON: f64 = 1e-5;
+    // Leans steeper than this (a surface running nearly along the plane) are left alone.
+    const STEEPEST: f64 = 1.5;
+    // The lean is read from the surface this close to the plane (as a share of the
+    // width), and from as far along the cut as the width, so bumps average out.
+    const NEAR: f64 = 0.25;
+    let n = plane.normal();
+    let along = |p: DVec3| (p - plane.origin).dot(n);
+    let pos = m.positions();
+    let cell = |p: DVec3| ((p.x / width).floor() as i64, (p.y / width).floor() as i64, (p.z / width).floor() as i64);
+    let near = |p: DVec3| {
+        let (x, y, z) = cell(p);
+        (-1..=1).flat_map(move |i| (-1..=1).flat_map(move |j| (-1..=1).map(move |k| (x + i, y + j, z + k))))
+    };
+    // The surface near the plane, as area-weighted normals, by side.
+    let mut patches: FxMap<(i64, i64, i64), Vec<(DVec3, DVec3)>> = FxMap::default();
+    for t in m.indices() {
+        let [a, b, c] = t.map(|i| pos[i as usize]);
+        let centre = (a + b + c) / 3.0;
+        if along(centre).abs() < width { patches.entry(cell(centre)).or_default().push((centre, (b - a).cross(c - a) * 0.5)); }
+    }
+    // At each point of the cut, for each side, the lean and the way across it goes.
+    let mut seam: FxMap<(i64, i64, i64), Vec<(DVec3, [DVec3; 2])>> = FxMap::default();
+    for &p in pos.iter().filter(|p| along(**p).abs() < ON) {
+        let mut lean = [DVec3::ZERO; 2];
+        for (side, sign) in [(0, -1.0), (1, 1.0)] {
+            let into = n * sign;
+            let normal: DVec3 = near(p).filter_map(|k| patches.get(&k)).flatten()
+                .filter(|(centre, _)| centre.distance(p) < width && along(*centre) * sign > 0.0 && along(*centre).abs() < NEAR * width).map(|(_, area)| *area).sum();
+            let across = normal - into * normal.dot(into);
+            if across.length() < 1e-12 { continue; }
+            let slope = -normal.dot(into) / across.length();
+            if slope.abs() <= STEEPEST { lean[side] = across.normalize() * slope; }
+        }
+        seam.entry(cell(p)).or_default().push((p, lean));
+    }
+    let mut out = m.clone();
+    out.map_indexed(|_, p| {
+        let u = along(p);
+        if u.abs() >= width { return p; }
+        let side = usize::from(u > 0.0);
+        // The lean here: the cut's, averaged over the cut within `width`, nearer counting more.
+        let foot = p - n * u;
+        let (mut sum, mut weight) = (DVec3::ZERO, 0.0);
+        for (q, lean) in near(foot).filter_map(|k| seam.get(&k)).flatten() {
+            let d = q.distance(foot);
+            if d < width {
+                let w = (1.0 - d / width).powi(2);
+                let l = if u.abs() < ON { if lean[0] != DVec3::ZERO { lean[0] } else { lean[1] } } else { lean[side] };
+                sum += l * w;
+                weight += w;
+            }
+        }
+        if weight == 0.0 { return p; }
+        let u = u.abs();
+        p + sum / weight * ((width - u) * (width - u) / (2.0 * width))
+    });
+    out
 }
 
 /// Thickens an open mesh into a closed solid, or hollows a closed one. The
