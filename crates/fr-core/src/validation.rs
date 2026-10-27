@@ -51,6 +51,11 @@ fn validate_contents(s: &Sketch) -> Result<(), String> {
         { return Err(format!("circle {id} needs a finite positive radius")); }
     }
     for (&id, ent) in &s.entities {
+        if let Geom::Ellipse { c, a, b } = ent.geom
+            && (c == a || c == b || a == b || s.pos(a).distance(s.pos(c)) < 1e-9 || s.pos(b).distance(s.pos(c)) < 1e-9)
+        { return Err(format!("ellipse {id} needs a centre and two axes with some length")); }
+    }
+    for (&id, ent) in &s.entities {
         if let Geom::Spline { a,b,c,d } = ent.geom {
             crate::sketch::validate_spline_points([a,b,c,d].map(|p| s.pos(p))).map_err(|e| format!("spline {id}: {e}"))?;
         }
@@ -113,13 +118,21 @@ impl Clip {
 /// Broken feature dependencies remain loadable so they can be repaired in the timeline.
 /// Structural invariants needed for safe solver/kernel access must hold first.
 pub fn document(d: &Document) -> Result<(), String> {
+    if d.structural_members.len() > 1024 { return Err("at most 1024 structural member tags are supported".into()); }
+    for tag in d.structural_members.values() { tag.validate()?; }
+    if let Some(case) = &d.structural_case { case.validate()?; }
     if d.features.len() > MAX_FEATURES || d.params.len() > 1024 {
         return Err("the document exceeds the feature or parameter limit".into());
     }
     // Bound aggregate decoded image memory before validating (and decoding) any image.
     let mut reference_pixels = 0u64;
     for f in &d.features {
-        if let FeatureKind::Sketch(sketch) = &f.kind && let Some(image) = &sketch.reference {
+        let image = match &f.kind {
+            FeatureKind::Sketch(sketch) => sketch.reference.as_ref(),
+            FeatureKind::Relief(r) => Some(&r.image),
+            _ => None,
+        };
+        if let Some(image) = image {
             reference_pixels += u64::from(image.pixel_width) * u64::from(image.pixel_height);
             if reference_pixels > 16 * 1024 * 1024 { return Err("reference images exceed the document limit of 16 megapixels".into()); }
         }
@@ -130,9 +143,16 @@ pub fn document(d: &Document) -> Result<(), String> {
         expression(&p.expr)?;
     }
     let mut ids = BTreeSet::new();
+    let mut script_outputs = BTreeSet::new();
     let mut depths = std::collections::BTreeMap::from([(0,0usize)]);
     for f in &d.features {
         if f.id == 0 || !ids.insert(f.id) || f.id >= d.next_id { return Err("feature ids must be unique and below the next id".into()); }
+        if let Some(key) = &f.script_key {
+            if key.is_empty() || key.len() > 1024 { return Err("script output identities must be nonempty and no longer than 1024 bytes".into()); }
+            if let Some(chip) = f.made_by && !script_outputs.insert((chip, key)) {
+                return Err("a script run has duplicate output identities".into());
+            }
+        }
         let depth=*depths.get(&f.owner).ok_or("each feature owner must be root or an earlier component")?;
         if let FeatureKind::Component(c)=&f.kind {
             if depth>=32 {return Err("components can nest at most 32 levels deep".into());}
@@ -143,6 +163,10 @@ pub fn document(d: &Document) -> Result<(), String> {
             }
         }
         plane_dependencies(d,f)?;
+        if let Some(by)=f.made_by {
+            let earlier=d.features.iter().take_while(|g|g.id!=f.id).any(|g|g.id==by && matches!(g.kind,FeatureKind::ScriptRun(_)));
+            if !earlier { return Err(format!("feature {} says it was made by script run {by}, which is not an earlier script run",f.id)); }
+        }
         match &f.kind {
             FeatureKind::Sketch(s) => s.validate().map_err(|e|format!("sketch {}: {e}",f.id))?,
             FeatureKind::Import(m) => m.validate()?,
@@ -151,6 +175,52 @@ pub fn document(d: &Document) -> Result<(), String> {
             FeatureKind::Primitive(p) => p.validate()?,
             FeatureKind::Remove(r) => r.validate()?,
             FeatureKind::Split(s) => s.validate()?,
+            FeatureKind::Relief(r) => {
+                r.image.validate().map_err(|e| format!("relief {}: {e}", f.id))?;
+                if r.resolution < 2 || r.resolution > 1200 { return Err(format!("relief {}: resolution must be between 2 and 1200", f.id)); }
+                if !r.gamma.is_finite() || r.gamma <= 0.0 || r.gamma > 10.0 || r.blur > 64 { return Err(format!("relief {}: gamma must be between 0 and 10 and blur at most 64", f.id)); }
+                for v in [&r.width, &r.depth, &r.base] { expression(&v.expr)?; if !v.v.is_finite() { return Err(format!("relief {}: values must be finite", f.id)); } }
+            }
+            FeatureKind::ScriptRun(r) => {
+                if r.source.len() > crate::script::MAX_SOURCE_BYTES { return Err(format!("script run {}: the source is larger than 1 MB", f.id)); }
+                if !r.inputs.is_object() { return Err(format!("script run {}: inputs must be an object", f.id)); }
+                if r.script_name.chars().count() > 256 { return Err(format!("script run {}: the name is too long", f.id)); }
+            }
+            FeatureKind::MeshOp(m) => {
+                use crate::doc::MeshOpKind;
+                if m.body == 0 { return Err(format!("mesh operation {}: select a body", f.id)); }
+                match &m.op {
+                    MeshOpKind::Repair { fill_holes } => if *fill_holes > 100_000 { return Err("fill_holes is too large".into()) },
+                    MeshOpKind::Decimate { target, .. } => if *target < 4 { return Err("a decimation target must be at least 4 triangles".into()) },
+                    MeshOpKind::Smooth { iterations, strength } => if *iterations > 500 || !strength.is_finite() || !(0.0..=1.0).contains(strength) { return Err("smoothing takes at most 500 iterations and a strength from 0 to 1".into()) },
+                    MeshOpKind::Subdivide { levels, .. } => if *levels == 0 || *levels > 6 { return Err("subdivision takes 1 to 6 levels".into()) },
+                    MeshOpKind::Cut { plane, .. } | MeshOpKind::Mirror { plane, blend: None, .. } => crate::body_ops::Split { body: m.body, plane: plane.clone() }.validate()?,
+                    MeshOpKind::Mirror { plane, blend: Some(blend), .. } => {
+                        crate::body_ops::Split { body: m.body, plane: plane.clone() }.validate()?;
+                        expression(&blend.expr)?;
+                        if !blend.v.is_finite() || blend.v < 0.0 { return Err("the mirror blend must be a finite distance of zero or more".into()); }
+                    }
+                    MeshOpKind::Offset { distance, direction } | MeshOpKind::ExtrudeRegion { distance, direction } => {
+                        expression(&distance.expr)?;
+                        if !distance.v.is_finite() || direction.is_some_and(|d| !d.is_finite()) { return Err("the mesh offset needs finite values".into()); }
+                    }
+                    MeshOpKind::Sculpt { at, radius, strength, .. } => {
+                        expression(&radius.expr)?; expression(&strength.expr)?;
+                        if !at.is_finite() || !radius.v.is_finite() || radius.v <= 0.0 || !strength.v.is_finite() { return Err("a sculpt stroke needs a finite point, a positive radius and a finite strength".into()); }
+                    }
+                }
+                if let Some(r) = &m.region {
+                    use crate::meshops::RegionSpec;
+                    let ok = match r {
+                        RegionSpec::Sphere { centre, radius } => centre.is_finite() && radius.is_finite() && *radius > 0.0,
+                        RegionSpec::Box { lo, hi } => lo.is_finite() && hi.is_finite(),
+                        RegionSpec::Side { plane } => plane.origin.is_finite() && plane.x.is_finite() && plane.y.is_finite(),
+                        RegionSpec::Normal { direction, degrees } => direction.is_finite() && degrees.is_finite(),
+                        RegionSpec::Connected { seed } => seed.is_finite(),
+                    };
+                    if !ok { return Err(format!("mesh operation {}: the region needs finite values", f.id)); }
+                }
+            }
             _ => {}
         }
     }
@@ -186,16 +256,21 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
         Ok(())
     };
     let body=|id:Id| -> Result<(),String> {
-        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
+        if d.feature(id).is_some() { earlier(id,"body-making feature",|k|matches!(k,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Sweep(_)|FeatureKind::Loft(_)|FeatureKind::Pipe(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)|FeatureKind::Text(_))) }
         else if id>=1000 && d.feature(id/1000).is_some() {earlier(id/1000,"pattern or split",|k|matches!(k,FeatureKind::Pattern(_)|FeatureKind::Split(_)))}
         else {Ok(())}
     };
     let plane=|r:&PlaneRef| -> Result<(),String> {match r {
         PlaneRef::Origin(_)=>Ok(()),
         PlaneRef::Plane(id)=>earlier(*id,"construction plane",|k|matches!(k,FeatureKind::Plane(_))),
-        PlaneRef::Face {body:id,at,frame}=>{body(*id)?;anchor(*at,*frame)}
+        PlaneRef::Free(p)=>Sketch::new(*p).validate(),
+        PlaneRef::Face {body:id,at,frame,..}=>{body(*id)?;anchor(*at,*frame)}
     }};
     match &f.kind {
+        FeatureKind::Tilt(t)=>{
+            body(t.body)?;anchor(t.face,t.frame)?;
+            if !t.axis.is_finite() || t.axis.length()<1e-9 {return Err("a tilt needs a hinge direction".into());}
+        },
         FeatureKind::Split(s)=>{
             body(s.body)?;plane(&s.plane)?;
             if d.body_owner(s.body).is_some_and(|owner|owner!=f.owner) {return Err("a split must belong to its target body's component".into());}
@@ -205,6 +280,24 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
             if r.bodies.first().and_then(|id|d.body_owner(*id)).is_some_and(|owner|owner!=f.owner) {return Err("a remove feature must belong to its first target's component".into());}
         },
         FeatureKind::Sketch(s)=>{if let Some(id)=s.on {earlier(id,"construction plane",|k|matches!(k,FeatureKind::Plane(_)))?;}},
+        FeatureKind::Pipe(p)=>{
+            if p.path.is_empty() {return Err("a pipe needs a path".into());}
+            for run in &p.path {
+                earlier(run.sketch,"sketch",|k|matches!(k,FeatureKind::Sketch(_)))?;
+                if let Some(id)=run.onto {body(id)?;}
+            }
+            for v in std::iter::once(&p.diameter).chain(&p.bore) {
+                expression(&v.expr)?;
+                if !v.v.is_finite() || !(v.v as f32).is_finite() {return Err("pipe sizes must be finite and representable".into());}
+            }
+        },
+        FeatureKind::Emboss(e)=>{
+            earlier(e.sketch,"sketch",|k|matches!(k,FeatureKind::Sketch(_)))?;
+            body(e.body)?;
+            expression(&e.depth.expr)?;
+            if !e.depth.v.is_finite() || !(e.depth.v as f32).is_finite() {return Err("emboss depth must be finite and representable".into());}
+            if !matches!(e.op,crate::doc::Op::Join|crate::doc::Op::Cut) {return Err("emboss raises (join) or sinks (cut) the shapes".into());}
+        },
         FeatureKind::Plane(p)=>match &p.kind {
             PlaneKind::Offset {base,distance}=>{
                 plane(base)?; expression(&distance.expr)?;

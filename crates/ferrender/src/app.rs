@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Color32, Context, Key, Modifiers, Pos2, Rect, ViewportCommand};
-use fr_core::doc::{Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Pattern, PatternKind, LinearDirection, Revolve, Shell, Text, Thread, Transform};
+use fr_core::doc::{Pivot, Tilt, Blend, Combine, Extrude, Hole, HoleFit, HoleShape, Loft, LoftSection, Pattern, PatternKind, LinearDirection, Revolve, Shell, Sweep, SweepOrient, Text, Thread, Transform};
 pub use fr_core::face::Face;
 use fr_core::render::Camera;
 use fr_core::sketch::Clip;
@@ -27,11 +27,15 @@ pub enum Tool {
     Select,
     Line,
     Rect,
+    /// A rectangle from its centre and one corner; the centre stays its centre.
+    CenterRect,
     Circle,
     Arc,
     Arc3,
     TangentArc,
     Spline,
+    /// Centre, the end of one axis, then a click that sets the width.
+    Ellipse,
     Point,
     Dimension,
     Polygon,
@@ -39,27 +43,32 @@ pub enum Tool {
     Trim,
     /// Click a face of a body to copy its outline into the sketch.
     Project,
+    /// Like Select, but a drag from empty space moves the selection instead of box-selecting.
+    Move,
 }
 
 impl Tool {
     /// Clicks needed to place one of these.
     pub fn clicks(self) -> usize {
         match self {
-            Tool::Line | Tool::Rect | Tool::Circle | Tool::Polygon | Tool::TangentArc => 2,
-            Tool::Arc | Tool::Arc3 => 3,
+            Tool::Line | Tool::Rect | Tool::CenterRect | Tool::Circle | Tool::Polygon | Tool::TangentArc => 2,
+            Tool::Arc | Tool::Arc3 | Tool::Ellipse => 3,
             Tool::Spline => 4,
             Tool::Point => 1,
-            Tool::Select | Tool::Dimension | Tool::Trim | Tool::Project => 0,
+            Tool::Select | Tool::Move | Tool::Dimension | Tool::Trim | Tool::Project => 0,
         }
     }
 
     pub fn hint(self, placed: usize) -> &'static str {
         match (self, placed) {
             (Tool::Select, _) => "Click to select, drag to move. Shift-click adds to the selection.",
+            (Tool::Move, _) => "Drag a point or entity to move it, or select geometry and drag anywhere to move it all. Escape returns to Select.",
             (Tool::Line, 0) => "Click to start a line.",
             (Tool::Line, _) => "Click the next point. Hold Shift to lock the angle; Tab types an exact angle. Esc ends the line.",
             (Tool::Rect, 0) => "Click the first corner.",
             (Tool::Rect, _) => "Click the opposite corner.",
+            (Tool::CenterRect, 0) => "Click the rectangle's centre.",
+            (Tool::CenterRect, _) => "Click a corner, or type the width and height.",
             (Tool::Circle, 0) => "Click the centre.",
             (Tool::Circle, _) => "Click to set the radius.",
             (Tool::Arc, 0) => "Click the arc's centre.",
@@ -70,9 +79,12 @@ impl Tool {
             (Tool::Arc3, _) => "Move to choose the bulge, then click. Type a diameter for an exact size.",
             (Tool::TangentArc, 0) => "Click a line or arc endpoint. At a junction, select the source edge first.",
             (Tool::TangentArc, _) => "Click the new endpoint. Hold Shift to keep the sweep angle fixed; the join stays tangent.",
+            (Tool::Ellipse, 0) => "Click the ellipse's centre.",
+            (Tool::Ellipse, 1) => "Click the end of one axis: its direction and half its length.",
+            (Tool::Ellipse, _) => "Move away from that axis to set the width, then click.",
             (Tool::Spline, 0) => "Click the spline's start point.",
-            (Tool::Spline, 1) => "Click the first interior fit point.",
-            (Tool::Spline, 2) => "Click the second interior fit point.",
+            (Tool::Spline, 1) => "Click the next point. Clicking a point or a curve ends the spline there; Escape ends it with the points placed.",
+            (Tool::Spline, 2) => "Click the next point. Clicking a point or a curve ends the spline there; Escape ends it with the points placed.",
             (Tool::Spline, _) => "Click the spline's end point. Drag its four fit points later to refine the curve.",
             (Tool::Point, _) => "Click to place a point.",
             (Tool::Polygon, 0) => "Click the polygon's centre. Set the number of sides in the Sketch Palette.",
@@ -95,6 +107,13 @@ pub struct Snap {
     /// The segment from the previous click is horizontal or vertical.
     pub h: bool,
     pub v: bool,
+    /// The point landed on the sketch's X axis (y = 0) or Y axis (x = 0), and stays there.
+    pub axis: [bool; 2],
+    /// The point is the midpoint of the entity in `on`, and stays there.
+    pub mid: bool,
+    /// The point is where a point of another sketch, or a corner of a body, falls on this
+    /// sketch's plane; the new point is fixed there.
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -109,12 +128,39 @@ pub enum Drag {
     Body,
     /// Pulling the Extrude dialog's arrow.
     Arrow,
+    /// Turning the Tilt dialog's handle.
+    Tilt,
 }
 
-/// The Extrude and Revolve dialogs.
+/// The path half of the Sweep dialog.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SweepDlg {
+    /// The sketch the path is drawn in; set by clicking one of its lines or curves.
+    pub path_sketch: Option<Id>,
+    /// The entities to follow; empty means the whole sketch.
+    pub path: Vec<Id>,
+    /// The parts of the path to sweep, as fractions of its length; empty means all of it.
+    pub spans: Vec<[f64; 2]>,
+    pub orient: SweepOrient,
+}
+
+/// The Loft dialog: closed regions of sketches on different planes, in the order they are skinned.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LoftDlg {
+    /// The feature being edited, or none when creating one.
+    pub editing: Option<Id>,
+    pub sections: Vec<LoftSection>,
+    /// Straight walls between neighbouring sections instead of one smooth surface.
+    pub ruled: bool,
+    pub op: Op,
+}
+
+/// The Extrude, Revolve and Sweep dialogs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FeatureDlg {
     pub revolve: bool,
+    /// Set when this is the Sweep dialog.
+    pub sweep: Option<SweepDlg>,
     /// The feature being edited, or none when creating one.
     pub editing: Option<Id>,
     pub sketch: Option<Id>,
@@ -147,6 +193,55 @@ pub struct BlendDlg {
     pub text: String,
     /// The body's bounds when its edges were picked.
     pub frame: Option<[DVec3; 2]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TiltDlg {
+    pub body: Option<Id>,
+    /// The face to tilt, with the point that names it in the body's own frame.
+    pub face: Option<(DVec3, Face)>,
+    /// The hinge's direction, in the body's own frame.
+    pub axis: DVec3,
+    pub text: String,
+    pub pivot: Pivot,
+    pub frame: Option<[DVec3; 2]>,
+}
+
+impl TiltDlg {
+    /// Takes `face` as the one to tilt, hinged along the line of sight, so that a
+    /// positive angle turns the face clockwise as it is seen now.
+    pub fn take(&mut self, app: &App, face: Face) {
+        self.body = Some(face.body);
+        self.frame = app.session.built.frame(face.body);
+        let at = app.session.built.body(face.body).map_or(face.at, |b| b.to_local(face.at));
+        self.face = Some((at, face));
+        self.hinge_from_view(app);
+    }
+
+    /// The hinge in space, as a direction lying in the face.
+    pub fn hinge(&self, app: &App) -> Option<(DVec3, DVec3)> {
+        let normal = self.face.as_ref()?.1.plane?.normal();
+        let axis = app.session.built.body(self.body?)?.placement.transform_vector3(self.axis);
+        Some(((axis - normal * axis.dot(normal)).try_normalize()?, normal))
+    }
+
+    /// Hinges the tilt along the line of sight; seen face-on, along the screen's upward direction.
+    pub fn hinge_from_view(&mut self, app: &App) {
+        let Some(normal) = self.face.as_ref().and_then(|f| f.1.plane).map(|p| p.normal()) else { return };
+        let (eye, _, up) = app.cam.basis();
+        let lying = |v: DVec3| (v - normal * v.dot(normal)).length() > 0.2;
+        let world = if lying(eye) { -eye } else { up };
+        self.set_hinge(app, world);
+    }
+
+    /// Turns the hinge a quarter turn within the face.
+    pub fn turn_hinge(&mut self, app: &App) {
+        if let Some((along, normal)) = self.hinge(app) { self.set_hinge(app, normal.cross(along)); }
+    }
+
+    fn set_hinge(&mut self, app: &App, world: DVec3) {
+        self.axis = self.body.and_then(|b| app.session.built.body(b)).map_or(world, |b| b.placement.inverse().transform_vector3(world));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -249,14 +344,17 @@ pub struct TextDlg {
     pub body: Option<Id>,
     pub face: Option<DVec3>,
     pub frame: Option<[DVec3; 2]>,
+    /// The face is curved: the lettering is projected onto it.
+    pub curved: bool,
 }
 
 impl TextDlg {
     pub fn feature(&self, d: &mut Document) -> Result<Text, String> {
         if self.op != Op::New && self.body.zip(self.face).is_none() {
-            return Err("Click a flat face to raise or engrave text.".into());
+            return Err("Click a face to raise or engrave text.".into());
         }
         Ok(Text {
+            tag: None,
             text: self.text.clone(), plane: self.plane,
             height: d.enter(&self.height, Kind::Length)?, depth: d.enter(&self.depth, Kind::Length)?,
             spacing: d.enter(&self.spacing, Kind::Length)?, angle: d.enter(&self.angle, Kind::Angle)?,
@@ -265,6 +363,7 @@ impl TextDlg {
             body: if self.op == Op::New { None } else { self.body },
             face: if self.op == Op::New { None } else { self.face },
             frame: if self.op == Op::New { None } else { self.frame },
+            curved: self.op != Op::New && self.curved,
         })
     }
 }
@@ -292,6 +391,58 @@ pub struct PatternDlg {
     pub axis2: usize,
     pub count2: u32,
     pub text2: String,
+}
+
+/// The Mesh menu's operations, in dialog order.
+pub const MESH_OPS: [&str; 7] = ["Repair Mesh", "Decimate", "Smooth", "Subdivide", "Cut Mesh", "Mirror Mesh", "Offset / Thicken"];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeshDlg {
+    pub body: Option<Id>,
+    /// Index into [`MESH_OPS`].
+    pub kind: usize,
+    /// Fill-hole size, target triangles, iterations or levels.
+    pub count: u32,
+    /// Smoothing strength.
+    pub amount: f64,
+    /// Method, scheme or kept side.
+    pub choice: usize,
+    /// Preserve boundary, cap, weld, or straight down.
+    pub flag: bool,
+    /// Origin plane index for cut and mirror.
+    pub plane: usize,
+    /// Plane offset or thickness.
+    pub text: String,
+}
+
+impl MeshDlg {
+    pub fn new(kind: usize, body: Option<Id>, unit: Unit) -> Self {
+        let count = match kind { 0 => 12, 1 => 50_000, 2 => 10, _ => 1 };
+        let text = match kind { 6 => format!("{} {}", if unit == Unit::In { "0.1" } else if unit == Unit::Cm { "0.2" } else { "2" }, unit.name()), _ => format!("0 {}", unit.name()) };
+        MeshDlg { body, kind, count, amount: 0.5, choice: 0, flag: true, plane: 0, text }
+    }
+}
+
+/// The sculpt brush: every click on a body adds one stroke as a feature.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SculptDlg {
+    pub brush: usize,
+    pub radius: String,
+    pub strength: String,
+    pub strokes: usize,
+}
+
+pub const BRUSHES: [&str; 5] = ["Pull", "Push", "Inflate", "Smooth", "Flatten"];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReliefDlg {
+    pub path: PathBuf,
+    pub width: String,
+    pub depth: String,
+    pub base: String,
+    pub resolution: u32,
+    pub blur: u32,
+    pub invert: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -331,17 +482,25 @@ pub enum Dialog {
     PickPlane,
     PointCoordinates(PointCoordsDlg),
     Feature(FeatureDlg),
+    Loft(LoftDlg),
     Transform(TransformDlg),
     Combine(CombineDlg),
     Pattern(PatternDlg),
     Blend(BlendDlg),
     Shell(ShellDlg),
+    Tilt(TiltDlg),
+    /// The Inspect tool that puts a deck load on the tagged members.
+    Loads(crate::structure_ui::LoadsDlg),
     Hole(HoleDlg),
     Thread(ThreadDlg),
     Text(TextDlg),
     Measure(MeasureDlg),
     Export(Unit),
     Import(PathBuf, Unit),
+    Mesh(MeshDlg),
+    Relief(ReliefDlg),
+    Sculpt(SculptDlg),
+    Script(crate::scripts_ui::ScriptDlg),
 }
 
 impl PatternDlg {
@@ -395,7 +554,9 @@ pub struct Section {
     pub on: bool,
     /// The world axis the cutting plane faces: 0 = X, 1 = Y, 2 = Z.
     pub axis: usize,
-    /// Where the plane sits along that axis, in millimetres.
+    /// A construction plane to cut along instead of a world axis, when it is built.
+    pub plane: Option<Id>,
+    /// Where the plane sits along that axis or plane normal, in millimetres.
     pub offset: f64,
     pub flip: bool,
 }
@@ -419,8 +580,12 @@ impl Dialog {
                     let taper = f.taper(d)?;
                     return d.add_feature_to(f.face_owner, FeatureKind::Extrude(Extrude { sketch, profiles, distance, symmetric: false, op, taper, through_all: f.through_all }));
                 }
-                let sketch = f.sketch.filter(|_| !f.profiles.is_empty()).ok_or(if f.revolve { "Click a closed sketch profile in the viewport." } else { "Click a closed sketch profile or a flat face in the viewport." })?;
-                let kind = if f.revolve {
+                let sketch = f.sketch.filter(|_| !f.profiles.is_empty()).ok_or(if f.revolve || f.sweep.is_some() { "Click a closed sketch profile in the viewport." } else { "Click a closed sketch profile or a flat face in the viewport." })?;
+                let kind = if let Some(w) = &f.sweep {
+                    let path_sketch = w.path_sketch.ok_or("Click a line or curve of the path, drawn in another sketch.")?;
+                    if path_sketch == sketch { return Err("The profile and the path must be in different sketches.".into()); }
+                    FeatureKind::Sweep(Sweep { sketch, profiles: f.profiles.clone(), path_sketch, path: w.path.clone(), spans: w.spans.clone(), orient: w.orient, op: f.op })
+                } else if f.revolve {
                     FeatureKind::Revolve(Revolve { sketch, profiles: f.profiles.clone(), axis: f.axis, angle: d.enter(&f.text, Kind::Angle)?, op: f.op })
                 } else {
                     FeatureKind::Extrude(Extrude { sketch, profiles: f.profiles.clone(), distance: d.enter(&f.text, Kind::Length)?, symmetric: f.symmetric, op: f.op, taper: f.taper(d)?, through_all: f.through_all })
@@ -433,6 +598,27 @@ impl Dialog {
                     None => {
                         if let Some(s) = d.sketch_mut(sketch) {
                             s.visible = false;
+                        }
+                        if let Some(s) = f.sweep.as_ref().and_then(|w| w.path_sketch).and_then(|id| d.sketch_mut(id)) {
+                            s.visible = false;
+                        }
+                        Ok(d.add_feature(kind))
+                    }
+                }
+            }
+            Dialog::Loft(l) => {
+                if l.sections.len() < 2 {
+                    return Err("Click a closed region in each of two or more sketches on different planes.".into());
+                }
+                let kind = FeatureKind::Loft(Loft { sections: l.sections.clone(), ruled: l.ruled, op: l.op });
+                match l.editing {
+                    Some(id) => {
+                        d.feature_mut(id).ok_or("That feature no longer exists.")?.kind = kind;
+                        Ok(id)
+                    }
+                    None => {
+                        for section in &l.sections {
+                            if let Some(s) = d.sketch_mut(section.sketch) { s.visible = false; }
                         }
                         Ok(d.add_feature(kind))
                     }
@@ -465,7 +651,7 @@ impl Dialog {
                 if let Some(id) = p.editing {
                     let owner = d.feature(source).ok_or("The source feature no longer exists.")?.owner;
                     let index = d.features.iter().position(|f| f.id == id).ok_or("The pattern no longer exists.")?;
-                    if !d.features.iter().take(index).any(|f| f.id == source && !f.suppressed) { return Err("Choose a source before this pattern in the timeline.".into()); }
+                    if !d.features.iter().take(index).any(|f| f.id == source && !d.is_suppressed(f.id)) { return Err("Choose a source before this pattern in the timeline.".into()); }
                     let feature = d.feature_mut(id).unwrap();
                     if feature.owner != owner { return Err("Choose a source in the pattern's component.".into()); }
                     feature.kind = FeatureKind::Pattern(pattern);
@@ -475,12 +661,17 @@ impl Dialog {
             Dialog::Blend(b) => {
                 let body = b.body.filter(|_| !b.edges.is_empty()).ok_or("Click the edges to blend.")?;
                 let size = d.enter(&b.text, Kind::Length)?;
-                Ok(d.add_feature(FeatureKind::Blend(Blend { body, edges: b.edges.clone(), size, chamfer: b.chamfer, frame: b.frame })))
+                Ok(d.add_feature(FeatureKind::Blend(Blend { body, edges: b.edges.clone(), size, chamfer: b.chamfer, frame: b.frame, tags: Vec::new() })))
+            }
+            Dialog::Tilt(t) => {
+                let (body, face) = t.body.zip(t.face.as_ref()).ok_or("Click a flat face to tilt.")?;
+                let angle = d.enter(&t.text, Kind::Angle)?;
+                Ok(d.add_feature(FeatureKind::Tilt(Tilt { body, face: face.0, axis: t.axis, angle, pivot: t.pivot, frame: t.frame, tag: None })))
             }
             Dialog::Shell(sh) => {
                 let body = sh.body.filter(|_| !sh.faces.is_empty()).ok_or("Click the faces to leave open.")?;
                 let thickness = d.enter(&sh.text, Kind::Length)?;
-                Ok(d.add_feature(FeatureKind::Shell(Shell { body, faces: sh.faces.iter().map(|f| f.0).collect(), thickness, frame: sh.frame })))
+                Ok(d.add_feature(FeatureKind::Shell(Shell { body, faces: sh.faces.iter().map(|f| f.0).collect(), thickness, frame: sh.frame, tags: Vec::new() })))
             }
             Dialog::Hole(h) => {
                 let hole = h.hole(d)?;
@@ -499,18 +690,46 @@ impl Dialog {
                     None => d.add_feature_to(t.owner, kind),
                 }
             }
+            Dialog::Mesh(m) => {
+                use fr_core::doc::{MeshOp, MeshOpKind};
+                use fr_core::meshops::{DecimateMethod, Keep, Scheme};
+                use fr_core::planes::{OriginPlane, PlaneRef};
+                let body = m.body.ok_or("Click a body first.")?;
+                let offset = d.enter(&m.text, Kind::Length)?;
+                let plane = || -> Result<PlaneRef, String> {
+                    let base = [OriginPlane::XY, OriginPlane::XZ, OriginPlane::YZ][m.plane];
+                    Ok(if offset.v.abs() < 1e-12 { PlaneRef::Origin(base) } else { PlaneRef::Free(base.plane().offset(offset.v)) })
+                };
+                let op = match m.kind {
+                    0 => MeshOpKind::Repair { fill_holes: m.count },
+                    1 => MeshOpKind::Decimate { target: m.count.max(4), method: if m.choice == 1 { DecimateMethod::Cluster } else { DecimateMethod::Quadric }, preserve_boundary: m.flag },
+                    2 => MeshOpKind::Smooth { iterations: m.count.max(1), strength: m.amount },
+                    3 => MeshOpKind::Subdivide { levels: m.count.clamp(1, 6), scheme: if m.choice == 1 { Scheme::Midpoint } else { Scheme::Loop } },
+                    4 => MeshOpKind::Cut { plane: plane()?, keep: [Keep::Negative, Keep::Positive, Keep::Both][m.choice.min(2)], cap: m.flag },
+                    5 => MeshOpKind::Mirror { plane: plane()?, weld: m.flag, blend: None },
+                    _ => MeshOpKind::Offset { distance: offset, direction: m.flag.then_some(glam::DVec3::NEG_Z) },
+                };
+                Ok(d.add_feature(FeatureKind::MeshOp(MeshOp { body, op, region: None })))
+            }
+            Dialog::Relief(r) => {
+                let image = fr_core::reference::ReferenceImage::from_file(&r.path, 100.0)?;
+                let relief = fr_core::doc::Relief { image, plane: Plane::XY, width: d.enter(&r.width, Kind::Length)?, depth: d.enter(&r.depth, Kind::Length)?, base: d.enter(&r.base, Kind::Length)?, resolution: r.resolution.clamp(2, 1200), invert: r.invert, blur: r.blur.min(64), gamma: 1.0, op: Op::New };
+                let id = d.add_feature(FeatureKind::Relief(relief));
+                if let Some(n) = r.path.file_stem().map(|n| n.to_string_lossy().into_owned()) { d.feature_mut(id).unwrap().name = n; }
+                Ok(id)
+            }
             Dialog::Thread(t) => {
                 let (body, face) = t.body.zip(t.face).ok_or("Click the rod or the hole to thread.")?;
                 let (offset, length) = if t.full { (None, None) } else { (Some(d.enter(&t.offset, Kind::Length)?), Some(d.enter(&t.length, Kind::Length)?)) };
                 let extra = if t.extra.trim().is_empty() { None } else { Some(d.enter(&t.extra, Kind::Length)?) };
-                Ok(d.add_feature(FeatureKind::Thread(Thread { body, face, frame: t.frame, thread: t.thread.clone(), offset, length, left: t.left, extra })))
+                Ok(d.add_feature(FeatureKind::Thread(Thread { body, face, frame: t.frame, tag: None, thread: t.thread.clone(), offset, length, left: t.left, extra })))
             }
             _ => Err("Nothing to apply.".into()),
         }
     }
 
     pub fn has_preview(&self) -> bool {
-        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_))
+        matches!(self, Dialog::Remove(_) | Dialog::Split(_) | Dialog::Primitive(_) | Dialog::Plane(_) | Dialog::MoveComponent(_) | Dialog::Feature(_) | Dialog::Loft(_) | Dialog::Transform(_) | Dialog::Combine(_) | Dialog::Pattern(_) | Dialog::Blend(_) | Dialog::Shell(_) | Dialog::Hole(_) | Dialog::Thread(_) | Dialog::Text(_) | Dialog::Mesh(_) | Dialog::Relief(_))
     }
 }
 
@@ -585,6 +804,12 @@ pub struct Opts {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     CommandSearch,
+    /// A Mesh menu operation, by index into [`MESH_OPS`].
+    Mesh(usize),
+    Relief,
+    Sculpt,
+    ScriptLog,
+    ExportTimelineScript,
     Primitive(usize),
     RemoveBody,
     SplitBody,
@@ -610,6 +835,8 @@ pub enum Action {
     FinishSketch,
     Extrude,
     Revolve,
+    Sweep,
+    Loft,
     Transform,
     Combine,
     Parameters,
@@ -630,7 +857,11 @@ pub enum Action {
     Section,
     /// Fillet (false) or chamfer (true) the edges of a body.
     Blend(bool),
+    /// Estimate how the tagged members carry a deck load.
+    Loads,
     Shell,
+    /// Tilt a flat face about a hinge lying in it.
+    Tilt,
     Hole,
     Thread,
     Text,
@@ -676,6 +907,8 @@ pub struct App {
     /// Geometry immediately before an edited Text feature, keyed by document revision and feature.
     text_base: Option<(u64, Id, Built)>,
     pub(crate) construction_source: Option<(u64, Id, Built)>,
+    /// A constraint clicked before its items were selected: it applies as soon as the clicks fit it.
+    pub pending_constraint: Option<CKind>,
     /// Local exact source geometry is shared across unchanged Text preview frames.
     text_local: Option<((u64, Option<Id>, Id), fr_core::Body)>,
     pub value_edit: Option<ValueEdit>,
@@ -706,9 +939,14 @@ pub struct App {
     pub param_new: (String, String),
     pub param_edit: Option<(String, String)>,
     pub rename: Option<(Id, String)>,
+    /// The Rename box is naming a body, not a feature; their ids can be the same.
+    pub rename_body: bool,
+    /// The Loads panel's estimates, for the design revision and panel they were worked out from.
+    pub loads: Option<(u64, crate::structure_ui::LoadsDlg, crate::structure_ui::Estimates)>,
     /// The GPU viewport is available; otherwise bodies are drawn in software.
     pub gpu: bool,
     pub scene: view::Scene,
+    pub scripts: crate::scripts_ui::Scripts,
     pub fit_pending: bool,
     pub bridge: Option<Bridge>,
     /// This app's recovery copy; none while testing unless a test sets one.
@@ -770,6 +1008,7 @@ impl App {
             preview: None,
             text_base: None,
             construction_source: None,
+            pending_constraint: None,
             text_local: None,
             value_edit: None,
             typed: None,
@@ -790,13 +1029,16 @@ impl App {
             show_about: false,
             show_params: false,
             show_section: false,
-            section: Section { on: false, axis: 1, offset: 0.0, flip: false },
+            section: Section { on: false, axis: 1, plane: None, offset: 0.0, flip: false },
             plane_offset: String::new(),
             param_new: Default::default(),
             param_edit: None,
             rename: None,
+            rename_body: false,
+            loads: None,
             gpu,
             scene: view::Scene::default(),
+            scripts: Default::default(),
             fit_pending: false,
             bridge: if cfg!(test) || !config.bridge.enabled { None } else { Bridge::start(config.bridge.port, cc.egui_ctx.clone()) },
             recovery: if cfg!(test) { None } else { Config::path().parent().map(|d| Recovery::start(d.join("recovery"))) },
@@ -857,7 +1099,10 @@ impl App {
     }
 
     pub fn toast(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), self.now + 4.0));
+        // Long enough to read: four seconds, plus time for a longer message, up to twelve.
+        let msg = msg.into();
+        let shown = (4.0 + msg.len() as f64 * 0.04).min(12.0);
+        self.toast = Some((msg, self.now + shown));
     }
 
     fn file_error(&mut self, title: &str, path: &Path, message: String, guidance: &'static str) {
@@ -951,7 +1196,7 @@ impl App {
     }
 
     pub fn edit_sketch(&mut self, id: Id) {
-        if !self.doc().features.iter().take(self.doc().active()).any(|f| f.id == id && !f.suppressed && self.session.built.components.contains_key(&f.owner)) {
+        if !self.doc().features.iter().take(self.doc().active()).any(|f| f.id == id && !self.doc().is_suppressed(f.id) && self.session.built.components.contains_key(&f.owner)) {
             self.toast("This sketch or its component is suppressed or rolled back. Restore it in the timeline before editing.");
             return;
         }
@@ -1023,6 +1268,7 @@ impl App {
 
     /// Abandons whatever the current tool was in the middle of.
     pub fn cancel_tool(&mut self) {
+        self.pending_constraint = None;
         self.sketch_capture.clear();
         self.gizmo.clear();
         self.pattern_drag.clear();
@@ -1034,9 +1280,78 @@ impl App {
         self.drag = Drag::None;
     }
 
+    /// The points of the Revolve dialog's profile that lie across its axis, with how far,
+    /// when the preview is refusing the revolve for that reason.
+    pub fn revolve_crossing(&self) -> Option<(Id, Vec<Id>, f64)> {
+        let Dialog::Feature(f) = &self.dialog else { return None };
+        if !f.revolve { return None; }
+        let sid = f.sketch?;
+        let sk = self.doc().sketch(sid)?;
+        let (past, by) = Document::axis_crossing(sk, &f.profiles, f.axis)?;
+        Some((sid, past, by))
+    }
+
+    /// Moves the given sketch points onto the Revolve dialog's axis and holds them there,
+    /// so a profile that just crosses the axis can be revolved.
+    pub fn move_points_onto_axis(&mut self, sid: Id, points: &[Id], axis: Axis) {
+        let r = self.session.edit(|d| {
+            let mut sk = d.sketch(sid).cloned().ok_or("The sketch no longer exists.")?;
+            let (a, b) = Document::axis_line(&sk, axis).ok_or("The axis line no longer exists.")?;
+            let along = (b - a).normalize_or_zero();
+            for p in points {
+                let at = sk.pos(*p);
+                let on = a + along * (at - a).dot(along);
+                if let Some(q) = sk.points.get_mut(p) { *q = on; }
+                let _ = match axis {
+                    Axis::X => sk.add_constraint(CKind::Horizontal, &[*p, 0], None),
+                    Axis::Y => sk.add_constraint(CKind::Vertical, &[*p, 0], None),
+                    Axis::Line(l) => sk.add_constraint(CKind::Coincident, &[*p, l], None),
+                };
+            }
+            sk.validate()?;
+            let report = solver::solve(&mut sk, &[]);
+            if !report.ok { return Err("The points cannot move onto the axis with the sketch's other constraints; edit the sketch instead.".into()); }
+            *d.sketch_mut(sid).unwrap() = sk;
+            Ok(())
+        });
+        match r {
+            Ok(()) => { self.preview = None; self.refresh(); }
+            Err(e) => self.toast(e),
+        }
+    }
+
     /// Turns the placed clicks into geometry once the tool has enough of them.
     pub fn commit_clicks(&mut self) {
-        let (tool, c, construction, sides) = (self.tool, self.clicks.clone(), self.opts.construction, self.opts.sides.clamp(3, 64));
+        self.commit_clicks_with(false);
+    }
+
+    /// [`commit_clicks`](Self::commit_clicks); `finish` ends a spline with the points
+    /// clicked so far, which is what Escape does, and ends the run.
+    pub fn commit_clicks_with(&mut self, finish: bool) {
+        let (tool, mut c, construction, sides) = (self.tool, self.clicks.clone(), self.opts.construction, self.opts.sides.clamp(3, 64));
+        // Landing on existing geometry: an existing point, or a line or curve the click snapped onto.
+        let lands = |s: &Snap| s.point.is_some() || s.on.is_some() || s.pinned;
+        // A spline is finished where it lands on existing geometry before its fourth click,
+        // or where it is ended. It still passes through every clicked point: with three
+        // clicked, the fourth fit point is put on the smooth curve through them; with two,
+        // the spline is straight.
+        if tool == Tool::Spline && c.len() >= 2 && c.len() < 4 && (finish || c.last().is_some_and(lands)) {
+            let free = |p: DVec2| Snap { p, point: None, on: None, h: false, v: false, axis: [false, false], mid: false, pinned: false };
+            let fill: Vec<Snap> = if let [a, b, e] = c[..] {
+                let (a, b, e) = (a.p, b.p, e.p);
+                let (t1, t2) = (a.distance(b), a.distance(b) + b.distance(e));
+                if t1 < 1e-9 || t2 - t1 < 1e-9 { vec![free((b + e) / 2.0)] } else {
+                    // The parabola through the three points, halfway between the last two.
+                    let t = (t1 + t2) / 2.0;
+                    vec![free(a * ((t - t1) * (t - t2) / (t1 * t2)) + b * (t * (t - t2) / (t1 * (t1 - t2))) + e * (t * (t - t1) / (t2 * (t2 - t1))))]
+                }
+            } else {
+                let (from, to) = (c[0].p, c[1].p);
+                vec![free(from.lerp(to, 1.0 / 3.0)), free(from.lerp(to, 2.0 / 3.0))]
+            };
+            let at = c.len() - 1;
+            c.splice(at..at, fill);
+        }
         if c.len() < tool.clicks() || tool.clicks() == 0 {
             return;
         }
@@ -1045,8 +1360,16 @@ impl App {
             None => {
                 let id = sk.add_point(s.p);
                 if let Some(e) = s.on {
-                    let _ = sk.add_constraint(CKind::Coincident, &[id, e], None);
+                    // A midpoint snap is held at the midpoint; otherwise the point stays on the entity.
+                    if !(s.mid && sk.add_constraint(CKind::Midpoint, &[id, e], None).is_ok()) {
+                        let _ = sk.add_constraint(CKind::Coincident, &[id, e], None);
+                    }
                 }
+                // A point snapped onto an axis is held there, level with or above the fixed origin.
+                if s.axis[0] { let _ = sk.add_constraint(CKind::Horizontal, &[id, 0], None); }
+                if s.axis[1] { let _ = sk.add_constraint(CKind::Vertical, &[id, 0], None); }
+                // Picked from another sketch or a body: it stays where that was.
+                if s.pinned { let _ = sk.add_constraint(CKind::Fix, &[id], None); }
                 id
             }
         };
@@ -1087,6 +1410,23 @@ impl App {
                     }
                     let (a, b) = (place(sk, &c[0]), place(sk, &c[1]));
                     let sides = sk.add_rect(a, b, construction);
+                    for i in 0..2 {
+                        if let Some(v) = size(d, i) {
+                            sk.add_constraint(CKind::Distance, &[sides[i]], Some(v))?;
+                        }
+                    }
+                }
+                Tool::CenterRect => {
+                    if (c[0].p.x - c[1].p.x).abs() < 1e-6 || (c[0].p.y - c[1].p.y).abs() < 1e-6 {
+                        return Err("A rectangle needs width and height.".into());
+                    }
+                    let centre = place(sk, &c[0]);
+                    let (a, b) = (sk.add_point(c[0].p * 2.0 - c[1].p), place(sk, &c[1]));
+                    let sides = sk.add_rect(a, b, construction);
+                    // A construction diagonal with the centre at its middle keeps the
+                    // rectangle about its centre when a side is dimensioned or dragged.
+                    let diagonal = sk.add(Geom::Line { a, b }, true);
+                    sk.add_constraint(CKind::Midpoint, &[centre, diagonal], None)?;
                     for i in 0..2 {
                         if let Some(v) = size(d, i) {
                             sk.add_constraint(CKind::Distance, &[sides[i]], Some(v))?;
@@ -1141,9 +1481,26 @@ impl App {
                     let arc = sk.add_tangent_arc(source, start, end, construction)?;
                     if let Some(v) = angle(d, 0)? { sk.add_constraint(CKind::Angle, &[arc], Some(v))?; }
                 }
+                Tool::Ellipse => {
+                    let axis = c[1].p - c[0].p;
+                    if axis.length() < 1e-6 {
+                        return Err("An ellipse needs its first axis to have some length.".into());
+                    }
+                    // The third click sets the other radius by how far it is from the first axis.
+                    let other = axis.perp().normalize().dot(c[2].p - c[0].p).abs();
+                    if other < 1e-6 {
+                        return Err("Click away from the first axis to give the ellipse some width.".into());
+                    }
+                    let (centre, end) = (place(sk, &c[0]), place(sk, &c[1]));
+                    sk.add_ellipse(centre, end, other, construction)?;
+                    if c[1].point.is_none() && (c[1].h || c[1].v) {
+                        let _ = sk.add_constraint(if c[1].h { CKind::Horizontal } else { CKind::Vertical }, &[centre, end], None);
+                    }
+                }
                 Tool::Spline => {
                     let ids = [place(sk, &c[0]), place(sk, &c[1]), place(sk, &c[2]), place(sk, &c[3])];
                     sk.add_spline(ids, construction)?;
+                    last = Some(ids[3]);
                 }
                 Tool::Point => {
                     place(sk, &c[0]);
@@ -1155,14 +1512,17 @@ impl App {
                     let centre = place(sk, &c[0]);
                     sk.add_polygon(centre, c[1].p, sides, construction);
                 }
-                Tool::Select | Tool::Dimension | Tool::Trim | Tool::Project => {}
+                Tool::Select | Tool::Move | Tool::Dimension | Tool::Trim | Tool::Project => {}
             }
             Ok(())
         });
         self.clicks.clear();
-        // A line carries on from its end until it lands on an existing point.
-        if let (true, Tool::Line, Some(b), Some(end)) = (done, tool, last, c.get(1).filter(|s| s.point.is_none())) {
-            self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false });
+        // A line or spline carries on from its end until it lands on existing geometry, a
+        // point or a curve, or is ended. A continued spline is a new four-point spline
+        // that shares the end point; it is not tangent to the last one.
+        let continues = matches!(tool, Tool::Line | Tool::Spline) && !finish;
+        if let (true, true, Some(b), Some(end)) = (done, continues, last, c.get(tool.clicks() - 1).filter(|s| !lands(s))) {
+            self.clicks.push(Snap { p: end.p, point: Some(b), on: None, h: false, v: false, axis: [false, false], mid: false, pinned: false });
         } else if !done && tool == Tool::Line {
             self.clicks.push(c[0]);
         }
@@ -1227,14 +1587,46 @@ impl App {
     /// Applies a constraint to the selection.
     pub fn constrain(&mut self, kind: CKind) {
         let Some((_, sk)) = self.sketch() else { return };
+        let sk = sk.clone();
         let refs: Vec<Id> = self.sel.iter().copied().filter(|i| sk.ref_kind(*i).is_some()).collect();
         // Several lines can be made horizontal or vertical at once.
         let each = matches!(kind, CKind::Horizontal | CKind::Vertical | CKind::Fix) && refs.len() > 1 && refs.iter().all(|r| sk.line(*r).is_some());
-        if let Err(e) = sk.normalize(kind, &refs)
-            && !each
-        {
-            self.toast(format!("Select {} first, then click the constraint. ({e})", kind.needs()));
+        if sk.normalize(kind, &refs).is_err() && !each {
+            // Clicked before its items: wait for them. The next clicks add to the selection,
+            // and the constraint applies as soon as they fit it.
+            self.pending_constraint = Some(kind);
+            let name = kind.name();
+            self.toast(format!("{}{}: now click {}.", name[..1].to_uppercase(), &name[1..], kind.needs()));
             return;
+        }
+        self.pending_constraint = None;
+        // A constraint the solver cannot satisfy is refused with what already holds the
+        // points involved, since "conflicts" alone leaves nothing to act on.
+        if !each {
+            let mut trial = sk.clone();
+            let dry = trial.add_constraint(kind, &refs, None).and_then(|_| if solver::solve(&mut trial, &[]).ok { Ok(()) } else { Err("it conflicts with the sketch's other constraints".to_owned()) });
+            if let Err(e) = dry {
+                let unit = self.doc().units;
+                let name = |r: &Id| if sk.points.contains_key(r) { format!("point {r}") } else { format!("line {r}") };
+                let points: Vec<Id> = refs.iter().copied().filter(|r| sk.points.contains_key(r)).collect();
+                let mut msg = format!("{} was not added: {e}.", { let n = kind.name(); n[..1].to_uppercase() + &n[1..] });
+                if kind == CKind::Midpoint && let ([p], Some(line)) = (points.as_slice(), refs.iter().find(|r| sk.line(**r).is_some()).copied()) && let Some((a, b)) = sk.line(line) {
+                    let m = (a + b) / 2.0;
+                    msg.push_str(&format!(" It would move point {p} to the middle of line {line}, at ({}, {}) {}.", fr_core::units::fmt_len(m.x, unit), fr_core::units::fmt_len(m.y, unit), unit.name()));
+                }
+                for p in &points {
+                    let through: Vec<Id> = sk.entities.keys().copied().filter(|e| sk.ent_points(*e).contains(p)).collect();
+                    let holders: Vec<String> = sk.constraints.values().filter(|c| c.refs.contains(p) || c.refs.iter().any(|r| through.contains(r))).map(|c| {
+                        let value = c.value.as_ref().map(|v| format!(" {}", v.expr)).unwrap_or_default();
+                        format!("{}{} on {}", c.kind.name(), value, c.refs.iter().map(name).collect::<Vec<_>>().join(" and "))
+                    }).collect();
+                    if !holders.is_empty() {
+                        msg.push_str(&format!(" Point {p} is held by {}; remove one of those, or choose another point.", holders.join(", ")));
+                    }
+                }
+                self.toast(msg);
+                return;
+            }
         }
         let ok = self.sketch_edit(|sk, _| {
             if each {
@@ -1487,11 +1879,19 @@ impl App {
             FeatureKind::Sketch(_) => self.edit_sketch(id),
             FeatureKind::Extrude(e) => {
                 self.finish_sketch();
-                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, editing: Some(id), sketch: Some(e.sketch), profiles: e.profiles.clone(), text: shown(&e.distance), symmetric: e.symmetric, op: e.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: e.taper.as_ref().map_or(String::new(), shown), through_all: e.through_all, pick_to: false });
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: None, editing: Some(id), sketch: Some(e.sketch), profiles: e.profiles.clone(), text: shown(&e.distance), symmetric: e.symmetric, op: e.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: e.taper.as_ref().map_or(String::new(), shown), through_all: e.through_all, pick_to: false });
+            }
+            FeatureKind::Sweep(w) => {
+                self.finish_sketch();
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch: Some(w.path_sketch), path: w.path.clone(), spans: w.spans.clone(), orient: w.orient }), editing: Some(id), sketch: Some(w.sketch), profiles: w.profiles.clone(), text: String::new(), symmetric: false, op: w.op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
+            }
+            FeatureKind::Loft(l) => {
+                self.finish_sketch();
+                self.dialog = Dialog::Loft(LoftDlg { editing: Some(id), sections: l.sections.clone(), ruled: l.ruled, op: l.op });
             }
             FeatureKind::Revolve(r) => {
                 self.finish_sketch();
-                self.dialog = Dialog::Feature(FeatureDlg { revolve: true, editing: Some(id), sketch: Some(r.sketch), profiles: r.profiles.clone(), text: shown(&r.angle), symmetric: false, op: r.op, axis: r.axis, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
+                self.dialog = Dialog::Feature(FeatureDlg { revolve: true, sweep: None, editing: Some(id), sketch: Some(r.sketch), profiles: r.profiles.clone(), text: shown(&r.angle), symmetric: false, op: r.op, axis: r.axis, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
             }
             FeatureKind::Text(t) => {
                 self.finish_sketch();
@@ -1499,12 +1899,43 @@ impl App {
                     editing: Some(id), owner: self.doc().feature(id).map_or(0, |f| f.owner), text: t.text.clone(), plane: t.plane,
                     height: shown(&t.height), depth: shown(&t.depth), spacing: shown(&t.spacing),
                     angle: shown(&t.angle), x: shown(&t.x), y: shown(&t.y), align: t.align,
-                    op: t.op, body: t.body, face: t.face, frame: t.frame,
+                    op: t.op, body: t.body, face: t.face, frame: t.frame, curved: t.curved,
                 });
                 self.fit_pending = true;
             }
             _ => self.toast("This feature has no settings to edit; delete it and add it again to change it."),
         }
+    }
+
+    /// Opens Sweep with what can be told apart already: the newest visible sketch with a closed
+    /// region is the profile, and the newest other visible sketch that is one run is the path.
+    fn open_sweep_dialog(&mut self) {
+        self.finish_sketch();
+        let doc = self.doc();
+        let visible: Vec<Id> = doc.sketches().filter(|(f, s)| s.visible && !doc.is_suppressed(f.id)).map(|(f, _)| f.id).collect();
+        let closed = |id: &Id| fr_core::profile::profiles(doc.sketch(*id).unwrap());
+        let sketch = visible.iter().rev().copied().find(|id| !closed(id).is_empty());
+        let mut profiles = Vec::new();
+        if let Some(id) = sketch && let [only] = closed(&id).as_slice() { profiles.push(only.edges.clone()); }
+        let path_sketch = visible.iter().rev().copied().find(|id| Some(*id) != sketch && fr_core::profile::chain(doc.sketch(*id).unwrap(), &[]).is_ok());
+        let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
+        self.dialog = Dialog::Feature(FeatureDlg { revolve: false, sweep: Some(SweepDlg { path_sketch, path: Vec::new(), spans: Vec::new(), orient: SweepOrient::Follow }), editing: None, sketch, profiles, text: String::new(), symmetric: false, op, axis: Axis::Y, pick_axis: false, face: None, face_owner: 0, taper: String::new(), through_all: false, pick_to: false });
+    }
+
+    /// Opens Loft with the sections that can be told already: every visible sketch that has
+    /// exactly one closed region, in timeline order, when there are at least two of them.
+    fn open_loft_dialog(&mut self) {
+        self.finish_sketch();
+        let doc = self.doc();
+        let mut sections: Vec<LoftSection> = doc.sketches().filter(|(f, s)| s.visible && !doc.is_suppressed(f.id)).filter_map(|(f, s)| match fr_core::profile::profiles(s).as_slice() {
+            [only] => Some(LoftSection { sketch: f.id, profile: only.edges.clone(), point: None }),
+            // A sketch holding nothing but one point (or only its origin) is a tip.
+            [] if s.entities.is_empty() && s.points.len() <= 2 => Some(LoftSection { sketch: f.id, profile: Vec::new(), point: Some(s.points.keys().copied().find(|id| *id != 0).unwrap_or(0)) }),
+            _ => None,
+        }).collect();
+        if sections.len() < 2 { sections.clear(); }
+        let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
+        self.dialog = Dialog::Loft(LoftDlg { editing: None, sections, ruled: false, op });
     }
 
     fn open_feature_dialog(&mut self, revolve: bool) {
@@ -1534,7 +1965,7 @@ impl App {
         let op = if self.session.built.bodies.is_empty() { Op::New } else { Op::Join };
         let unit = doc.units;
         let text = if revolve { "360 deg".to_owned() } else { format!("{} {}", if unit == Unit::In { "0.5" } else if unit == Unit::Cm { "1" } else { "10" }, unit.name()) };
-        self.dialog = Dialog::Feature(FeatureDlg { revolve, editing: None, sketch: picked.0, profiles: picked.1, text, symmetric: false, op, axis: Axis::Y, pick_axis: false, face, face_owner, taper: String::new(), through_all: false, pick_to: false });
+        self.dialog = Dialog::Feature(FeatureDlg { revolve, sweep: None, editing: None, sketch: picked.0, profiles: picked.1, text, symmetric: false, op, axis: Axis::Y, pick_axis: false, face, face_owner, taper: String::new(), through_all: false, pick_to: false });
     }
 
     fn prepare_text_source(&mut self) {
@@ -1573,19 +2004,22 @@ impl App {
     /// Uses the actual clicked point as the baseline origin, keeping offsets editable.
     pub fn text_on_face(&mut self, face: Face) -> Result<(), String> {
         self.prepare_text_source();
+        let world = face.at;
         let face = self.local_face(face);
-        let mut plane = face.plane.ok_or("Text / Emboss supports flat faces only; curved wrapping is not available.")?;
         let body = self.text_source().body(face.body).ok_or("Choose a face that exists before this text feature in the timeline.")?;
         if !body.is_exact() {
-            return Err("Text / Emboss needs a flat face of a solid; imported mesh faces are not supported.".into());
+            return Err("Text / Emboss needs a face of a solid; imported mesh faces are not supported.".into());
         }
+        // A curved face takes the plane touching it where it was clicked; the text is projected onto it.
+        let curved = face.plane.is_none();
+        let mut plane = match face.plane { Some(plane) => plane, None => Text::curved_plane(body, world)? };
         let (frame, owner) = (self.text_source().frame(face.body), body.component);
         let Dialog::Text(t) = &mut self.dialog else { return Err("Open Text / Emboss first.".into()) };
         if t.editing.is_some() && t.owner != owner { return Err("An existing text feature cannot move to another component. Create new text in the target component instead.".into()); }
         t.owner = owner;
         let n = plane.normal();
         plane.origin = face.at - n * (face.at - plane.origin).dot(n);
-        (t.plane, t.body, t.face, t.frame) = (plane, Some(face.body), Some(plane.origin), frame);
+        (t.plane, t.body, t.face, t.frame, t.curved) = (plane, Some(face.body), Some(plane.origin), frame, curved);
         if t.op == Op::New { t.op = Op::Join; }
         self.preview = None;
         Ok(())
@@ -1598,19 +2032,28 @@ impl App {
             editing: None, owner: self.doc().active_component, text: "Text".into(), plane: Plane::XY,
             height: "5 mm".into(), depth: "1 mm".into(), spacing: "0 mm".into(),
             angle: "0 deg".into(), x: "0 mm".into(), y: "0 mm".into(),
-            align: fr_core::text::Align::Left, op: Op::New, body: None, face: None, frame: None,
+            align: fr_core::text::Align::Left, op: Op::New, body: None, face: None, frame: None, curved: false,
         });
         if let Some(face) = face && let Err(e) = self.text_on_face(face) { self.toast(e); }
     }
 
     /// Confirms the open dialog.
     pub fn apply_dialog(&mut self) {
+        if let Dialog::Script(d) = self.dialog.clone() {
+            self.start_script(d);
+            return;
+        }
         let dlg = self.dialog.clone();
         match self.session.edit_feature(|d| { let id = dlg.apply(d)?; fr_core::validation::document(d)?; Ok((id, id)) }) {
             Ok(id) => {
                 self.dialog = Dialog::None;
                 self.sel_feature = Some(id);
                 self.refresh();
+                // A hollowed body looks the same from outside, so say what happened.
+                if let Dialog::Shell(sh) = &dlg {
+                    let faces = sh.faces.len();
+                    self.toast(format!("Hollowed to a {} wall, open at {faces} face{}. Look inside with Section Analysis.", sh.text.trim(), if faces == 1 { "" } else { "s" }));
+                }
             }
             Err(e) => self.toast(e),
         }
@@ -1645,7 +2088,29 @@ impl App {
                 if (matches!(&self.dialog, Dialog::Text(t) if t.editing.is_some()) || matches!(&self.dialog, Dialog::Plane(p) if p.editing.is_some()) || matches!(&self.dialog, Dialog::Primitive(p) if p.editing.is_some()) || crate::body_ops_ui::editing(&self.dialog).is_some())
                     && let Some(index) = doc.features.iter().position(|f| f.id == id)
                 { doc.roll_to(index + 1); }
-                let built = doc.rebuild();
+                let built = if matches!(&self.dialog, Dialog::Plane(_)) {
+                    // A plane never changes the bodies before it, and the preview shows the
+                    // timeline only up to the plane, so resolve the plane against what is
+                    // already built instead of rebuilding every body on each drag step.
+                    let mut built = self.modeling_source().clone();
+                    let resolved = match doc.feature(id).cloned() {
+                        Some(mut feature) => doc.resolve_plane(&mut feature, &built),
+                        None => Err("the plane no longer exists".to_owned()),
+                    };
+                    match resolved {
+                        Ok((mut plane, _)) => {
+                            let placement = built.component_placement(plane.component);
+                            plane.plane = plane.plane.transformed(placement);
+                            plane.corners = plane.corners.map(|p| placement.transform_point3(p));
+                            built.planes.insert(id, plane);
+                            built.errors.remove(&id);
+                        }
+                        Err(e) => { built.errors.insert(id, e); }
+                    }
+                    built
+                } else {
+                    doc.rebuild()
+                };
                 let e = built.errors.get(&id).cloned();
                 (if e.is_some() { self.modeling_source().clone() } else { built }, e)
             }
@@ -1748,20 +2213,25 @@ impl App {
         if self.file_error.is_some() { return; }
         let Some(request) = self.open_requests.pop() else { return; };
         match request {
-            Ok(path) if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) || confirm(self) => self.open_path(&path),
+            Ok(path) if is_mesh_file(&path) || confirm(self) => self.open_path(&path),
             Ok(_) => {},
             Err(error) => self.toast(error),
         }
     }
 
     pub fn open_path(&mut self, path: &Path) {
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) {
+        if is_mesh_file(path) {
             self.dialog = Dialog::Import(path.to_owned(), Unit::Mm);
             return;
         }
         match Session::open(path) {
             Ok(s) => {
                 self.replace_session(s);
+                if self.session.read_only {
+                    self.toast("Unverified preview: this design needs a newer Ferrender. Its saved geometry is shown read-only and has not been rebuilt.");
+                } else if self.session.from_cache {
+                    self.toast(format!("Opened from the saved geometry: {} bodies without a rebuild.", self.session.built.bodies.len()));
+                }
                 self.remember_document();
             },
             Err(e) => self.file_error("Could not open design", path, e, "Your current design has been kept."),
@@ -1778,10 +2248,17 @@ impl App {
     }
 
     pub(crate) fn save_path(&mut self, path: &Path) {
-        match self.session.save(path) {
-            Ok(()) => {
+        match self.session.save_as(path, Some(crate::build_info::summary().lines().next().unwrap_or("Ferrender").to_owned())) {
+            Ok(saved) => {
                 self.file_error = None;
-                self.toast(format!("Saved {}", path.display()));
+                let mut message = match saved.backup {
+                    Some(backup) => format!("Saved {} in the 0.4 format. The previous file was kept as {}", path.display(), backup.display()),
+                    None => format!("Saved {}", path.display()),
+                };
+                if let Some(reason) = &saved.cache_skipped {
+                    message.push_str(&format!(". No geometry cache was written ({reason}), so the design will rebuild when opened"));
+                }
+                self.toast(message);
                 self.remember_document();
             }
             Err(e) => self.file_error("Could not save design", path, e, "Your changes are still in memory. Save again to keep them."),
@@ -1804,26 +2281,48 @@ impl App {
         self.session.path.as_ref().and_then(|p| p.file_stem()).map_or("Untitled".to_owned(), |n| n.to_string_lossy().into_owned())
     }
 
+    /// One sculpt stroke at a world point on a body, as the open Sculpt dialog says.
+    pub fn sculpt_at(&mut self, body: Id, at: glam::DVec3) {
+        let Dialog::Sculpt(d) = self.dialog.clone() else { return };
+        use fr_core::doc::{MeshOp, MeshOpKind};
+        use fr_core::meshops::Brush;
+        let brush = [Brush::Pull, Brush::Push, Brush::Inflate, Brush::Smooth, Brush::Flatten][d.brush.min(4)];
+        let local = self.session.built.body(body).map_or(at, |b| b.to_local(at));
+        let r = self.session.edit_feature(|doc| {
+            let radius = doc.enter(&d.radius, Kind::Length)?;
+            let strength = doc.enter(&d.strength, if matches!(brush, Brush::Smooth | Brush::Flatten) { Kind::Scalar } else { Kind::Length })?;
+            let id = doc.add_feature(FeatureKind::MeshOp(MeshOp { body, op: MeshOpKind::Sculpt { brush, at: local, radius, strength }, region: None }));
+            Ok((id, id))
+        });
+        match r {
+            Ok(_) => {
+                if let Dialog::Sculpt(d) = &mut self.dialog { d.strokes += 1; }
+                self.sel_body = Some(body);
+            }
+            Err(e) => self.toast(e),
+        }
+        self.refresh();
+    }
+
     pub fn import_stl(&mut self, path: &Path, unit: Unit) {
-        let r = io::read_stl(path, unit).and_then(|mesh| {
-            let tris = mesh.tris.len();
+        let r = io::import_mesh(path, unit).and_then(|(mesh, report)| {
             let name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
             self.session.edit(|d| {
                 let id = d.add_feature(FeatureKind::Import(mesh));
                 if let Some(n) = name {
                     d.feature_mut(id).unwrap().name = n;
                 }
-                Ok((id, tris))
+                Ok((id, report))
             })
         });
         match r {
-            Ok((id, tris)) => {
+            Ok((id, report)) => {
                 self.file_error = None;
                 self.sel_body = Some(id);
                 self.fit_pending = true;
-                self.toast(format!("Imported {tris} triangles."));
+                self.toast(format!("Imported {}.", report.summary()));
             }
-            Err(e) => self.file_error("Could not import STL", path, e, "Your current design has been kept."),
+            Err(e) => self.file_error("Could not import the mesh", path, e, "Your current design has been kept."),
         }
         self.refresh();
     }
@@ -1838,7 +2337,7 @@ impl App {
     }
 
     pub fn export_stl_path(&mut self, path: &Path, unit: Unit) {
-        match io::write_stl(self.session.visible_bodies(), unit, path) {
+        match io::write_stl_with_provenance(self.session.visible_bodies(), unit, path, self.session.read_only) {
             Ok(n) => {
                 self.file_error = None;
                 self.toast(format!("Exported {n} triangles in {} to {}", unit.name(), path.display()));
@@ -1883,6 +2382,14 @@ impl App {
     }
 
     pub fn run(&mut self, ctx: &Context, a: Action) {
+        if self.session.read_only && !matches!(a,
+            Action::New | Action::Open | Action::Recover | Action::Export | Action::ExportStep
+            | Action::Copy | Action::SelectAll | Action::About | Action::Assistant
+            | Action::View(_) | Action::Fit | Action::Section | Action::Measure
+            | Action::CommandSearch | Action::ScriptLog | Action::Cancel | Action::Tool(Tool::Select)) {
+            self.toast("This design is read-only because it was written by a newer Ferrender. Update Ferrender to edit it.");
+            return;
+        }
         if matches!(a, Action::Open | Action::Import | Action::Save | Action::SaveAs | Action::About | Action::Parameters | Action::Recover | Action::View(_) | Action::Fit) {
             self.reference_drag.clear();
         }
@@ -1913,7 +2420,7 @@ impl App {
                 }
             }
             Action::Import => {
-                if let Some(p) = rfd::FileDialog::new().add_filter("STL mesh", &["stl"]).pick_file() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (STL, OBJ, 3MF)", &["stl", "obj", "3mf"]).pick_file() {
                     self.finish_sketch();
                     self.dialog = Dialog::Import(p, Unit::Mm);
                 }
@@ -1959,9 +2466,17 @@ impl App {
             Action::FinishSketch => self.finish_sketch(),
             Action::Extrude => self.open_feature_dialog(false),
             Action::Revolve => self.open_feature_dialog(true),
+            Action::Sweep => self.open_sweep_dialog(),
+            Action::Loft => self.open_loft_dialog(),
             Action::Text => self.open_text_dialog(),
             Action::Transform => {
                 if let Some(component) = self.sel_component { self.move_component_dialog(component); return; }
+                // In a sketch, Move moves sketch geometry: drag the selection, or a point or entity.
+                if self.sketch().is_some() {
+                    self.run(ctx, Action::Tool(Tool::Move));
+                    if self.sel.is_empty() { self.toast("Drag a point or entity to move it, or select geometry and drag anywhere."); }
+                    return;
+                }
                 self.finish_sketch();
                 match self.target_body().or(self.session.built.bodies.first().map(|b| b.id).filter(|_| self.session.built.bodies.len() == 1)) {
                     Some(body) => {
@@ -1969,6 +2484,27 @@ impl App {
                         self.dialog = Dialog::Transform(TransformDlg { body, translate: [z(), z(), z()], rotate: [z(), z(), z()], scale: "1".into() });
                     }
                     None => self.toast("Click a body to select it first."),
+                }
+            }
+            Action::Mesh(kind) => {
+                self.finish_sketch();
+                let body = self.target_body().or(self.session.built.bodies.first().map(|b| b.id).filter(|_| self.session.built.bodies.len() == 1));
+                if body.is_none() { self.toast("Click a body to select it first."); }
+                self.dialog = Dialog::Mesh(MeshDlg::new(kind, body, self.doc().units));
+            }
+            Action::Sculpt => {
+                self.finish_sketch();
+                let u = self.doc().units;
+                let mm = |v: f64| format!("{} {}", fr_core::units::trim_num(v / u.mm(), 3), u.name());
+                self.dialog = Dialog::Sculpt(SculptDlg { brush: 0, radius: mm(8.0), strength: mm(1.0), strokes: 0 });
+            }
+            Action::ScriptLog | Action::ExportTimelineScript => { crate::scripts_ui::action(self, &a); }
+            Action::Relief => {
+                self.finish_sketch();
+                if let Some(path) = rfd::FileDialog::new().add_filter("PNG or JPEG", &["png", "jpg", "jpeg"]).pick_file() {
+                    let u = self.doc().units;
+                    let mm = |v: f64| format!("{} {}", fr_core::units::trim_num(v / u.mm(), 3), u.name());
+                    self.dialog = Dialog::Relief(ReliefDlg { path, width: mm(100.0), depth: mm(4.0), base: mm(2.0), resolution: 300, blur: 1, invert: false });
                 }
             }
             Action::RemoveBody => {
@@ -2020,7 +2556,7 @@ impl App {
                     if t == Tool::Dimension {
                         let pos = self.ctx.input(|i| i.pointer.hover_pos()).filter(|p| self.vp.contains(*p)).unwrap_or(self.vp.center());
                         self.dimension_selection(self.sel.clone(), pos);
-                    } else if !matches!(t, Tool::Select | Tool::TangentArc) {
+                    } else if !matches!(t, Tool::Select | Tool::Move | Tool::TangentArc) {
                         self.sel.clear();
                     }
                 }
@@ -2083,17 +2619,21 @@ impl App {
             }
             Action::Pattern => {
                 self.finish_sketch();
-                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
-                let available = |f: &&fr_core::Feature| !f.suppressed && !self.session.built.errors.contains_key(&f.id) && self.session.built.components.contains_key(&f.owner) && ok(&f.kind);
+                let ok = |k: &FeatureKind| matches!(k, FeatureKind::Extrude(_) | FeatureKind::Revolve(_) | FeatureKind::Sweep(_) | FeatureKind::Loft(_) | FeatureKind::Import(_) | FeatureKind::Primitive(_)) || matches!(k, FeatureKind::Text(t) if t.op == Op::New);
+                let available = |f: &&fr_core::Feature| !self.doc().is_suppressed(f.id) && !self.session.built.errors.contains_key(&f.id) && self.session.built.components.contains_key(&f.owner) && ok(&f.kind);
                 let sources: Vec<_> = self.doc().features.iter().take(self.doc().active()).filter(available).collect();
                 let chosen = self.sel_feature.or(self.sel_body).filter(|id| sources.iter().any(|f| f.id == *id));
                 let source = chosen.or_else(|| sources.iter().rev().find(|f| f.owner == self.doc().active_component).map(|f| f.id));
                 match source {
                     Some(_) => self.dialog = Dialog::Pattern(PatternDlg::new(source)),
-                    None => self.toast("There is no extrusion, revolve, primitive, standalone text or imported mesh to repeat yet."),
+                    None => self.toast("There is no extrusion, revolve, sweep, loft, primitive, standalone text or imported mesh to repeat yet."),
                 }
             }
             Action::Section => self.show_section = !self.show_section,
+            Action::Loads => {
+                self.finish_sketch();
+                self.dialog = Dialog::Loads(crate::structure_ui::LoadsDlg::open(self));
+            }
             Action::Measure => {
                 self.finish_sketch();
                 self.dialog = Dialog::Measure(MeasureDlg::default());
@@ -2111,6 +2651,13 @@ impl App {
                 let edges = edges.into_iter().map(|point| body.and_then(|id| self.session.built.body(id)).map_or(point, |b| b.to_local(point))).collect();
                 let frame = body.and_then(|b| self.session.built.frame(b));
                 self.dialog = Dialog::Blend(BlendDlg { chamfer, body, edges, text, frame });
+            }
+            Action::Tilt => {
+                let face = self.sel_face.clone().filter(|f| f.plane.is_some() && self.session.built.body(f.body).is_some_and(|b| b.is_exact()));
+                self.finish_sketch();
+                let mut tilt = TiltDlg { body: None, face: None, axis: DVec3::X, text: "30 deg".into(), pivot: Pivot::Middle, frame: None };
+                if let Some(face) = face { tilt.take(self, face); }
+                self.dialog = Dialog::Tilt(tilt);
             }
             Action::Shell => {
                 let face = self.sel_face.clone().filter(|f| self.session.built.body(f.body).is_some_and(|b| b.is_exact()));
@@ -2160,7 +2707,7 @@ impl App {
                     self.toast("There are no exact bodies to write. STEP cannot hold meshes such as imported STL.");
                     return;
                 }
-                let bytes = fr_core::exact::step(exact.iter().flat_map(|b| &b.solids));
+                let bytes = io::step_with_provenance(exact.iter().flat_map(|b| &b.solids), self.session.read_only);
                 let Some(path) = rfd::FileDialog::new().add_filter("STEP", &["step", "stp"]).set_file_name(format!("{}.step", self.doc_name())).save_file() else { return };
                 match bytes.and_then(|b| std::fs::write(&path, b).map_err(|e| format!("Could not write {}: {e}", path.display()))) {
                     Ok(()) if skipped > 0 => self.toast(format!("Exported to {}. {skipped} mesh bod{} left out.", path.display(), if skipped == 1 { "y was" } else { "ies were" })),
@@ -2179,6 +2726,12 @@ impl App {
                     self.value_edit = None;
                 } else if self.dialog != Dialog::None {
                     self.dialog = Dialog::None;
+                } else if self.pending_constraint.is_some() {
+                    self.pending_constraint = None;
+                } else if self.tool == Tool::Spline && self.clicks.len() >= 2 {
+                    // Escape ends a spline with the points clicked so far instead of dropping them.
+                    self.commit_clicks_with(true);
+                    self.cancel_tool();
                 } else if !self.clicks.is_empty() || !self.dim_refs.is_empty() {
                     self.cancel_tool();
                 } else if self.tool != Tool::Select {
@@ -2230,7 +2783,7 @@ impl App {
         let enter = ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::Enter));
         if typing {
             // Enter in one of a dialog's own boxes confirms the dialog.
-            if enter && self.dialog.has_preview() && self.value_edit.is_none() && !self.show_params && !self.ai.open && self.rename.is_none() {
+            if enter && (self.dialog.has_preview() || matches!(self.dialog, Dialog::Script(_))) && self.value_edit.is_none() && !self.show_params && !self.ai.open && self.rename.is_none() {
                 self.update_preview();
                 self.apply_dialog();
             }
@@ -2259,7 +2812,7 @@ impl App {
             self.run(ctx, Action::Delete);
         }
         if key(Key::Enter) {
-            if self.dialog.has_preview() {
+            if self.dialog.has_preview() || matches!(self.dialog, Dialog::Script(_)) {
                 self.apply_dialog();
             } else {
                 self.cancel_tool();
@@ -2325,7 +2878,7 @@ impl eframe::App for App {
         self.process_open_request(Self::confirm_discard);
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             if let Some(p) = Some(f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()) {
-                if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")) || self.confirm_discard() {
+                if is_mesh_file(&p) || self.confirm_discard() {
                     self.open_path(&p);
                 }
             }
@@ -2354,6 +2907,10 @@ impl eframe::App for App {
         let bar = egui::Frame::new().fill(colors.bar).inner_margin(egui::Margin::symmetric(10, 3));
         egui::Panel::bottom("status").frame(bar).show(ui, |ui| {
             panels::status(self, ui);
+            if self.session.read_only {
+                ui.colored_label(colors.error, "Unverified preview — newer design; read-only.")
+                    .on_hover_text("This Ferrender cannot rebuild the newer timeline. Saved geometry is unverified; exports retain that warning.");
+            }
             if let Some(error) = self.recovery.as_ref().and_then(Recovery::error) {
                 ui.colored_label(colors.error, "Recovery unavailable — save your work. Retrying…").on_hover_text(error);
             }
@@ -2364,6 +2921,7 @@ impl eframe::App for App {
         egui::Panel::left("browser").frame(side).exact_size(230.0).resizable(false).show(ui, |ui| panels::browser(self, ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(colors.background)).show(ui, |ui| view::viewport(self, ui));
         panels::windows(self, &ctx);
+        crate::scripts_ui::windows(self, &ctx);
 
         if let Some((msg, until)) = &self.toast {
             if self.now > *until {
@@ -2380,4 +2938,9 @@ impl eframe::App for App {
             }
         }
     }
+}
+
+/// A file the mesh importer reads rather than a design.
+pub fn is_mesh_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["stl", "obj", "3mf"].iter().any(|m| e.eq_ignore_ascii_case(m)))
 }

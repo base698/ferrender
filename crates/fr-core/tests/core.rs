@@ -126,13 +126,15 @@ fn profiles_nest_and_split() {
         {"type": "circle", "center": [10, 10], "radius": 4},
         {"type": "line", "from": [50, 0], "to": [60, 5]},
     ]}));
-    // The divider's ends lie on the rectangle's sides but do not split them,
-    // so the rectangle is one region with the circle nested in it.
+    // The divider's ends lie on the rectangle's sides without sharing their points; the
+    // sides are split there all the same, so the rectangle is two halves, the circle nested
+    // in the left one, and the stray line off to the right bounds nothing.
     let p = profiles(s.doc.sketch(sk).unwrap());
-    assert_eq!(p.len(), 2, "{p:?}");
-    let rect = p.iter().find(|p| p.depth == 0).unwrap();
-    assert!(close(rect.area(), 800.0 - std::f64::consts::PI * 16.0), "{}", rect.area());
-    assert_eq!(rect.holes.len(), 1);
+    assert_eq!(p.len(), 3, "{p:?}");
+    let left = p.iter().find(|p| p.depth == 0 && p.holes.len() == 1).expect("the half with the circle");
+    assert!(close(left.area(), 400.0 - std::f64::consts::PI * 16.0), "{}", left.area());
+    let right = p.iter().find(|p| p.depth == 0 && p.holes.is_empty()).expect("the other half");
+    assert!(close(right.area(), 400.0), "{}", right.area());
     assert!(p.iter().any(|p| p.depth == 1 && close(p.area(), 50.2)), "the circle is its own region");
 
     // Drawn so the divider shares corner points, it does split.
@@ -805,7 +807,7 @@ fn an_allowance_gives_a_screw_and_its_hole_room_to_turn() {
     use fr_core::threads;
     let t = threads::find("M6").unwrap();
     // How near the axis at (x, y) and how far from it a thread's surface comes.
-    let reach = |m: &fr_core::mesh::Mesh, x: f64, y: f64| m.tris.iter().flatten().map(|v| ((v.x - x).powi(2) + (v.y - y).powi(2)).sqrt()).fold((f64::MAX, 0.0), |(lo, hi): (f64, f64), r| (lo.min(r), hi.max(r)));
+    let reach = |m: &fr_core::mesh::Mesh, x: f64, y: f64| m.tris().flatten().map(|v| ((v.x - x).powi(2) + (v.y - y).powi(2)).sqrt()).fold((f64::MAX, 0.0), |(lo, hi): (f64, f64), r| (lo.min(r), hi.max(r)));
     let build = |allowance: Option<f64>| {
         let mut s = Session::default();
         let r = run(&mut s, json!({"op": "batch", "commands": [

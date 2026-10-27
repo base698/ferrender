@@ -30,12 +30,11 @@ fn lead_meshes_are_closed_for_both_hands_and_short_spans() {
                     );
                     assert!(mesh.volume() > 0. && mesh.volume() <= square.volume() + 1e-8);
                     assert!(
-                        mesh.tris
-                            .iter()
+                        mesh.tris()
                             .all(|t| (t[1] - t[0]).cross(t[2] - t[0]).length() > 0.),
                         "zero-area triangle: {name}, length={length}, left={left}, ends={ends:?}"
                     );
-                    for vertex in mesh.tris.iter().flatten() {
+                    for vertex in mesh.tris().flatten() {
                         let radius = vertex.truncate().length();
                         assert!(radius <= major / 2. + 1e-9);
                         if (ends[0] && vertex.z == 0.) || (ends[1] && vertex.z == length) {
@@ -140,8 +139,7 @@ fn a_widening_conical_head_is_not_treated_as_a_tip_chamfer() {
 fn radius_at(mesh: &fr_core::mesh::Mesh, z: f64, angle: f64) -> f64 {
     let origin = DVec3::Z * z;
     let direction = DVec3::new(angle.cos(), angle.sin(), 0.);
-    mesh.tris
-        .iter()
+    mesh.tris()
         .filter_map(|t| {
             let (a, b) = (t[1] - t[0], t[2] - t[0]);
             let cross = direction.cross(b);

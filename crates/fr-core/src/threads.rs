@@ -266,7 +266,8 @@ fn form(major: f64, minor: f64, pitch: f64, length: f64, left: bool, wall: Optio
             }
         }
     }
-    let mut mesh = Mesh { tris, face_ids: parts };
+    let mut mesh = Mesh::from_tris(tris);
+    mesh.face_ids = parts;
     // A sleeve is the same surface seen from the other side.
     if wall.is_some() {
         mesh.flip();
