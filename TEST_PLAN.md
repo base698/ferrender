@@ -2,7 +2,8 @@
 
 The automated tests cover the
 engine and that the screens draw; they do not cover real mouse, trackpad or keyboard input,
-the live Claude API, Linux, or opening our files in other programs. This plan is ordered so
+the live Claude API, a real Linux desktop session (CI runs the suite on Linux under software
+rendering), or opening our files in other programs. This plan is ordered so
 the things no test has ever exercised come first.
 
 Run `export OCCT_ROOT="$(python3 scripts/prepare-occt.py)"`, then `cargo run --release -p ferrender`. Note the step number and what you saw for anything
