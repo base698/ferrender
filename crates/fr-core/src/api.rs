@@ -150,7 +150,7 @@ FEATURES
 {"op":"rollback","to":ID}                          shows the model as it was just after that feature ("start" = before any, "end" = everything); features added while rolled back are inserted at that point
 {"op":"transform","body":ID,"translate":[x,y,z],"rotate":[rx,ry,rz],"scale":1}   scale about the origin, rotate about X then Y then Z, then translate
 {"op":"combine","target":BODY,"tools":[BODY],"operation":"join","keep_tools":false}   join | cut | intersect between bodies, including imported meshes; a mesh boolean splits only the triangles near the other surface, so a small tool against a scan of millions of triangles is quick
-{"op":"fillet_edges","body":BODY,"edges":[[x,y,z],...],"radius":V}   rounds the edges nearest those points; "edges":"all" takes every edge. An entry can also be {"tag":EDGE_TAG} copied from get_object_info on the body: faces and edges carry tags saying how they were made (swept from a sketch entity, a cap, made by a feature), and a fillet, chamfer, shell, thread, text or face plane finds its faces by persistent tag when the body changes shape. Modern removed or ambiguous references fail rather than selecting an unrelated nearby face; untagged or legacy references learn a tag only from a unique saved-location match. get_object_info on such a feature reports "resolved": "tag" | "origin" | "position".
+{"op":"fillet_edges","body":BODY,"edges":[[x,y,z],...],"radius":V}   rounds the edges nearest those points; "edges":"all" takes every edge. An entry can also be {"tag":EDGE_TAG} copied from get_object_info on the body: faces and edges carry tags saying how they were made (swept from a sketch entity, a cap, made by a feature), and a fillet, chamfer, shell, thread, text or face plane finds its faces by persistent tag when the body changes shape. Modern removed or ambiguous references fail rather than selecting an unrelated nearby face; untagged or legacy references learn a tag only from a unique saved-location match. get_object_info on such a feature reports "resolved": "tag" | "origin" | "position". A tag too long to list (over 4 KB, after many operations on one body) is null there and counted in "tags_omitted"; name that edge or face by its point.
 {"op":"chamfer_edges","body":BODY,"edges":[[x,y,z],...],"distance":V}
 {"op":"shell","body":BODY,"open_faces":[[x,y,z],...],"thickness":V}   hollows the body, leaving the faces nearest those points open
 {"op":"tilt_face","body":BODY,"face":[x,y,z],"axis":[x,y,z],"angle":30,"pivot":"middle"}   tilts the flat face nearest that point about a hinge lying in it. "axis" is the hinge's direction (its part along the face is used); the tilt is right-handed about it, so clockwise when looking along the axis, and a negative angle goes the other way. pivot: middle (the hinge passes through the middle of the face: one side is cut away and the other is carried out) | cut (the hinge is at the edge, so material is only removed) | add (only added). Angles up to 85 degrees. Flat and round faces around it are extended to meet the tilted one; beside a freeform surface the face is carried straight out. "face" may be {"tag":TAG} from get_object_info
@@ -361,15 +361,41 @@ fn body_info(s: &Session, id: Id) -> Option<J> {
     }))
 }
 
+/// A tag longer than this as JSON is left out of [`topology`]. A tag names the faces it
+/// was made from, and theirs in turn, so after lettering is joined to a filleted body one
+/// edge's tag ran to 100 KB and the reply to 34 MB: more than a script value or a bridge
+/// reply may hold. The edge or face is still named by its point.
+const MAX_TOPOLOGY_TAG_BYTES: usize = 4096;
+
 /// The edges and faces of an exact body, each with a point that names it in commands.
 fn topology(s: &Session, id: Id) -> Option<J> {
     let b = s.built.body(id).filter(|b| b.is_exact())?;
     let u = s.doc.units.mm();
     let r = |v: f64| trim_num(v, 4).parse::<f64>().unwrap_or(0.0);
     let p = |v: DVec3| (v / u).to_array().map(r);
-    let edges: Vec<J> = exact::edges_tagged(&b.solids, &b.tags).iter().take(400).map(|e| json!({"point": p(e.mid), "length": r(e.length / u), "shape": if e.straight { "line" } else { "curve" }, "tag": e.tag, "made": e.tag.as_ref().map(|t| t.describe())})).collect();
-    let faces: Vec<J> = exact::faces_tagged(&b.solids, &b.tags).iter().take(400).map(|f| json!({"point": p(f.at), "normal": f.normal.to_array().map(r), "area": r(f.area / u.powi(2)), "shape": f.kind, "tag": f.tag, "made": f.tag.as_ref().map(|t| t.describe())})).collect();
-    Some(json!({"edges": edges, "faces": faces}))
+    let omitted = std::cell::Cell::new(0usize);
+    let tag = |t: &dyn erased::Tagged| -> J { t.json(MAX_TOPOLOGY_TAG_BYTES).unwrap_or_else(|| { omitted.set(omitted.get() + 1); J::Null }) };
+    let edges: Vec<J> = exact::edges_tagged(&b.solids, &b.tags).iter().take(400).map(|e| json!({"point": p(e.mid), "length": r(e.length / u), "shape": if e.straight { "line" } else { "curve" }, "tag": tag(&e.tag), "made": e.tag.as_ref().map(|t| t.describe())})).collect();
+    let faces: Vec<J> = exact::faces_tagged(&b.solids, &b.tags).iter().take(400).map(|f| json!({"point": p(f.at), "normal": f.normal.to_array().map(r), "area": r(f.area / u.powi(2)), "shape": f.kind, "tag": tag(&f.tag), "made": f.tag.as_ref().map(|t| t.describe())})).collect();
+    let mut out = json!({"edges": edges, "faces": faces});
+    if omitted.get() > 0 {
+        out["tags_omitted"] = json!(omitted.get());
+        out["tags_omitted_note"] = json!("Some tags are too long to list; name those edges and faces by their point.");
+    }
+    Some(out)
+}
+
+mod erased {
+    /// An optional face or edge tag, as JSON when it is short enough to list.
+    pub trait Tagged { fn json(&self, limit: usize) -> Option<serde_json::Value>; }
+    impl<T: serde::Serialize> Tagged for Option<T> {
+        fn json(&self, limit: usize) -> Option<serde_json::Value> {
+            let Some(tag) = self else { return Some(serde_json::Value::Null) };
+            let text = serde_json::to_string(tag).ok()?;
+            if text.len() > limit { return None; }
+            serde_json::from_str(&text).ok()
+        }
+    }
 }
 
 /// What each body looked like before a command, to report only what it changed.
@@ -2247,10 +2273,12 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             }
             let id = s.edit_feature(|d| {
                 if feature.id == 0 || d.feature(feature.id).is_some() { feature.id = d.next_id; }
-                d.next_id = d.next_id.max(feature.id + 1);
+                d.next_id = d.next_id.max(feature.id.checked_add(1).ok_or("the feature id is too large")?);
                 if !d.features.iter().any(|f| f.id == feature.owner) && feature.owner != 0 { feature.owner = d.active_component; }
                 let id = feature.id;
                 d.features.push(feature);
+                // Checked here, not first at save: a value over a limit would make the design unsavable.
+                crate::validation::document(d)?;
                 Ok((id, id))
             })?;
             let mut out = changed(s, &before);
@@ -2319,6 +2347,8 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             if op == "mesh_extrude_region" && region.is_none() { return Err("mesh_extrude_region needs a \"region\"".into()); }
             let id = s.edit_feature(|d| {
                 let id = d.add_feature(FeatureKind::MeshOp(crate::doc::MeshOp { body, op: kind, region }));
+                // Checked here, not first at save: a value over a limit would make the design unsavable.
+                crate::validation::document(d)?;
                 Ok((id, id))
             })?;
             let mut out = changed(s, &before);
@@ -2355,6 +2385,8 @@ fn execute_validated(s: &mut Session, c: &J, cam: Option<Camera>) -> R<J> {
             let id = s.edit_feature(|d| {
                 let id = d.add_feature(FeatureKind::Relief(relief));
                 if let Some(n) = name { d.feature_mut(id).unwrap().name = n; }
+                // Checked here, not first at save: a value over a limit would make the design unsavable.
+                crate::validation::document(d)?;
                 Ok((id, id))
             })?;
             let mut out = changed(s, &before);

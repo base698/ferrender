@@ -294,9 +294,8 @@ fn encode_using(doc: &Document, extras: &Extras, trust: Option<&crate::cache_aut
     let mut bytes = zip.finish().map_err(|e| format!("could not finish the container: {e}"))?.into_inner();
     // Never turn an untrusted imported preview into a signed cache by merely
     // re-encoding it. Supported sessions rebuild before they can save one.
-    if extras.cache.as_ref().is_some_and(|c| c.matches(doc)) {
-        if let Some(trust) = trust { trust.seal(&mut bytes); }
-    }
+    if extras.cache.as_ref().is_some_and(|c| c.matches(doc))
+        && let Some(trust) = trust { trust.seal(&mut bytes); }
     if bytes.len() > MAX_CONTAINER_BYTES { return Err("the Ferrender file exceeds 2 GiB".into()); }
     Ok((bytes, true))
 }
@@ -402,11 +401,11 @@ pub fn open(path: &Path) -> Result<Opened, String> {
 
 fn open_bytes_using(bytes: &[u8], trust: Option<&crate::cache_auth::Store>) -> Result<Opened, String> {
     if !bytes.starts_with(b"PK") {
-        let doc = from_json(std::str::from_utf8(&bytes).map_err(|_| "the Ferrender file is not UTF-8")?)?;
+        let doc = from_json(std::str::from_utf8(bytes).map_err(|_| "the Ferrender file is not UTF-8")?)?;
         return Ok(Opened { doc: Some(doc), cache: None, container: false, newer: false, app: None });
     }
     if bytes.len() > MAX_CONTAINER_BYTES { return Err("the Ferrender file exceeds 2 GiB".into()); }
-    let mut archive = open_container(&bytes)?;
+    let mut archive = open_container(bytes)?;
     let manifest = read_manifest(&mut archive)?;
     let app = manifest["app"].as_str().map(str::to_owned);
     let authenticated = trust.is_some_and(|store| store.verify(bytes, archive.comment()));
@@ -475,6 +474,9 @@ pub fn save(doc: &Document, path: &Path) -> Result<Saved, String> {
 /// write a design through a staged file apply the same rule when they commit.
 pub fn keep_backup(path: &Path, new_is_container: bool) -> Result<Option<PathBuf>, String> {
     if !(new_is_container && path.is_file() && !is_container(path)) { return Ok(None); }
+    // An empty file holds no design to keep: a script's staged save reserves its
+    // temporary this way before the design is written into it.
+    if path.metadata().is_ok_and(|m| m.len() == 0) { return Ok(None); }
     let to = backup_path(path);
     // A predictable backup filename must never follow a symlink (including
     // a dangling one), or a save could overwrite an unrelated file.

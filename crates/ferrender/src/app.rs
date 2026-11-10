@@ -2377,7 +2377,10 @@ impl App {
         if r.is_ok() && matches!(cmd["op"].as_str(), Some("open" | "save")) {
             self.remember_document();
         }
-        self.refresh();
+        // Looking does not disturb what the user has selected or is previewing.
+        if !matches!(cmd["op"].as_str(), Some("get_scene_info" | "get_object_info" | "get_viewport_screenshot" | "get_reference" | "measure" | "list_threads")) {
+            self.refresh();
+        }
         r
     }
 
@@ -2877,11 +2880,10 @@ impl eframe::App for App {
         if self.command_search.block_input { ui.disable(); }
         self.process_open_request(Self::confirm_discard);
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
-            if let Some(p) = Some(f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()) {
-                if is_mesh_file(&p) || self.confirm_discard() {
+            if let Some(p) = Some(f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty())
+                && (is_mesh_file(&p) || self.confirm_discard()) {
                     self.open_path(&p);
                 }
-            }
         }
         if ctx.input(|i| i.viewport().close_requested()) && !self.confirm_discard() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);

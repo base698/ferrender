@@ -353,7 +353,10 @@ pub fn agrees(a: &[Solid], b: &[Solid], op: Bool) -> R<bool> {
     let Ok(mesh) = crate::meshops::boolean(&ma, &mb, op) else { return Ok(true) };
     let change = volume(&exact) - volume(a);
     let mesh_change = mesh.volume() - ma.volume();
-    let tolerance = 0.1 * volume(b) + 2.0 * FINE.deflection_linear * b.iter().map(Solid::area).sum::<f64>();
+    // What tessellating `b`'s surface can cost, and a twentieth of `b`. Twice this let through
+    // a pipe laid on a can whose kernel volume was a third short of its mesh's (x86-64 Linux,
+    // where the kernel returns a result macOS refuses); correct results differ by under a fiftieth.
+    let tolerance = 0.05 * volume(b) + FINE.deflection_linear * b.iter().map(Solid::area).sum::<f64>();
     Ok((change - mesh_change).abs() <= tolerance)
 }
 
@@ -373,7 +376,7 @@ pub fn tessellate(lumps: &[Solid]) -> R<(Mesh, Vec<Vec<DVec3>>)> {
     let m = Solid::mesh(lumps.iter(), FINE).map_err(|e| format!("the kernel could not triangulate the body: {e}"))?;
     let mut tris = Vec::with_capacity(m.indices.len() / 3);
     let mut face_ids = Vec::with_capacity(m.indices.len() / 3);
-    for (i, t) in m.indices.chunks_exact(3).enumerate() {
+    for (i, t) in m.indices.as_chunks::<3>().0.iter().enumerate() {
         let tri = [g(m.vertices[t[0]]), g(m.vertices[t[1]]), g(m.vertices[t[2]])];
         // Blend surfaces can collapse a triangle to nothing at a pole.
         if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() > 1e-20 {
@@ -731,11 +734,9 @@ pub fn carry(sources: &[(&[Solid], &Tags)], result: &[Solid], feature: Id) -> Ta
     let mut uses = std::collections::HashMap::new();
     for t in &candidates { *uses.entry(t.clone()).or_insert(0usize)+=1; }
     for (i,t) in candidates.iter_mut().enumerate() {
-        if uses[t]>1 {
-            if let Origin::Patch {cycles,..}=&mut t.origin {
-                if let Some(oriented)=boundary_cycles(i,&faces,&named,&by_edge) {*cycles=oriented;}
-            }
-        }
+        if uses[t]>1
+            && let Origin::Patch {cycles,..}=&mut t.origin
+                && let Some(oriented)=boundary_cycles(i,&faces,&named,&by_edge) {*cycles=oriented;}
     }
     // Cycles distinguish complementary pieces of a ring without ranking their
     // positions or areas. If orientation/connectivity is unavailable or still
@@ -874,7 +875,7 @@ pub struct FacePick { pub points: [DVec3; 2], pub tag: Option<Tag> }
 
 /// Select a unique identity. Multiple descendants can only be chosen when
 /// the saved/mapped point still lies on exactly one; proximity is not identity.
-fn choose_pick<'a,T>(hits: Vec<&'a T>, distance: impl Fn(&T)->f64) -> R<Option<&'a T>> {
+fn choose_pick<T>(hits: Vec<&T>, distance: impl Fn(&T)->f64) -> R<Option<&T>> {
     if hits.len()==1 { return Ok(hits.into_iter().next()); }
     let mut located=hits.into_iter().filter(|h|distance(h)<=1e-5);
     let first=located.next();
@@ -1097,14 +1098,13 @@ fn ordered_loops(face: &Face) -> Option<Vec<Edge>> {
                 let next = rest.remove(i);
                 end = g(next.end_point());
                 out.push(next);
-            } else if let Some(i) = rest.iter().position(|e| g(e.end_point()).distance(end) <= MEET) {
+            } else {
+                let i = rest.iter().position(|e| g(e.end_point()).distance(end) <= MEET)?;
                 let back = rest.remove(i);
                 if !straight(&back) { return None; }
                 let to = g(back.start_point());
                 out.push(Edge::line(c(end), c(to)).ok()?);
                 end = to;
-            } else {
-                return None;
             }
         }
     }

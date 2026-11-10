@@ -1,4 +1,7 @@
 {
+  "body_names": {
+    "12": "Housing"
+  },
   "features": [
     {
       "id": 1,
@@ -463,12 +466,12 @@
             ],
             [
               8.0,
-              4.999999999999999,
+              5.0,
               5.0
             ],
             [
               8.0,
-              4.999999999999999,
+              5.0,
               9.0
             ]
           ],
@@ -1694,17 +1697,1131 @@
       "name": "Sphere1",
       "owner": 24,
       "suppressed": false
+    },
+    {
+      "id": 26,
+      "kind": {
+        "sketch": {
+          "constraints": {},
+          "entities": {
+            "4": {
+              "a": 2,
+              "b": 3,
+              "c": 1,
+              "construction": false,
+              "type": "ellipse"
+            }
+          },
+          "next": 5,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              140.0,
+              0.0
+            ],
+            "2": [
+              148.0,
+              0.0
+            ],
+            "3": [
+              140.0,
+              4.0
+            ]
+          },
+          "visible": true
+        }
+      },
+      "name": "Oval",
+      "suppressed": false
+    },
+    {
+      "id": 27,
+      "kind": {
+        "sketch": {
+          "constraints": {},
+          "entities": {
+            "4": {
+              "a": 1,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            },
+            "5": {
+              "a": 2,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 6,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              200.0,
+              0.0
+            ],
+            "2": [
+              210.0,
+              0.0
+            ],
+            "3": [
+              210.0,
+              10.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Sweep path",
+      "suppressed": false
+    },
+    {
+      "id": 28,
+      "kind": {
+        "sketch": {
+          "constraints": {
+            "10": {
+              "kind": "horizontal",
+              "refs": [
+                9
+              ]
+            },
+            "12": {
+              "kind": "vertical",
+              "refs": [
+                11
+              ]
+            },
+            "6": {
+              "kind": "horizontal",
+              "refs": [
+                5
+              ]
+            },
+            "8": {
+              "kind": "vertical",
+              "refs": [
+                7
+              ]
+            }
+          },
+          "entities": {
+            "11": {
+              "a": 4,
+              "b": 1,
+              "construction": false,
+              "type": "line"
+            },
+            "5": {
+              "a": 1,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            },
+            "7": {
+              "a": 3,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            },
+            "9": {
+              "a": 2,
+              "b": 4,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 13,
+          "plane": {
+            "origin": [
+              200.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              -1.0,
+              -1.0
+            ],
+            "2": [
+              1.0,
+              1.0
+            ],
+            "3": [
+              1.0,
+              -1.0
+            ],
+            "4": [
+              -1.0,
+              1.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Sweep section",
+      "suppressed": false
+    },
+    {
+      "id": 29,
+      "kind": {
+        "sweep": {
+          "op": "join",
+          "orient": "follow",
+          "path_sketch": 27,
+          "profiles": [
+            [
+              5,
+              7,
+              9,
+              11
+            ]
+          ],
+          "sketch": 28
+        }
+      },
+      "name": "Sweep1",
+      "suppressed": false
+    },
+    {
+      "id": 30,
+      "kind": {
+        "sketch": {
+          "constraints": {
+            "10": {
+              "kind": "horizontal",
+              "refs": [
+                9
+              ]
+            },
+            "12": {
+              "kind": "vertical",
+              "refs": [
+                11
+              ]
+            },
+            "6": {
+              "kind": "horizontal",
+              "refs": [
+                5
+              ]
+            },
+            "8": {
+              "kind": "vertical",
+              "refs": [
+                7
+              ]
+            }
+          },
+          "entities": {
+            "11": {
+              "a": 4,
+              "b": 1,
+              "construction": false,
+              "type": "line"
+            },
+            "5": {
+              "a": 1,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            },
+            "7": {
+              "a": 3,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            },
+            "9": {
+              "a": 2,
+              "b": 4,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 13,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              238.0,
+              -2.0
+            ],
+            "2": [
+              242.0,
+              2.0
+            ],
+            "3": [
+              242.0,
+              -2.0
+            ],
+            "4": [
+              238.0,
+              2.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Loft low",
+      "suppressed": false
+    },
+    {
+      "id": 31,
+      "kind": {
+        "sketch": {
+          "constraints": {
+            "10": {
+              "kind": "horizontal",
+              "refs": [
+                9
+              ]
+            },
+            "12": {
+              "kind": "vertical",
+              "refs": [
+                11
+              ]
+            },
+            "6": {
+              "kind": "horizontal",
+              "refs": [
+                5
+              ]
+            },
+            "8": {
+              "kind": "vertical",
+              "refs": [
+                7
+              ]
+            }
+          },
+          "entities": {
+            "11": {
+              "a": 4,
+              "b": 1,
+              "construction": false,
+              "type": "line"
+            },
+            "5": {
+              "a": 1,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            },
+            "7": {
+              "a": 3,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            },
+            "9": {
+              "a": 2,
+              "b": 4,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 13,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              10.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              239.0,
+              -1.0
+            ],
+            "2": [
+              241.0,
+              1.0
+            ],
+            "3": [
+              241.0,
+              -1.0
+            ],
+            "4": [
+              239.0,
+              1.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Loft high",
+      "suppressed": false
+    },
+    {
+      "id": 32,
+      "kind": {
+        "loft": {
+          "op": "join",
+          "ruled": true,
+          "sections": [
+            {
+              "profile": [
+                5,
+                7,
+                9,
+                11
+              ],
+              "sketch": 30
+            },
+            {
+              "profile": [
+                5,
+                7,
+                9,
+                11
+              ],
+              "sketch": 31
+            }
+          ]
+        }
+      },
+      "name": "Loft1",
+      "suppressed": false
+    },
+    {
+      "id": 33,
+      "kind": {
+        "sketch": {
+          "constraints": {},
+          "entities": {
+            "3": {
+              "a": 1,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 4,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              260.0,
+              0.0
+            ],
+            "2": [
+              280.0,
+              0.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Pipe path",
+      "suppressed": false
+    },
+    {
+      "id": 34,
+      "kind": {
+        "pipe": {
+          "diameter": {
+            "expr": "2 mm",
+            "v": 2.0
+          },
+          "op": "join",
+          "path": [
+            {
+              "sketch": 33
+            }
+          ]
+        }
+      },
+      "name": "Pipe1",
+      "suppressed": false
+    },
+    {
+      "id": 35,
+      "kind": {
+        "primitive": {
+          "op": "new",
+          "position": [
+            {
+              "expr": "300 mm",
+              "v": 300.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            }
+          ],
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "shape": {
+            "cylinder": {
+              "diameter": {
+                "expr": "20 mm",
+                "v": 20.0
+              },
+              "height": {
+                "expr": "30 mm",
+                "v": 30.0
+              }
+            }
+          }
+        }
+      },
+      "name": "Cylinder2",
+      "suppressed": false
+    },
+    {
+      "id": 36,
+      "kind": {
+        "sketch": {
+          "constraints": {
+            "10": {
+              "kind": "horizontal",
+              "refs": [
+                9
+              ]
+            },
+            "12": {
+              "kind": "vertical",
+              "refs": [
+                11
+              ]
+            },
+            "6": {
+              "kind": "horizontal",
+              "refs": [
+                5
+              ]
+            },
+            "8": {
+              "kind": "vertical",
+              "refs": [
+                7
+              ]
+            }
+          },
+          "entities": {
+            "11": {
+              "a": 4,
+              "b": 1,
+              "construction": false,
+              "type": "line"
+            },
+            "5": {
+              "a": 1,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            },
+            "7": {
+              "a": 3,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            },
+            "9": {
+              "a": 2,
+              "b": 4,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 13,
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              297.0,
+              10.0
+            ],
+            "2": [
+              303.0,
+              20.0
+            ],
+            "3": [
+              303.0,
+              10.0
+            ],
+            "4": [
+              297.0,
+              20.0
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Badge",
+      "suppressed": false
+    },
+    {
+      "id": 37,
+      "kind": {
+        "emboss": {
+          "body": 35,
+          "depth": {
+            "expr": "1 mm",
+            "v": 1.0
+          },
+          "op": "join",
+          "profiles": [
+            [
+              5,
+              7,
+              9,
+              11
+            ]
+          ],
+          "sketch": 36
+        }
+      },
+      "name": "Emboss1",
+      "suppressed": false
+    },
+    {
+      "id": 38,
+      "kind": {
+        "primitive": {
+          "op": "new",
+          "position": [
+            {
+              "expr": "330 mm",
+              "v": 330.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            }
+          ],
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "shape": {
+            "box": {
+              "depth": {
+                "expr": "10 mm",
+                "v": 10.0
+              },
+              "height": {
+                "expr": "10 mm",
+                "v": 10.0
+              },
+              "width": {
+                "expr": "10 mm",
+                "v": 10.0
+              }
+            }
+          }
+        }
+      },
+      "name": "Box4",
+      "suppressed": false
+    },
+    {
+      "id": 39,
+      "kind": {
+        "tilt": {
+          "angle": {
+            "expr": "10 deg",
+            "v": 10.0
+          },
+          "axis": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "body": 38,
+          "face": [
+            335.0,
+            5.0,
+            10.0
+          ],
+          "frame": [
+            [
+              330.0,
+              0.0,
+              0.0
+            ],
+            [
+              340.0,
+              10.0,
+              10.0
+            ]
+          ],
+          "pivot": "middle",
+          "tag": {
+            "kind": "plane",
+            "origin": {
+              "semantic": {
+                "feature": 38,
+                "role": "box:z:max"
+              }
+            },
+            "schema": 2
+          }
+        }
+      },
+      "name": "Tilt1",
+      "suppressed": false
+    },
+    {
+      "id": 40,
+      "kind": {
+        "mesh_op": {
+          "body": 17,
+          "op": {
+            "smooth": {
+              "iterations": 1,
+              "strength": 0.5
+            }
+          }
+        }
+      },
+      "name": "Mesh_smooth1",
+      "suppressed": false
+    },
+    {
+      "id": 41,
+      "kind": {
+        "relief": {
+          "base": {
+            "expr": "1 mm",
+            "v": 1.0
+          },
+          "blur": 1,
+          "depth": {
+            "expr": "1 mm",
+            "v": 1.0
+          },
+          "gamma": 1.0,
+          "image": {
+            "name": "ramp.png",
+            "opacity": 0.5,
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "pixel_height": 4,
+            "pixel_width": 4,
+            "png": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAIUlEQVR4nGNhYGD4LygoyADDLC4uLnAOVgHGM2fOoGgBAAGVCGxAJcAYAAAAAElFTkSuQmCC",
+            "rotation": 0.0,
+            "visible": true,
+            "width": 100.0
+          },
+          "invert": false,
+          "op": "new",
+          "plane": {
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          "resolution": 4,
+          "width": {
+            "expr": "8 mm",
+            "v": 8.0
+          }
+        }
+      },
+      "name": "ramp",
+      "suppressed": false
+    },
+    {
+      "id": 42,
+      "kind": {
+        "script_run": {
+          "inputs": {},
+          "script_name": "Peg",
+          "source": "const META = #{name: \"Peg\"}; fn run(i) { primitive(#{ output_key: \"peg\", type: \"cylinder\", diameter: 4, height: 6, position: [360, 0, 0] }); }",
+          "source_hash": 7
+        }
+      },
+      "name": "Script1",
+      "suppressed": false
+    },
+    {
+      "id": 43,
+      "kind": {
+        "primitive": {
+          "op": "new",
+          "position": [
+            {
+              "expr": "360 mm",
+              "v": 360.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            },
+            {
+              "expr": "0 mm",
+              "v": 0.0
+            }
+          ],
+          "rotate": [
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            },
+            {
+              "expr": "0 deg",
+              "v": 0.0
+            }
+          ],
+          "shape": {
+            "cylinder": {
+              "diameter": {
+                "expr": "4 mm",
+                "v": 4.0
+              },
+              "height": {
+                "expr": "6 mm",
+                "v": 6.0
+              }
+            }
+          }
+        }
+      },
+      "made_by": 42,
+      "name": "Cylinder3",
+      "script_key": "explicit:peg/0",
+      "suppressed": false
+    },
+    {
+      "id": 44,
+      "kind": {
+        "sketch": {
+          "constraints": {
+            "10": {
+              "kind": "horizontal",
+              "refs": [
+                9
+              ]
+            },
+            "12": {
+              "kind": "vertical",
+              "refs": [
+                11
+              ]
+            },
+            "6": {
+              "kind": "horizontal",
+              "refs": [
+                5
+              ]
+            },
+            "8": {
+              "kind": "vertical",
+              "refs": [
+                7
+              ]
+            }
+          },
+          "entities": {
+            "11": {
+              "a": 4,
+              "b": 1,
+              "construction": false,
+              "type": "line"
+            },
+            "5": {
+              "a": 1,
+              "b": 3,
+              "construction": false,
+              "type": "line"
+            },
+            "7": {
+              "a": 3,
+              "b": 2,
+              "construction": false,
+              "type": "line"
+            },
+            "9": {
+              "a": 2,
+              "b": 4,
+              "construction": false,
+              "type": "line"
+            }
+          },
+          "next": 13,
+          "plane": {
+            "origin": [
+              400.0,
+              0.0,
+              0.0
+            ],
+            "x": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "points": {
+            "0": [
+              0.0,
+              0.0
+            ],
+            "1": [
+              -19.05,
+              -92.075
+            ],
+            "2": [
+              19.05,
+              92.075
+            ],
+            "3": [
+              19.05,
+              -92.075
+            ],
+            "4": [
+              -19.05,
+              92.075
+            ]
+          },
+          "visible": false
+        }
+      },
+      "name": "Joist section",
+      "suppressed": false
+    },
+    {
+      "id": 45,
+      "kind": {
+        "extrude": {
+          "distance": {
+            "expr": "300 mm",
+            "v": 300.0
+          },
+          "op": "new",
+          "profiles": [
+            [
+              5,
+              7,
+              9,
+              11
+            ]
+          ],
+          "sketch": 44,
+          "symmetric": false,
+          "through_all": false
+        }
+      },
+      "name": "Extrude3",
+      "suppressed": false
     }
   ],
   "format": "ferrender",
   "hidden_bodies": [],
-  "next_id": 26,
+  "next_id": 46,
   "params": [
     {
       "expr": "20 mm",
       "name": "width"
     }
   ],
+  "structural_members": {
+    "45": {
+      "density_kg_m3": 500.0,
+      "design_values": {
+        "e_mpa": 10000.0,
+        "factors": {
+          "bending": {
+            "CD": 1.0
+          },
+          "elasticity": {},
+          "shear": {
+            "CD": 1.0
+          }
+        },
+        "fb_mpa": 8.0,
+        "fv_mpa": 1.0,
+        "source": "Synthetic test values; not a lumber table"
+      },
+      "end_bearing_mm": [
+        38.1,
+        38.1
+      ],
+      "grade": "Test grade",
+      "nominal_size": "2x8",
+      "species": "Test species"
+    }
+  },
   "units": "mm",
-  "version": 13
+  "version": 20
 }

@@ -1,7 +1,7 @@
 //! Script runs and their files: staged writes, read-back, saves, the time
 //! limit, questions, and links inside the allowed folders.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,11 +22,11 @@ fn run_cmd(s: &mut Session, cmd: J) -> J {
     execute(s, &cmd, None).unwrap_or_else(|e| panic!("{cmd} failed: {e}"))
 }
 
-fn leftovers(dir: &PathBuf) -> Vec<String> {
+fn leftovers(dir: &Path) -> Vec<String> {
     std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.contains("ferrtmp")).collect()
 }
 
-fn s(p: &PathBuf) -> String { p.display().to_string() }
+fn s(p: &Path) -> String { p.display().to_string() }
 
 /// A script that writes a file, then fails or is cancelled, leaves nothing behind.
 #[test]
@@ -208,4 +208,69 @@ fn links_inside_the_allowed_folders_are_not_followed_when_used() {
     script::run(&mut session, &req).unwrap();
     assert_eq!(std::fs::read(&design).unwrap(), bytes, "the other name of the hard link is untouched");
     assert_eq!(Session::open(&inside.join("mine.ferr")).unwrap().doc.features.len(), 1);
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_script_save_of_a_container_backs_up_nothing_of_its_own() {
+    // The staged save reserves an empty temporary first; that placeholder is not a
+    // plain-JSON design to keep as a "(0.3 backup)", on a new file or over a container.
+    let inside = dir("script-save-container");
+    let path = inside.join("scene.ferr");
+    let mut session = Session::default();
+    run_cmd(&mut session, json!({"op": "primitive", "type": "box", "width": 5, "depth": 5, "height": 5}));
+    let stl = inside.join("tool.stl");
+    fr_core::io::write_stl(session.built.bodies.iter(), fr_core::Unit::Mm, &stl).unwrap();
+    let mut req = Request::new(format!("const META = #{{name: \"save\"}}; fn run(i) {{ import_mesh(#{{ path: {:?} }}); save(#{{ path: {:?} }}); }}", s(&stl), s(&path)));
+    req.sandbox.allowed = vec![inside.clone()];
+    script::run(&mut session, &req).unwrap();
+    assert!(fr_core::io::is_container(&path));
+    assert_eq!(names(&inside), ["scene.ferr", "tool.stl"]);
+    // Saving over the container it wrote replaces it and still leaves nothing else.
+    let mut req = Request::new(format!("const META = #{{name: \"again\"}}; fn run(i) {{ primitive(#{{ type: \"box\", width: 2, depth: 2, height: 2 }}); save(#{{ path: {:?} }}); }}", s(&path)));
+    req.sandbox.allowed = vec![inside.clone()];
+    script::run(&mut session, &req).unwrap();
+    assert_eq!(names(&inside), ["scene.ferr", "tool.stl"]);
+    assert_eq!(Session::open(&path).unwrap().doc.features.len(), 3);
+}
+
+#[test]
+fn the_screenshot_command_publishes_no_file() {
+    // get_viewport_screenshot returns its image and takes no path; `screenshot` writes files.
+    let inside = dir("script-shot");
+    let stray = inside.join("stray.png");
+    let mut session = Session::default();
+    let mut req = Request::new(format!("const META = #{{name: \"shot\"}}; fn run(i) {{ primitive(#{{ type: \"box\", width: 5, depth: 5, height: 5 }}); get_viewport_screenshot(#{{ path: {:?}, width: 64, height: 64 }}); screenshot({:?}, #{{ width: 64, height: 64 }}); }}", s(&stray), s(&inside.join("real.png"))));
+    req.sandbox.allowed = vec![inside.clone()];
+    script::run(&mut session, &req).unwrap();
+    assert_eq!(names(&inside), ["real.png"]);
+    assert!(std::fs::metadata(inside.join("real.png")).unwrap().len() > 0);
+}
+
+#[test]
+fn info_on_a_filleted_body_fits_in_a_script_value() {
+    // Faces and edges carry tags naming how they were made, and a tag names the tags it came
+    // from: with lettering joined to a filleted, stepped block the edges' tags made the reply
+    // 34 MB. Tags too long to list are left out, and the edges are still named by point.
+    let mut session = Session::default();
+    let req = Request::new(r#"const META = #{name: "stand"};
+fn run(i) {
+    let b = primitive(#{type: "box", width: 156, depth: 76, height: 8, position: [-78, -38, 0]});
+    primitive(#{type: "box", width: 144, depth: 64, height: 22, position: [-72, -32, 8], operation: "join"});
+    primitive(#{type: "box", width: 150, depth: 70, height: 5, position: [-75, -35, 30], operation: "join"});
+    fillet_edges(#{body: b.feature, edges: "all", radius: 1});
+    text(#{text: "PAVED ROADS", operation: "join", body: b.feature, face: [0, -32, 15.5], height: 7, depth: 1, align: "center"});
+    let got = info(b.feature).topology;
+    #{ faces: got.faces.len(), edges: got.edges.len(), omitted: got.tags_omitted, point: got.edges[0].point.len() }
+}"#);
+    let out = script::run(&mut session, &req).unwrap();
+    assert!(out.result["faces"].as_u64().unwrap() > 20 && out.result["omitted"].as_u64().unwrap() > 0 && out.result["point"] == 3, "{}", out.result);
+    let body = session.built.bodies[0].id;
+    let reply = execute(&mut session, &json!({"op": "get_object_info", "id": body}), None).unwrap().to_string();
+    assert!(reply.len() < 1024 * 1024, "the reply stays small enough for a bridge or MCP client: {} bytes", reply.len());
 }

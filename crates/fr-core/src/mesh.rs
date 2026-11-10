@@ -47,8 +47,10 @@ pub type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 
 #[derive(Clone, Debug, Default)]
 pub struct Mesh {
-    positions: Vec<DVec3>,
-    indices: Vec<[u32; 3]>,
+    // Shared until changed: cloning a mesh (an undo step, a document copy, a body made
+    // from an import) costs two reference counts, not a copy of every triangle.
+    positions: Arc<Vec<DVec3>>,
+    indices: Arc<Vec<[u32; 3]>>,
     /// For meshes made from exact solids, the kernel face each triangle came from.
     /// Empty otherwise; dropped by anything that re-cuts the triangles.
     pub face_ids: Vec<u64>,
@@ -61,6 +63,7 @@ pub struct Mesh {
 impl PartialEq for Mesh {
     /// Two meshes are equal when they hold the same triangles in the same order, however they are indexed.
     fn eq(&self, other: &Mesh) -> bool {
+        if Arc::ptr_eq(&self.positions, &other.positions) && Arc::ptr_eq(&self.indices, &other.indices) { return self.face_ids == other.face_ids; }
         self.indices.len() == other.indices.len() && self.face_ids == other.face_ids && self.tris().eq(other.tris())
     }
 }
@@ -117,8 +120,8 @@ impl<'de> Deserialize<'de> for Mesh {
                 if text.len() > MAX_INLINE_TRIANGLES * 48 { return Err(serde::de::Error::custom("the inline mesh exceeds one million triangles")); }
                 let bytes = base64::engine::general_purpose::STANDARD.decode(text).map_err(serde::de::Error::custom)?;
                 if bytes.len() % 36 != 0 { return Err(serde::de::Error::custom("the mesh has an incomplete triangle")); }
-                let f: Vec<f64> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect();
-                let tris: Vec<[DVec3; 3]> = f.chunks_exact(9).map(|t| [DVec3::new(t[0], t[1], t[2]), DVec3::new(t[3], t[4], t[5]), DVec3::new(t[6], t[7], t[8])]).collect();
+                let f: Vec<f64> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect();
+                let tris: Vec<[DVec3; 3]> = f.as_chunks::<9>().0.iter().map(|t| [DVec3::new(t[0], t[1], t[2]), DVec3::new(t[3], t[4], t[5]), DVec3::new(t[6], t[7], t[8])]).collect();
                 let mesh = Mesh::welded_from_tris(&tris);
                 mesh.validate().map_err(serde::de::Error::custom)?;
                 Ok(mesh)
@@ -159,12 +162,12 @@ impl Mesh {
             }
             indices.push(tri);
         }
-        Mesh { positions, indices, face_ids: Vec::new(), welded: true, ..Default::default() }
+        Mesh { positions: Arc::new(positions), indices: Arc::new(indices), face_ids: Vec::new(), welded: true, ..Default::default() }
     }
 
     /// A mesh from shared vertices and index triples; `welded` says the vertices are already merged.
     pub fn from_indexed(positions: Vec<DVec3>, indices: Vec<[u32; 3]>, welded: bool) -> Result<Mesh, String> {
-        let m = Mesh { positions, indices, face_ids: Vec::new(), welded, ..Default::default() };
+        let m = Mesh { positions: Arc::new(positions), indices: Arc::new(indices), face_ids: Vec::new(), welded, ..Default::default() };
         m.validate()?;
         Ok(m)
     }
@@ -185,13 +188,13 @@ impl Mesh {
         let mut map: FxMap<u128, u32> = FxMap::default();
         let mut positions = Vec::with_capacity(self.positions.len());
         let mut remap = Vec::with_capacity(self.positions.len());
-        for p in &self.positions {
+        for p in self.positions.iter() {
             let p = p.as_vec3().as_dvec3();
             let next = positions.len() as u32;
             remap.push(*map.entry(key(p)).or_insert_with(|| { positions.push(p); next }));
         }
-        for t in &mut self.indices { *t = t.map(|v| remap[v as usize]); }
-        self.positions = positions;
+        for t in Arc::make_mut(&mut self.indices).iter_mut() { *t = t.map(|v| remap[v as usize]); }
+        self.positions = Arc::new(positions);
         self.welded = true;
         self.touched();
     }
@@ -208,7 +211,7 @@ impl Mesh {
         [self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize]]
     }
 
-    pub fn tris(&self) -> impl Iterator<Item = [DVec3; 3]> + '_ + ExactSizeIterator {
+    pub fn tris(&self) -> impl '_ + ExactSizeIterator<Item = [DVec3; 3]> {
         self.indices.iter().map(move |t| [self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize]])
     }
 
@@ -220,8 +223,8 @@ impl Mesh {
     /// Adds one triangle as three new vertices.
     pub fn push(&mut self, t: [DVec3; 3]) {
         let n = self.positions.len() as u32;
-        self.positions.extend(t);
-        self.indices.push([n, n + 1, n + 2]);
+        Arc::make_mut(&mut self.positions).extend(t);
+        Arc::make_mut(&mut self.indices).push([n, n + 1, n + 2]);
         self.welded = false;
         self.touched();
     }
@@ -229,8 +232,8 @@ impl Mesh {
     pub fn extend(&mut self, tris: impl IntoIterator<Item = [DVec3; 3]>) {
         for t in tris {
             let n = self.positions.len() as u32;
-            self.positions.extend(t);
-            self.indices.push([n, n + 1, n + 2]);
+            Arc::make_mut(&mut self.positions).extend(t);
+            Arc::make_mut(&mut self.indices).push([n, n + 1, n + 2]);
         }
         self.welded = false;
         self.touched();
@@ -239,8 +242,8 @@ impl Mesh {
     /// Appends another mesh's triangles, keeping its vertices separate.
     pub fn append(&mut self, other: &Mesh) {
         let base = self.positions.len() as u32;
-        self.positions.extend_from_slice(&other.positions);
-        self.indices.extend(other.indices.iter().map(|t| t.map(|i| i + base)));
+        Arc::make_mut(&mut self.positions).extend_from_slice(&other.positions);
+        Arc::make_mut(&mut self.indices).extend(other.indices.iter().map(|t| t.map(|i| i + base)));
         self.welded = false;
         self.touched();
     }
@@ -248,7 +251,7 @@ impl Mesh {
     /// The first `n` triangles as their own mesh.
     pub fn head(&self, n: usize) -> Mesh {
         if n >= self.len() { return self.clone(); }
-        let mut m = Mesh { positions: Vec::new(), indices: Vec::new(), face_ids: self.face_ids.iter().take(n).copied().collect(), welded: self.welded, ..Default::default() };
+        let mut m = Mesh { positions: Arc::default(), indices: Arc::default(), face_ids: self.face_ids.iter().take(n).copied().collect(), welded: self.welded, ..Default::default() };
         if self.welded {
             // Keep the shared vertices; compact them to those still used.
             let mut remap: Vec<u32> = vec![u32::MAX; self.positions.len()];
@@ -257,11 +260,11 @@ impl Mesh {
                 for (k, i) in t.iter().enumerate() {
                     if remap[*i as usize] == u32::MAX {
                         remap[*i as usize] = m.positions.len() as u32;
-                        m.positions.push(self.positions[*i as usize]);
+                        Arc::make_mut(&mut m.positions).push(self.positions[*i as usize]);
                     }
                     tri[k] = remap[*i as usize];
                 }
-                m.indices.push(tri);
+                Arc::make_mut(&mut m.indices).push(tri);
             }
         } else {
             m.extend(self.tris().take(n));
@@ -274,7 +277,7 @@ impl Mesh {
         let faces = self.face_ids.len() == self.indices.len();
         let mut kept_ids = Vec::new();
         let mut i = 0;
-        self.indices.retain(|t| {
+        Arc::make_mut(&mut self.indices).retain(|t| {
             let k = keep(t);
             if k && faces { kept_ids.push(self.face_ids[i]); }
             i += 1;
@@ -288,7 +291,7 @@ impl Mesh {
     pub fn compact(&mut self) {
         let mut remap: Vec<u32> = vec![u32::MAX; self.positions.len()];
         let mut positions = Vec::with_capacity(self.positions.len());
-        for t in &mut self.indices {
+        for t in Arc::make_mut(&mut self.indices).iter_mut() {
             for i in t.iter_mut() {
                 if remap[*i as usize] == u32::MAX {
                     remap[*i as usize] = positions.len() as u32;
@@ -297,13 +300,13 @@ impl Mesh {
                 *i = remap[*i as usize];
             }
         }
-        self.positions = positions;
+        self.positions = Arc::new(positions);
         self.touched();
     }
 
     /// Rounds every coordinate to what a 32-bit float holds, which is how meshes are stored.
     pub fn snap(&mut self) {
-        for p in &mut self.positions { *p = p.as_vec3().as_dvec3(); }
+        for p in Arc::make_mut(&mut self.positions).iter_mut() { *p = p.as_vec3().as_dvec3(); }
         self.touched();
     }
 
@@ -344,14 +347,14 @@ impl Mesh {
     }
 
     pub fn flip(&mut self) {
-        for t in &mut self.indices {
+        for t in Arc::make_mut(&mut self.indices).iter_mut() {
             t.swap(1, 2);
         }
         self.touched();
     }
 
     pub fn map(&mut self, f: impl Fn(DVec3) -> DVec3) {
-        for v in &mut self.positions {
+        for v in Arc::make_mut(&mut self.positions).iter_mut() {
             *v = f(*v);
         }
         self.touched();
@@ -359,14 +362,14 @@ impl Mesh {
 
     /// Moves vertices individually; `f` gets the vertex index and its position.
     pub fn map_indexed(&mut self, mut f: impl FnMut(usize, DVec3) -> DVec3) {
-        for (i, v) in self.positions.iter_mut().enumerate() {
+        for (i, v) in Arc::make_mut(&mut self.positions).iter_mut().enumerate() {
             *v = f(i, *v);
         }
         self.touched();
     }
 
     pub fn set_position(&mut self, i: usize, p: DVec3) {
-        self.positions[i] = p;
+        Arc::make_mut(&mut self.positions)[i] = p;
         self.touched();
     }
 
@@ -408,7 +411,7 @@ impl Mesh {
     /// A welded mesh is returned as it is.
     pub(crate) fn weld(&self, eps: f64) -> (Vec<DVec3>, Vec<[usize; 3]>) {
         if self.welded {
-            return (self.positions.clone(), self.indices.iter().map(|t| t.map(|i| i as usize)).collect());
+            return (self.positions.to_vec(), self.indices.iter().map(|t| t.map(|i| i as usize)).collect());
         }
         let cell = |p: DVec3| ((p.x / eps).floor() as i64, (p.y / eps).floor() as i64, (p.z / eps).floor() as i64);
         let mut grid: FxMap<(i64, i64, i64), Vec<usize>> = FxMap::default();
@@ -509,8 +512,8 @@ impl Mesh {
             }
             tris = next;
         }
-        self.positions = verts;
-        self.indices = tris.iter().map(|t| t.map(|i| i as u32)).collect();
+        self.positions = Arc::new(verts);
+        self.indices = Arc::new(tris.iter().map(|t| t.map(|i| i as u32)).collect());
         self.welded = true;
         self.face_ids.clear();
         self.drop_slivers();
@@ -610,7 +613,7 @@ impl Mesh {
     fn drop_slivers(&mut self) {
         self.face_ids.clear();
         let positions = std::mem::take(&mut self.positions);
-        self.indices.retain(|t| {
+        Arc::make_mut(&mut self.indices).retain(|t| {
             let (a, b, c) = (positions[t[0] as usize], positions[t[1] as usize], positions[t[2] as usize]);
             (b - a).cross(c - a).length_squared() > 1e-20
         });
@@ -641,7 +644,7 @@ impl Mesh {
         // Degenerate triangles: repeated vertices or no area.
         let before = self.indices.len();
         let positions = std::mem::take(&mut self.positions);
-        self.indices.retain(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2] && {
+        Arc::make_mut(&mut self.indices).retain(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2] && {
             let (a, b, c) = (positions[t[0] as usize], positions[t[1] as usize], positions[t[2] as usize]);
             (b - a).cross(c - a).length_squared() > 0.0
         });
@@ -657,7 +660,7 @@ impl Mesh {
         report.duplicates_removed = doomed.iter().filter(|d| **d).count();
         if report.duplicates_removed > 0 {
             let mut i = 0;
-            self.indices.retain(|_| { let k = !doomed[i]; i += 1; k });
+            Arc::make_mut(&mut self.indices).retain(|_| { let k = !doomed[i]; i += 1; k });
         }
         drop(keyed);
         // The edge table: every directed edge, sorted by its undirected key.
@@ -720,7 +723,7 @@ impl Mesh {
         }
         report.flipped = state.iter().filter(|s| **s == 2).count();
         if fix {
-            for (t, s) in self.indices.iter_mut().zip(&state) {
+            for (t, s) in Arc::make_mut(&mut self.indices).iter_mut().zip(&state) {
                 if *s == 2 { t.swap(1, 2); }
             }
         }
@@ -772,7 +775,7 @@ impl Mesh {
             if turned > 0 {
                 report.flipped += turned;
                 if fix {
-                    for (i, t) in self.indices.iter_mut().enumerate() {
+                    for (i, t) in Arc::make_mut(&mut self.indices).iter_mut().enumerate() {
                         if inside_out[component[i] as usize] { t.swap(1, 2); }
                     }
                 }
@@ -815,7 +818,7 @@ impl Mesh {
             let (a, b, c) = (positions[t[0] as usize], positions[t[1] as usize], positions[t[2] as usize]);
             (b - a).cross(c - a).length_squared() > 0.0
         });
-        let mut m = Mesh { positions, indices, face_ids: Vec::new(), welded: true, ..Default::default() };
+        let mut m = Mesh { positions: Arc::new(positions), indices: Arc::new(indices), face_ids: Vec::new(), welded: true, ..Default::default() };
         m.compact();
         m
     }
@@ -1102,7 +1105,7 @@ pub struct Adjacency {
 impl Adjacency {
     pub fn build(m: &Mesh) -> Adjacency {
         let (verts, tris): (Vec<DVec3>, Vec<[u32; 3]>) = if m.welded {
-            (m.positions.clone(), m.indices.clone())
+            (m.positions.to_vec(), m.indices.to_vec())
         } else {
             let (v, t) = m.weld(1e-5);
             (v, t.iter().map(|t| t.map(|i| i as u32)).collect())
@@ -1189,7 +1192,7 @@ fn outline(profiles: &[&Profile]) -> Result<(Vec<(DVec2, DVec2)>, Vec<[DVec2; 3]
             }
         }
         let idx = earcutr::earcut(&flat, &starts, 2).map_err(|e| format!("could not triangulate the profile: {e:?}"))?;
-        for t in idx.chunks_exact(3) {
+        for t in idx.as_chunks::<3>().0 {
             let v = |i: usize| DVec2::new(flat[i * 2], flat[i * 2 + 1]);
             let mut tri = [v(t[0]), v(t[1]), v(t[2])];
             if signed_area(&tri) < 0.0 {

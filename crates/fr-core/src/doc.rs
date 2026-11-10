@@ -647,9 +647,8 @@ impl Text {
                 let local = surface.to_local(point);
                 if face.loops.iter().filter(|ring| profile::inside(ring, local)).count() % 2 == 0 { continue; }
                 let found_tag = exact::face_tag_at(&body.solids, &body.tags, point);
-                if let (Some(wanted), Some(found)) = (&resolved_tag, &found_tag) {
-                    if wanted != found { continue; }
-                }
+                if let (Some(wanted), Some(found)) = (&resolved_tag, &found_tag)
+                    && wanted != found { continue; }
                 // Keep the user-chosen baseline and orientation on the resolved face.
                 plane.origin += point - anchor;
                 plane.origin -= normal * (plane.origin - surface.origin).dot(normal);
@@ -1015,7 +1014,7 @@ impl Body {
         }
         if self.is_exact() && !steps.iter().any(|p| matches!(p, Place::Scale { factor, .. } if *factor < 0.0)) {
             // Moves keep the kernel's face order, so the tags stay as they are.
-            let moved = steps.iter().fold(std::mem::take(&mut self.solids), |s, p| exact::place(s, p));
+            let moved = steps.iter().fold(std::mem::take(&mut self.solids), exact::place);
             let tags = std::mem::take(&mut self.tags);
             return self.set_exact(moved, tags);
         }
@@ -1764,7 +1763,12 @@ impl Document {
             // long history does not copy every body for every feature.
             let mut bodies = Bodies::new(std::mem::take(&mut built.bodies));
             let mut next_count = counts.get(&f.owner).copied().unwrap_or(0);
-            match self.apply(&mut f, &mut bodies, &mut next_count, &built) {
+            // A panic while building one feature (a bug of ours; the kernel reports its own
+            // failures as errors) is that feature's error, like any other: the bodies stay as
+            // the features before it left them, and the app or MCP server keeps running.
+            let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.apply(&mut f, &mut bodies, &mut next_count, &built)))
+                .unwrap_or_else(|_| Err("Ferrender hit an internal error building this feature; the design is unchanged before it. Please report what the feature was doing.".into()));
+            match applied {
                 Ok(level) => {
                     built.bodies = bodies.commit();
                     counts.insert(f.owner,next_count);

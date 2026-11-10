@@ -323,3 +323,45 @@ fn sculpt_strokes_are_features() {
     let bad = execute(&mut s, &json!({"op": "mesh_sculpt", "body": body, "brush": "pull", "at": [0, 0, 20], "radius": 0.001, "strength": 1}), None);
     assert!(bad.is_err_and(|e| e.contains("no vertex lies within the brush")), "a brush smaller than the mesh's triangles is refused");
 }
+
+#[test]
+fn a_mesh_is_shared_when_cloned_and_copied_only_when_changed() {
+    // An undo step, a document copy and a body made from an import all clone the mesh:
+    // they share its triangles until one of them changes.
+    let (mesh, _) = fr_core::io::import_mesh(&sphere_stl(2000), fr_core::Unit::Mm).unwrap();
+    let mut copy = mesh.clone();
+    assert!(std::ptr::eq(mesh.positions().as_ptr(), copy.positions().as_ptr()), "a clone shares the vertices");
+    assert!(std::ptr::eq(mesh.indices().as_ptr(), copy.indices().as_ptr()), "a clone shares the triangles");
+    assert_eq!(mesh, copy);
+    let before = mesh.positions()[0];
+    copy.map(|p| p + DVec3::new(5.0, 0.0, 0.0));
+    assert_eq!(mesh.positions()[0], before, "changing the copy leaves the original alone");
+    assert!((copy.positions()[0] - before - DVec3::new(5.0, 0.0, 0.0)).length() < 1e-9);
+    assert_ne!(mesh, copy);
+    // The document's copies share it too.
+    let mut s = Session::default();
+    let id = s.edit(|d| Ok(d.add_feature(FeatureKind::Import(mesh.clone())))).unwrap();
+    let snapshot = s.doc.clone();
+    let (FeatureKind::Import(a), FeatureKind::Import(b)) = (&s.doc.feature(id).unwrap().kind, &snapshot.feature(id).unwrap().kind) else { panic!() };
+    assert!(std::ptr::eq(a.positions().as_ptr(), b.positions().as_ptr()));
+}
+
+#[test]
+fn values_over_a_limit_are_refused_when_given_not_at_save() {
+    let mut s = Session::default();
+    let body = run(&mut s, json!({"op": "import_mesh", "path": sphere_stl(2000)}))["body"]["id"].as_u64().unwrap();
+    let before = s.doc.clone();
+    for cmd in [
+        json!({"op": "mesh_smooth", "body": body, "iterations": 501}),
+        json!({"op": "mesh_smooth", "body": body, "iterations": 2, "strength": 1.5}),
+        json!({"op": "mesh_subdivide", "body": body, "levels": 7}),
+    ] {
+        assert!(execute(&mut s, &cmd, None).is_err(), "{cmd} is refused");
+        assert_eq!(s.doc, before, "{cmd} leaves the design as it was");
+    }
+    let huge = json!({"op": "add_feature", "feature": {"id": u32::MAX, "name": "Smooth", "kind": {"MeshOp": {"body": body, "op": {"Smooth": {"iterations": 2, "strength": 0.5}}, "region": null}}}});
+    assert!(execute(&mut s, &huge, None).is_err(), "an id at the top of the range is refused, not overflowed");
+    assert_eq!(s.doc, before);
+    let path = dir().join("limits.ferr");
+    s.save(&path).expect("the design still saves");
+}

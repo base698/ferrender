@@ -46,7 +46,10 @@ type Fallible = Result<Dynamic, Box<EvalAltResult>>;
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 pub const MAX_OPERATIONS: u64 = 50_000_000;
 pub const MAX_CALL_LEVELS: usize = 64;
-pub const MAX_STRING: usize = 1024 * 1024;
+/// Rhai counts every string inside a value toward this, so it also bounds what one
+/// command may return (a filleted body's faces and edges with their tags) and what
+/// `read_text` may load: the same size as the largest file a script may read.
+pub const MAX_STRING: usize = MAX_FILE_BYTES;
 pub const MAX_ARRAY: usize = 1_000_000;
 pub const MAX_MAP: usize = 100_000;
 /// Embedded data above this size leaves an exported script as a file beside it.
@@ -392,7 +395,12 @@ impl Stage {
                             match e.dir.link(&e.name, &name) {
                                 Ok(()) => { previous = Some(name); break; }
                                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                                Err(err) => return Err(format!("could not retain {} for rollback: {err}", e.full.display())),
+                                // A network share (SMB) or FAT volume has no hard links: keep a copy instead.
+                                Err(err) => match retain_copy(&e.dir, &e.name, &name) {
+                                    Ok(true) => { previous = Some(name); break; }
+                                    Ok(false) => continue,
+                                    Err(copy) => return Err(format!("could not retain {} for rollback: {err}; copying it instead: {copy}", e.full.display())),
+                                },
                             }
                         }
                         Some(previous.ok_or("could not reserve a rollback file")?)
@@ -441,6 +449,22 @@ impl Stage {
     fn discard(&mut self) {
         for e in self.entries.drain(..) { let _ = e.dir.unlink(&e.tmp); }
     }
+}
+
+/// Copies `name` to the new entry `to` in the same folder, for volumes that cannot
+/// hard-link. `Ok(false)` when `to` is already taken.
+fn retain_copy(dir: &Dir, name: &OsStr, to: &OsStr) -> R<bool> {
+    let mut source = dir.open_read(name)?;
+    let mut copy = match dir.create_new(to) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    if let Err(e) = std::io::copy(&mut source, &mut copy).and_then(|_| copy.sync_all().or_else(|_| copy.sync_data())) {
+        let _ = dir.unlink(to);
+        return Err(e.to_string());
+    }
+    Ok(true)
 }
 
 impl Drop for Stage {
@@ -815,7 +839,9 @@ pub fn script_name(op: &str) -> &str {
 /// Commands whose `path` argument names a file to read.
 const READS_PATH: &[&str] = &["import_stl", "import_mesh", "mesh_from_image", "open"];
 /// Commands whose `path` argument names a file to write; those writes are staged.
-const WRITES_PATH: &[&str] = &["save", "export_stl", "export_step", "get_viewport_screenshot"];
+// `get_viewport_screenshot` is not here: the command returns its image and takes no
+// path, so staging one published an empty file. Scripts write pictures with `screenshot`.
+const WRITES_PATH: &[&str] = &["save", "export_stl", "export_step"];
 
 /// Runs one command for a script, checking paths against the sandbox, staging
 /// files it writes and noting where a `save` really went.
@@ -841,11 +867,10 @@ fn command(host: &Host, op: &str, args: Map, source_id: &str, at: Position) -> F
     } else {
         format!("source:{source_id}:{}:{}", at.line().unwrap_or(0), at.position().unwrap_or(0))
     };
-    if op == "save" && cmd.get("path").and_then(Value::as_str).is_none() {
-        if let Some(path) = host.session().path.as_ref() {
+    if op == "save" && cmd.get("path").and_then(Value::as_str).is_none()
+        && let Some(path) = host.session().path.as_ref() {
             cmd["path"] = json!(path.display().to_string());
         }
-    }
     let mut stage = host.stage.lock().unwrap_or_else(|e| e.into_inner());
     let mut staged = None;
     let mut saved_to = None;
@@ -1250,6 +1275,22 @@ mod sandbox_tests {
             assert_eq!(std::fs::read_dir(&folder).unwrap().count(), if mode == "cancel" { 1 } else { 2 });
             std::fs::remove_dir_all(folder).unwrap();
         }
+    }
+
+    #[test]
+    fn a_rollback_copy_stands_in_where_hard_links_are_unsupported() {
+        // What commit falls back to on an SMB share: the original is copied to the rollback name.
+        let folder = std::env::temp_dir().join(format!("ferrender-retain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("design.ferr"), "the previous design").unwrap();
+        let dir = crate::sandboxfs::open_beneath(&folder, Path::new(".")).unwrap();
+        assert!(retain_copy(&dir, OsStr::new("design.ferr"), OsStr::new(".kept")).unwrap());
+        assert_eq!(std::fs::read_to_string(folder.join(".kept")).unwrap(), "the previous design");
+        assert!(!retain_copy(&dir, OsStr::new("design.ferr"), OsStr::new(".kept")).unwrap(), "a taken name asks for another");
+        assert!(retain_copy(&dir, OsStr::new("missing.ferr"), OsStr::new(".other")).is_err());
+        assert!(!folder.join(".other").exists());
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

@@ -72,7 +72,16 @@ impl Config {
         match std::fs::read_to_string(Self::path()) {
             Ok(text) => match toml::from_str(&text) {
                 Ok(c) => (c, None),
-                Err(e) => (Config::default(), Some(e.to_string())),
+                // The defaults that replace it are saved over the file at the next settings change.
+                // Keep what was there (the API key, allowed folders) so it can be repaired by hand.
+                Err(e) => {
+                    let kept = Self::path().with_extension("toml.broken");
+                    let note = match std::fs::copy(Self::path(), &kept) {
+                        Ok(_) => format!("{e} (the unreadable settings were kept as {})", kept.display()),
+                        Err(_) => e.to_string(),
+                    };
+                    (Config::default(), Some(note))
+                }
             },
             Err(_) => (Config::default(), None),
         }

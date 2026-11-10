@@ -75,7 +75,17 @@ fn main() -> eframe::Result {
         std::process::exit(cli(&args));
     }
     if args.first().is_some_and(|a| a == "mcp") {
-        let port = args.iter().position(|a| a == "--port").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok()).unwrap_or_else(|| config::Config::load().0.bridge.port);
+        if let Some(unknown) = args.iter().enumerate().skip(1).find(|(i, a)| args[i - 1] != "--port" && !matches!(a.as_str(), "--port" | "--headless")) {
+            eprintln!("ferrender mcp: unknown option {}", unknown.1);
+            std::process::exit(2);
+        }
+        let port = match args.iter().position(|a| a == "--port") {
+            Some(i) => match args.get(i + 1).and_then(|p| p.parse().ok()) {
+                Some(port) => port,
+                None => { eprintln!("ferrender mcp: --port needs a number"); std::process::exit(2); }
+            },
+            None => config::Config::load().0.bridge.port,
+        };
         mcp::serve(port, args.iter().any(|a| a == "--headless"));
         return Ok(());
     }
@@ -114,13 +124,23 @@ fn cli(args: &[String]) -> i32 {
             if skip { skip = false; continue; }
             if a.starts_with("--") {
                 if matches!(a.as_str(), "--input" | "--allow" | "--timeout") { skip = true; }
-                if a == "--save" && args.get(i + 1).is_some_and(|n| n.ends_with(".ferr")) { skip = true; }
+                // Only `run` takes an output name after --save; for `check` every .ferr is a design to check.
+                if a == "--save" && args[0] == "run" && args.get(i + 1).is_some_and(|n| n.ends_with(".ferr")) { skip = true; }
                 continue;
             }
             out.push(a);
         }
         out
     };
+    // A mistyped flag must not pass silently: `--strcit` would let a failing design exit 0.
+    let known: &[&str] = if args[0] == "check" { &["--rebuild", "--save"] } else { &["--input", "--allow", "--timeout", "--yes", "--save", "--strict"] };
+    if let Some(unknown) = args.iter().enumerate().skip(1).find(|(i, a)| {
+        let value = matches!(args[i - 1].as_str(), "--input" | "--allow" | "--timeout") && args[0] == "run";
+        !value && a.starts_with("--") && !known.contains(&a.as_str())
+    }) {
+        eprintln!("ferrender {}: unknown option {}", args[0], unknown.1);
+        return 2;
+    }
     if args[0] == "check" {
         if positional.is_empty() { eprintln!("usage: ferrender check DESIGN.ferr... [--rebuild] [--save]"); return 2; }
         let mut failed = 0;

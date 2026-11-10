@@ -30,6 +30,35 @@ fn tiny_stl() -> PathBuf {
     path
 }
 
+fn tiny_png() -> PathBuf {
+    // A fixed name and fixed pixels, for the same reason: a 4 x 4 ramp, dark to bright.
+    let dir = std::env::temp_dir().join(format!("ferrender-fixture-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ramp.png");
+    let mut data = Vec::new();
+    let mut encoder = png::Encoder::new(&mut data, 4, 4);
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header().unwrap().write_image_data(&(0..16u8).map(|i| i * 17).collect::<Vec<_>>()).unwrap();
+    std::fs::write(&path, data).unwrap();
+    path
+}
+
+/// Every feature kind, by a match with no catch-all: a new kind does not compile
+/// until it is listed here, and the fixture test fails until the document has one.
+fn kind_slot(kind: &FeatureKind) -> usize {
+    match kind {
+        FeatureKind::Sketch(_) => 0, FeatureKind::Plane(_) => 1, FeatureKind::Component(_) => 2, FeatureKind::Primitive(_) => 3,
+        FeatureKind::Remove(_) => 4, FeatureKind::Split(_) => 5, FeatureKind::Extrude(_) => 6, FeatureKind::Revolve(_) => 7,
+        FeatureKind::Sweep(_) => 8, FeatureKind::Loft(_) => 9, FeatureKind::Pipe(_) => 10, FeatureKind::Emboss(_) => 11,
+        FeatureKind::Import(_) => 12, FeatureKind::Transform(_) => 13, FeatureKind::Combine(_) => 14, FeatureKind::Pattern(_) => 15,
+        FeatureKind::Blend(_) => 16, FeatureKind::Shell(_) => 17, FeatureKind::Tilt(_) => 18, FeatureKind::Hole(_) => 19,
+        FeatureKind::Thread(_) => 20, FeatureKind::Text(_) => 21, FeatureKind::MeshOp(_) => 22, FeatureKind::Relief(_) => 23,
+        FeatureKind::ScriptRun(_) => 24,
+    }
+}
+const KIND_SLOTS: usize = 25;
+
 /// One of everything, built through the public API so ids and values are deterministic.
 fn everything() -> Session {
     let mut s = Session::default();
@@ -90,6 +119,52 @@ fn everything() -> Session {
     run(&mut s, json!({"op": "primitive", "type": "sphere", "diameter": 5, "position": [0, -20, 0]}));
     run(&mut s, json!({"op": "move_component", "id": bracket, "translate": [0, 0, 20]}));
     run(&mut s, json!({"op": "activate_component", "id": 0}));
+    // The kinds and document fields added after format 13, each well clear of the rest.
+    run(&mut s, json!({"op": "create_sketch", "plane": "XY", "name": "Oval"}));
+    run(&mut s, json!({"op": "add_geometry", "items": [{"type": "ellipse", "center": [140, 0], "radii": [8, 4], "rotation": 0}]}));
+    run(&mut s, json!({"op": "create_sketch", "plane": "XY", "name": "Sweep path"}));
+    let path = last(&s);
+    run(&mut s, json!({"op": "add_geometry", "sketch": path, "items": [{"type": "polyline", "points": [[200, 0], [210, 0], [210, 10]], "closed": false}]}));
+    run(&mut s, json!({"op": "create_sketch", "plane": "YZ", "offset": 200, "name": "Sweep section"}));
+    let section = last(&s);
+    run(&mut s, json!({"op": "add_geometry", "sketch": section, "items": [{"type": "rect", "from": [-1, -1], "to": [1, 1]}]}));
+    run(&mut s, json!({"op": "sweep", "sketch": section, "path_sketch": path}));
+    run(&mut s, json!({"op": "create_sketch", "plane": "XY", "name": "Loft low"}));
+    let low = last(&s);
+    run(&mut s, json!({"op": "add_geometry", "sketch": low, "items": [{"type": "rect", "from": [238, -2], "to": [242, 2]}]}));
+    run(&mut s, json!({"op": "create_sketch", "plane": "XY", "offset": 10, "name": "Loft high"}));
+    let high = last(&s);
+    run(&mut s, json!({"op": "add_geometry", "sketch": high, "items": [{"type": "rect", "from": [239, -1], "to": [241, 1]}]}));
+    run(&mut s, json!({"op": "loft", "sections": [low, high], "ruled": true}));
+    run(&mut s, json!({"op": "create_sketch", "plane": "XY", "name": "Pipe path"}));
+    let run_of_pipe = last(&s);
+    run(&mut s, json!({"op": "add_geometry", "sketch": run_of_pipe, "items": [{"type": "line", "from": [260, 0], "to": [280, 0]}]}));
+    run(&mut s, json!({"op": "pipe", "path": [{"sketch": run_of_pipe}], "diameter": 2}));
+    run(&mut s, json!({"op": "primitive", "type": "cylinder", "diameter": 20, "height": 30, "position": [300, 0, 0]}));
+    let can = last(&s);
+    run(&mut s, json!({"op": "create_sketch", "plane": "XZ", "name": "Badge"}));
+    let badge = last(&s);
+    run(&mut s, json!({"op": "add_geometry", "sketch": badge, "items": [{"type": "rect", "from": [297, 10], "to": [303, 20]}]}));
+    run(&mut s, json!({"op": "emboss", "sketch": badge, "body": can, "depth": 1}));
+    run(&mut s, json!({"op": "primitive", "type": "box", "width": 10, "depth": 10, "height": 10, "position": [330, 0, 0]}));
+    let wedge = last(&s);
+    run(&mut s, json!({"op": "tilt_face", "body": wedge, "face": [335, 5, 10], "axis": [1, 0, 0], "angle": 10}));
+    run(&mut s, json!({"op": "mesh_smooth", "body": scan, "iterations": 1, "strength": 0.5}));
+    run(&mut s, json!({"op": "mesh_from_image", "path": tiny_png().display().to_string(), "width": 8, "depth": 1, "base": 1, "resolution": 4}));
+    // A script run and the output it owns, written as the app's Scripts menu leaves them.
+    let source = "const META = #{name: \"Peg\"}; fn run(i) { primitive(#{ output_key: \"peg\", type: \"cylinder\", diameter: 4, height: 6, position: [360, 0, 0] }); }";
+    let chip = s.edit(|d| Ok(d.add_feature(FeatureKind::ScriptRun(fr_core::doc::ScriptRun { script_name: "Peg".into(), source: source.into(), source_hash: 7, inputs: json!({}) })))).unwrap();
+    run(&mut s, json!({"op": "primitive", "type": "cylinder", "diameter": 4, "height": 6, "position": [360, 0, 0]}));
+    s.edit(|d| { let peg = d.features.last_mut().unwrap(); peg.made_by = Some(chip); peg.script_key = Some("explicit:peg/0".into()); Ok(()) }).unwrap();
+    run(&mut s, json!({"op": "rename_body", "body": cube, "name": "Housing"}));
+    run(&mut s, json!({"op": "create_sketch", "plane": "YZ", "offset": 400, "name": "Joist section"}));
+    let joist = last(&s);
+    run(&mut s, json!({"op": "add_geometry", "sketch": joist, "items": [{"type": "rect", "from": [-19.05, -92.075], "to": [19.05, 92.075]}]}));
+    run(&mut s, json!({"op": "extrude", "sketch": joist, "distance": 300, "operation": "new"}));
+    let member = last(&s);
+    run(&mut s, json!({"op": "set_structural_member", "body": member, "member": {"species": "Test species", "grade": "Test grade", "nominal_size": "2x8",
+        "design_values": {"e_mpa": 10000, "fb_mpa": 8, "fv_mpa": 1, "source": "Synthetic test values; not a lumber table", "factors": {"bending": {"CD": 1}, "shear": {"CD": 1}}},
+        "density_kg_m3": 500, "end_bearing_mm": [38.1, 38.1]}}));
     s
 }
 
@@ -128,12 +203,16 @@ fn every_feature_kind_serializes_as_the_fixture_says() {
     for expected in ["sketch", "extrude", "pattern", "plane", "fillet", "hole", "revolve", "box", "cylinder", "sphere", "thread", "shell", "text", "import", "transform", "combine", "split", "remove", "component"] {
         assert!(kinds.contains(&expected), "the fixture document has no {expected} feature; kinds: {kinds:?}");
     }
+    let mut seen = [false; KIND_SLOTS];
+    for f in &s.doc.features { seen[kind_slot(&f.kind)] = true; }
+    assert!(seen.iter().all(|s| *s), "the fixture document lacks a feature kind (see kind_slot): {seen:?}; kinds: {kinds:?}");
+    assert!(s.doc.features.iter().any(|f| matches!(&f.kind, FeatureKind::Sketch(sk) if sk.entities.values().any(|e| matches!(e.geom, fr_core::Geom::Ellipse { .. })))), "no ellipse");
+    assert!(!s.doc.body_names.is_empty() && !s.doc.structural_members.is_empty(), "no body name or structural member tag");
     let errors: Vec<_> = s.built.errors.iter().collect();
     assert!(errors.is_empty(), "the fixture document must build cleanly: {errors:?}");
     assert!(io::needs_container(&s.doc), "the import makes this a container design");
-    // The fillet, shell, thread and text learned semantic face tags on their first build, which is format 13.
-    assert_eq!(io::design_version(&s.doc), 13);
-    let _ = s.doc.features.iter().filter(|f| matches!(f.kind, FeatureKind::Import(_))).count();
+    // Everything up to the newest addition (the structural member tag) is in the design.
+    assert_eq!(io::design_version(&s.doc), io::FORMAT_VERSION);
 
     let text = io::to_json(&s.doc);
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/all-features.ferr");
@@ -166,4 +245,22 @@ fn early_v04_ordinal_tag_fixture_migrates_without_changing_its_geometry() {
         FeatureKind::Thread(t)=>assert!(t.tag.as_ref().is_none_or(|t|!t.legacy())),
         _=>{},
     }}
+}
+
+#[test]
+fn the_format_13_fixture_still_opens_and_builds_the_same_features() {
+    // The fixture as it stood before sweep, loft, pipe, emboss, tilt, mesh operations, reliefs,
+    // script runs, the ellipse, body names and structural tags were added to it.
+    let old = io::from_json(include_str!("fixtures/all-features-v13.ferr")).unwrap();
+    let current = everything();
+    assert_eq!(old.features.len(), 25);
+    // Compared as written, with the same allowance for kernel-derived pick coordinates.
+    let (was, now): (J, J) = (serde_json::from_str(&io::to_json(&old)).unwrap(), serde_json::from_str(&io::to_json(&current.doc)).unwrap());
+    for i in 0..25 {
+        if let Some(difference) = fixture_difference(&was["features"][i], &now["features"][i], &format!("$.features[{i}]")) {
+            panic!("what format 13 wrote no longer reads as the same feature: {difference}");
+        }
+    }
+    let s = Session::new(old);
+    assert!(s.built.errors.is_empty(), "the format 13 fixture failed to build: {:?}", s.built.errors);
 }
