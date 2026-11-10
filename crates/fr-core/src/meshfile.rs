@@ -135,7 +135,7 @@ fn stream_binary_stl(reader: &mut impl Read, n: usize, scale: f64) -> Result<Mes
         let bytes = &mut buf[..take * 50];
         let got = read_up_to(reader, bytes).map_err(|e| format!("could not read the STL: {e}"))?;
         if got != take * 50 { return Err("the STL ends before its declared triangle count".into()); }
-        for rec in bytes.chunks_exact(50) {
+        for rec in bytes.as_chunks::<50>().0 {
             let f = |i: usize| f32::from_le_bytes([rec[i], rec[i + 1], rec[i + 2], rec[i + 3]]);
             let v = |i: usize| [f(i), f(i + 4), f(i + 8)];
             welder.triangle(v(12), v(24), v(36))?;
@@ -152,18 +152,15 @@ fn ascii_stl(reader: impl BufRead, scale: f64, expect: usize) -> Result<Mesh, St
     for line in reader.lines() {
         let line = line.map_err(|e| format!("could not read the STL: {e}"))?;
         let mut w = line.split_whitespace();
-        match w.next() {
-            Some("vertex") => {
-                any = true;
-                let c: Vec<f32> = w.map(str::parse).collect::<Result<_, _>>().map_err(|_| "the STL has a malformed vertex")?;
-                if c.len() != 3 { return Err("the STL has a malformed vertex".into()); }
-                corners.push([c[0], c[1], c[2]]);
-                if corners.len() == 3 {
-                    welder.triangle(corners[0], corners[1], corners[2])?;
-                    corners.clear();
-                }
+        if let Some("vertex") = w.next() {
+            any = true;
+            let c: Vec<f32> = w.map(str::parse).collect::<Result<_, _>>().map_err(|_| "the STL has a malformed vertex")?;
+            if c.len() != 3 { return Err("the STL has a malformed vertex".into()); }
+            corners.push([c[0], c[1], c[2]]);
+            if corners.len() == 3 {
+                welder.triangle(corners[0], corners[1], corners[2])?;
+                corners.clear();
             }
-            Some(_) | None => {}
         }
     }
     if !any { return Err("not an STL file".into()); }
@@ -412,10 +409,10 @@ pub fn decode_blob(bytes: &[u8]) -> Result<Mesh, String> {
 
 /// The pre-release blob form: raw little-endian f32 triangle triples.
 pub fn decode_tris_blob(bytes: &[u8]) -> Result<Mesh, String> {
-    if bytes.len() % 36 != 0 { return Err("the mesh blob has an incomplete triangle".into()); }
+    if !bytes.len().is_multiple_of(36) { return Err("the mesh blob has an incomplete triangle".into()); }
     if bytes.len() / 36 > MAX_TRIANGLES { return Err("the legacy mesh blob exceeds the triangle limit".into()); }
-    let f: Vec<f64> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect();
-    let tris: Vec<[DVec3; 3]> = f.chunks_exact(9).map(|t| [DVec3::new(t[0], t[1], t[2]), DVec3::new(t[3], t[4], t[5]), DVec3::new(t[6], t[7], t[8])]).collect();
+    let f: Vec<f64> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect();
+    let tris: Vec<[DVec3; 3]> = f.as_chunks::<9>().0.iter().map(|t| [DVec3::new(t[0], t[1], t[2]), DVec3::new(t[3], t[4], t[5]), DVec3::new(t[6], t[7], t[8])]).collect();
     let m = Mesh::welded_from_tris(&tris);
     m.validate()?;
     Ok(m)

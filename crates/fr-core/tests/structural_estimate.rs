@@ -26,7 +26,7 @@ fn joists(s: &mut Session, at: &[f64]) -> Vec<Id> {
     }).collect()
 }
 
-fn member<'a>(out: &'a J, body: Id) -> &'a J {
+fn member(out: &J, body: Id) -> &J {
     out["members"].as_array().unwrap().iter().find(|m| m["body"] == body).unwrap()
 }
 

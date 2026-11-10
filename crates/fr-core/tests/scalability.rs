@@ -8,7 +8,8 @@ use serde_json::json;
 fn synthetic(path: &Path, triangles: usize) {
     let (rows, cols) = match triangles { 5_000_000 => (1001usize,2500usize), 12_000_000 => (2001,3000), _ => panic!("choose 5000000 or 12000000") };
     let at = |i: usize,j: usize| {
-        if i==0 {return DVec3::Z*50.;} if i==rows {return -DVec3::Z*50.;}
+        if i==0 {return DVec3::Z*50.;}
+        if i==rows {return -DVec3::Z*50.;}
         let u=i as f64/rows as f64*std::f64::consts::PI;
         let v=(j%cols) as f64/cols as f64*std::f64::consts::TAU;
         let r=50.+2.*(u*40.).sin()*(v*30.).cos();

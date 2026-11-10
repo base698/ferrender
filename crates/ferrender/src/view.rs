@@ -1527,12 +1527,11 @@ fn draw_tool(app: &mut App, ui: &Ui, resp: &egui::Response, painter: &Painter, s
         app.typed = Some(t);
     }
     if (place || resp.clicked_by(PointerButton::Primary)) && !names.is_empty() {
-        if let Some(t) = &app.typed {
-            if let Some((i, bad)) = t.fields.iter().enumerate().find(|(i, f)| !f.trim().is_empty() && if field_angle(*i) { App::typed_angle(app.doc(), f, tool == Tool::TangentArc).is_none() } else { App::typed_size(app.doc(), f).is_none() }) {
+        if let Some(t) = &app.typed
+            && let Some((i, bad)) = t.fields.iter().enumerate().find(|(i, f)| !f.trim().is_empty() && if field_angle(*i) { App::typed_angle(app.doc(), f, tool == Tool::TangentArc).is_none() } else { App::typed_size(app.doc(), f).is_none() }) {
                 app.toast(format!("\"{bad}\" is not a valid {}.", names[i].to_lowercase()));
                 return;
             }
-        }
         // TextEdit can receive text and Enter in the same frame. Recompute from the
         // final text before committing, so a fresh dimension never pulls the first
         // endpoint away from the position the user already placed.

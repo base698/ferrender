@@ -32,7 +32,7 @@ fn smooth_mesh_outlines_are_translation_invariant() {
     let mut moved=m; moved.map(|p|p+shift);
     let b=session(moved);
     let second=render(&b,Camera{target:shift,..cam});
-    let changed=first.rgba.chunks_exact(4).zip(second.rgba.chunks_exact(4)).filter(|(a,b)|(0..3).any(|i|a[i].abs_diff(b[i])>5)).count();
+    let changed=first.rgba.as_chunks::<4>().0.iter().zip(second.rgba.as_chunks::<4>().0).filter(|(a,b)|(0..3).any(|i|a[i].abs_diff(b[i])>5)).count();
     assert!(changed<20,"translating both the mesh and camera must not create false outlines: {changed} changed pixels");
     let interior=(120..200).flat_map(|y|(120..200).map(move|x|y*320+x));
     let dark=interior.filter(|p|first.rgba[p*4]<80).count();

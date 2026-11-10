@@ -429,7 +429,7 @@ pub fn status(app: &mut App, ui: &mut Ui) {
                     let u = app.doc().units;
                     let size = b.mesh.bbox().map_or(glam::DVec3::ZERO, |(lo, hi)| hi - lo) / u.mm();
                     let n = |v: f64| fr_core::units::trim_num(v, 3);
-                    ui.label(RichText::new(format!("{} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", format!("{} › {}", app.doc().component_name(b.component), b.name), if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.len())).color(colors.muted));
+                    ui.label(RichText::new(format!("{} › {} ({}): {} \u{d7} {} \u{d7} {} {}, {} {}\u{b3}, {} triangles", app.doc().component_name(b.component), b.name, if b.is_exact() { "exact" } else { "mesh" }, n(size.x), n(size.y), n(size.z), u.name(), n(b.mesh.volume() / u.mm().powi(3)), u.name(), b.mesh.len())).color(colors.muted));
                 }
                 if let Some(f) = &app.sel_face
                     && let Some(b) = app.session.built.body(f.body)
@@ -1770,9 +1770,8 @@ pub fn windows(app: &mut App, ctx: &Context) {
     let change = editor.show(ctx, app.doc());
     if !was_calibrating && editor.is_calibrating() { app.fit_pending = true; }
     app.reference_editor = editor;
-    if let Some(change) = change && app.mode == Mode::Sketch(change.sketch) {
-        if app.sketch_edit(|sk, _| { sk.reference = change.image; Ok(()) }) { app.fit_pending = true; }
-    }
+    if let Some(change) = change && app.mode == Mode::Sketch(change.sketch)
+        && app.sketch_edit(|sk, _| { sk.reference = change.image; Ok(()) }) { app.fit_pending = true; }
 
     view_buttons(app, ctx);
     dialogs(app, ctx);

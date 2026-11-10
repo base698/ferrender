@@ -478,10 +478,10 @@ pub fn profiles(sk: &Sketch) -> Vec<Profile> {
     prune(&mut edges);
 
     // Half-edge 2i runs along edge i, 2i+1 runs back.
-    let from = |h: usize| if h % 2 == 0 { edges[h / 2].a } else { edges[h / 2].b };
+    let from = |h: usize| if h.is_multiple_of(2) { edges[h / 2].a } else { edges[h / 2].b };
     let dir = |h: usize| {
         let p = &edges[h / 2].pts;
-        let d = if h % 2 == 0 { p[1] - p[0] } else { p[p.len() - 2] - p[p.len() - 1] };
+        let d = if h.is_multiple_of(2) { p[1] - p[0] } else { p[p.len() - 2] - p[p.len() - 1] };
         d.y.atan2(d.x)
     };
     let mut out: BTreeMap<usize, Vec<usize>> = BTreeMap::new();

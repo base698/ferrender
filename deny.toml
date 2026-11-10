@@ -13,6 +13,9 @@ yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2026-0249", reason = "smartstring is a required dependency of rhai 1.26.1, the newest release; informational unmaintained notice with no known vulnerability. Remove when Rhai migrates." },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser no longer reads Ferrender's fonts or designs. It remains on Linux only, through winit's Wayland title-bar renderer (sctk-adwaita, ab_glyph), which reads system interface fonts." },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant is the wire format of zbus, the only maintained pure-Rust D-Bus client. Linux only: eframe's accessibility bridge (accesskit), the rfd file-dialog portal and Ferrender's dark/light theme query use it to talk to the local session bus. Informational unmaintained notice with no known vulnerability and no replacement." },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: same Linux-only D-Bus stack as RUSTSEC-2026-0370; informational, no replacement." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: same Linux-only D-Bus stack as RUSTSEC-2026-0370; informational, no replacement." },
 ]
 
 [sources]

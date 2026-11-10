@@ -180,13 +180,13 @@ fn regions(mut rings: Vec<Vec<DVec2>>) -> Result<Vec<Profile>, String> {
         })
         .collect();
     for (i, ring) in rings.iter_mut().enumerate() {
-        let positive = depths[i] % 2 == 0;
+        let positive = depths[i].is_multiple_of(2);
         if (signed_area(ring) > 0.0) != positive {
             ring.reverse();
         }
     }
     Ok((0..rings.len())
-        .filter(|i| depths[*i] % 2 == 0)
+        .filter(|i| depths[*i].is_multiple_of(2))
         .map(|i| Profile {
             outer: rings[i].clone(),
             holes: (0..rings.len())

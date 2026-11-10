@@ -72,11 +72,16 @@ def main():
             raise SystemExit(f'Missing bundled OpenCascade notice: {filename}')
         shutil.copy2(notice, licenses/filename)
     registry = Path(os.environ.get('CARGO_HOME', str(Path.home()/'.cargo')))/'registry/src'
-    cadrum = sorted(registry.glob('*/cadrum-0.8.20/LICENSE'))
+    # The version cadrum is locked to, so a dependency bump cannot leave this behind.
+    locked = re.search(r'name = "cadrum"\nversion = "([^"]+)"', (ROOT/'Cargo.lock').read_text())
+    if not locked:
+        raise SystemExit('Cargo.lock does not name cadrum')
+    cadrum_version = locked.group(1)
+    cadrum = sorted(registry.glob(f'*/cadrum-{cadrum_version}/LICENSE'))
     if not cadrum:
         raise SystemExit('Missing cadrum license')
     shutil.copy2(cadrum[0], licenses/'cadrum-MIT.txt')
-    (licenses/'SOURCE.txt').write_text('Ferrender source and build instructions: https://github.com/base698/ferrender/tree/'+tag+'\nOpenCascade source: https://github.com/Open-Cascade-SAS/OCCT/tree/V8_0_1\ncadrum source: https://crates.io/crates/cadrum/0.8.20\n')
+    (licenses/'SOURCE.txt').write_text('Ferrender source and build instructions: https://github.com/base698/ferrender/tree/'+tag+'\nOpenCascade source: https://github.com/Open-Cascade-SAS/OCCT/tree/V8_0_1\ncadrum source: https://crates.io/crates/cadrum/'+cadrum_version+'\n')
     install = 'macOS: Move Ferrender.app to Applications (or your Desktop). This build is ad-hoc signed, not notarized. If macOS blocks the downloaded app, use System Settings > Privacy & Security > Open Anyway after reviewing the source. Choose the download matching Apple Silicon or Intel.\n' if mac else 'Linux x86-64: Extract the entire archive and run ./ferrender from the extracted folder. Built and tested on Ubuntu 24.04 (glibc 2.39); older distributions may not run it. A desktop session with X11 or Wayland and a working OpenGL/Vulkan driver is required. On Ubuntu, runtime packages include libx11-6 libxkbcommon0 libwayland-client0 libegl1 libgl1 libvulkan1 mesa-vulkan-drivers libstdc++6 xdg-desktop-portal.\n'
     (stage/'INSTALL.txt').write_text(install+'\nOpen Help > About Ferrender to verify version and commit. Documentation: README.md and BISHOP_TUTORIAL.md.\n')
     # Verify the packaged CLI can create a real solid; no GUI or existing document is touched.

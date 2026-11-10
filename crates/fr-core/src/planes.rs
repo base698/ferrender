@@ -125,9 +125,8 @@ pub fn face_tagged(body: &Body, at: DVec3, frame: Option<[DVec3;2]>, tag: Option
         let q=plane.to_local(p);
         if f.loops.iter().filter(|ring| crate::profile::inside(ring,q)).count()%2==1 {
             let found=crate::exact::face_tag_at(&body.solids,&body.tags,p);
-            if let (Some(wanted), Some(actual)) = (resolved_tag.as_ref(), found.as_ref()) {
-                if wanted != actual { continue; }
-            }
+            if let (Some(wanted), Some(actual)) = (resolved_tag.as_ref(), found.as_ref())
+                && wanted != actual { continue; }
             return Ok((f,found,level));
         }
     }

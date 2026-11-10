@@ -49,7 +49,7 @@ fn check_pairs(a: &Mesh, b: &Mesh, same: bool, max: usize, max_examined: usize, 
             // work between the outer-loop deadline checks.
             examined += 1;
             if examined > max_examined { return Err(BUDGET_ERROR.into()); }
-            if examined % 4096 == 0 { check_time(start, limit)?; }
+            if examined.is_multiple_of(4096) { check_time(start, limit)?; }
             if same && (j <= i || a.indices()[i].iter().any(|v| b.indices()[j].contains(v))) { continue; }
             let u = b.tri(j);
             if u[0].min(u[1]).min(u[2]).cmpgt(hi).any() || u[0].max(u[1]).max(u[2]).cmplt(lo).any() { continue; }
@@ -91,7 +91,7 @@ fn output(solid: &Manifold) -> Result<Mesh, String> {
         remap[from as usize] = to as u32;
     }
     let positions = gl.vert_properties.chunks_exact(gl.num_prop as usize).map(|p| DVec3::new(p[0], p[1], p[2])).collect();
-    let indices = gl.tri_verts.chunks_exact(3).map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]]).collect();
+    let indices = gl.tri_verts.as_chunks::<3>().0.iter().map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]]).collect();
     let mut out = Mesh::from_indexed(positions, indices, true)?;
     // The container and STL formats use f32 coordinates. Check the actual
     // representable result now; a watertight f64 result alone is insufficient.

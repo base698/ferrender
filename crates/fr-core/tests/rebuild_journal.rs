@@ -155,7 +155,7 @@ fn fillet_all_resolves_edges_that_share_a_tag() {
     assert_ne!(shape(&s), before, "every edge was rounded");
     // The same by one edge of a shared pair, named by the point the body reports.
     assert!(s.undo());
-    let shared = edges.iter().find(|e| tags.iter().filter(|t| **t == e["tag"].to_string()).count() > 1).unwrap();
+    let shared = edges.iter().find(|e| tags.iter().filter(|t| t.as_str() == e["tag"].to_string().as_str()).count() > 1).unwrap();
     run(&mut s, json!({"op": "fillet_edges", "body": torus, "edges": [shared["point"].clone()], "radius": 0.5}));
     assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
 }

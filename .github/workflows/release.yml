@@ -30,7 +30,6 @@ jobs:
             platform: linux-x86_64
     env:
       CARGO_TERM_COLOR: always
-      RUSTUP_TOOLCHAIN: stable
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -50,7 +49,7 @@ jobs:
           assert match and match[1] == version, 'Run on a matching version tag'
           PY
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal --component clippy
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'

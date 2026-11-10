@@ -304,9 +304,9 @@ impl Frame {
             }
         }
         Ok(Solution {
-            displacements: u.chunks_exact(3).map(|v| [v[0], v[1], v[2]]).collect(),
+            displacements: u.as_chunks::<3>().0.iter().map(|v| [v[0], v[1], v[2]]).collect(),
             reactions: reactions
-                .chunks_exact(3)
+                .as_chunks::<3>().0.iter()
                 .map(|v| [v[0], v[1], v[2]])
                 .collect(),
             members: elements

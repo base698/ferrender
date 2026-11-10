@@ -1,5 +1,5 @@
 //! Exported generators must survive a fresh session and preserve document meaning.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use fr_core::{Session, FeatureKind, api::execute, script::{self, Export, Request}};
 use serde_json::{json, Value};
@@ -16,14 +16,14 @@ fn dir(name: &str) -> PathBuf {
 }
 
 /// Writes the export beside its sidecars and runs it from there.
-fn replay_export(export: &Export, folder: &PathBuf, inputs: Value) -> Session {
+fn replay_export(export: &Export, folder: &Path, inputs: Value) -> Session {
     script::meta(&export.source).unwrap();
     for (name, bytes) in &export.files { std::fs::write(folder.join(name), bytes).unwrap(); }
     std::fs::write(folder.join("design.rhai"), &export.source).unwrap();
     let mut req = Request::new(export.source.clone());
     req.inputs = inputs;
-    req.script_dir = Some(folder.clone());
-    req.sandbox.allowed = vec![folder.clone()];
+    req.script_dir = Some(folder.to_path_buf());
+    req.sandbox.allowed = vec![folder.to_path_buf()];
     let mut target = Session::default();
     script::run(&mut target, &req).unwrap_or_else(|e| panic!("{e}\n{}", export.source));
     target

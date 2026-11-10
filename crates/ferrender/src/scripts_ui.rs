@@ -341,7 +341,7 @@ impl App {
                         let errors = self.session.built.errors.len();
                         let what = if outcome.exports.is_empty() { String::new() } else { format!(", wrote {} file{}", outcome.exports.len(), if outcome.exports.len() == 1 { "" } else { "s" }) };
                         self.toast(format!("{} finished in {:.1} s: {} feature{}{}{}", run.name, run.started.elapsed().as_secs_f64(), made.len(), if made.len() == 1 { "" } else { "s" }, what, if errors > 0 { format!("; {errors} timeline error{}", if errors == 1 { "" } else { "s" }) } else { String::new() }));
-                        self.fit_pending = made.len() > 0 && self.session.built.bodies.len() <= 1;
+                        self.fit_pending = !made.is_empty() && self.session.built.bodies.len() <= 1;
                     }
                     Err(e) => self.toast(e),
                 }

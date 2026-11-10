@@ -243,9 +243,8 @@ fn plane_dependencies(d: &Document, f: &crate::Feature) -> Result<(),String> {
     use crate::planes::{PlaneRef,PointRef,PlaneKind};
     let position=d.features.iter().position(|other|other.id==f.id).unwrap();
     let earlier=|id:Id,what:&str,accept:fn(&FeatureKind)->bool| -> Result<(),String> {
-        if let Some((index,feature))=d.features.iter().enumerate().find(|(_,feature)|feature.id==id) {
-            if index>=position || !accept(&feature.kind) {return Err(format!("{} {id} must name an earlier {what}",f.name));}
-        }
+        if let Some((index,feature))=d.features.iter().enumerate().find(|(_,feature)|feature.id==id)
+            && (index>=position || !accept(&feature.kind)) {return Err(format!("{} {id} must name an earlier {what}",f.name));}
         // Missing dependencies remain repairable timeline errors after deletion.
         Ok(())
     };

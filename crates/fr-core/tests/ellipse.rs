@@ -180,7 +180,7 @@ fn an_ellipse_can_be_a_sweep_path() {
     let (profile, _) = sketch(&mut s, "XZ", 0.0, json!([{"type": "circle", "center": [30, 0], "radius": 2}]));
     cmd(&mut s, json!({"op": "sweep", "sketch": profile, "path_sketch": path}));
     assert!(s.built.errors.is_empty(), "{:?}", s.built.errors);
-    let perimeter = PI * (3.0 * 50.0 - ((3.0 * 30.0 + 20.0) * (30.0 + 3.0 * 20.0) as f64).sqrt());
+    let perimeter = PI * (3.0 * 50.0 - ((3.0 * 30.0 + 20.0) * (30.0_f64 + 3.0 * 20.0)).sqrt());
     assert!(within(volume(&s), PI * 4.0 * perimeter, 5e-3), "{} is not near {}", volume(&s), PI * 4.0 * perimeter);
 }
 

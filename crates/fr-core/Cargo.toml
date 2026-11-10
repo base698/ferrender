@@ -3,6 +3,9 @@ name = "fr-core"
 version = "0.4.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 fr-structure = { version = "0.4.0", path = "../fr-structure" }
 base64 = "0.23.1"

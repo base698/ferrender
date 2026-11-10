@@ -76,7 +76,7 @@ pub fn boundary_loops(m: &Mesh) -> Vec<Vec<u32>> {
     }
     // A boundary directed edge has no opposite; following them in reverse keeps the loop's orientation with the surface.
     let mut next: FxMap<u32, u32> = FxMap::default();
-    for (&(a, b), _) in &count {
+    for &(a, b) in count.keys() {
         if !count.contains_key(&(b, a)) { next.insert(b, a); }
     }
     let mut loops = Vec::new();
@@ -447,7 +447,7 @@ fn cap_loops(m: &Mesh, plane: &Plane, flip: bool) -> Vec<[u32; 3]> {
             points.extend(loops[*h].iter().copied());
         }
         let Ok(idx) = earcutr::earcut(&flat, &starts, 2) else { continue };
-        for t in idx.chunks_exact(3) {
+        for t in idx.as_chunks::<3>().0 {
             let mut tri = [points[t[0]], points[t[1]], points[t[2]]];
             if flip { tri.swap(1, 2); }
             out.push(tri);

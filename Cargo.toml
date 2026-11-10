@@ -2,6 +2,18 @@
 resolver = "2"
 members = ["crates/fr-core", "crates/fr-structure", "crates/ferrender"]
 
+# CI runs clippy with warnings denied. These are allowed on purpose.
+[workspace.lints.clippy]
+# `!(x > 0.0)` is how the geometry code refuses NaN along with non-positive values.
+neg_cmp_op_on_partial_ord = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+needless_range_loop = "allow"
+# Much of the code is written compactly (`hi=-lo;`, `}} if`), which these read as typos.
+suspicious_assignment_formatting = "allow"
+suspicious_else_formatting = "allow"
+
 [profile.dev]
 opt-level = 1
 
