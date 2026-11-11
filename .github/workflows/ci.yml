@@ -66,6 +66,8 @@ jobs:
           python3 scripts/test_workflow_pins.py
           python3 scripts/test_dependency_notices.py
           python3 scripts/bundle-dependency-notices.py
+          # The build cache restores this folder without its verification marker; fetch and verify afresh.
+          rm -rf target/verified-occt
           python3 scripts/prepare-occt.py --github-env
       - name: Install Linux build and offscreen rendering prerequisites
         if: runner.os == 'Linux'
