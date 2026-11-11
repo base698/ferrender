@@ -56,7 +56,7 @@ def main():
         if 'not found' in dependencies:
             raise SystemExit('A runtime dependency is missing: ' + dependencies)
         (stage/'LINUX-DEPENDENCIES.txt').write_text(dependencies)
-    for doc in ['README.md', 'BISHOP_TUTORIAL.md', 'RELEASING.md']:
+    for doc in ['README.md', 'BISHOP_TUTORIAL.md', 'RELEASING.md', 'LICENSE']:
         shutil.copy2(ROOT/doc, stage/doc)
     shutil.copytree(ROOT/'docs', stage/'docs')
     (stage/'BUILD-INFO.txt').write_text(info)

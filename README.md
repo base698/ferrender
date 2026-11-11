@@ -856,3 +856,8 @@ port = 47821   # private socket channel for `ferrender mcp`, not a TCP port
 Solids come from [OpenCascade](https://dev.opencascade.org/) through the [cadrum](https://crates.io/crates/cadrum)
 binding. Ferrender is an independent project. It is not affiliated with or endorsed by Autodesk, and "Fusion" is
 their trademark.
+
+## License
+
+Ferrender is released under the [MIT License](LICENSE). Release archives also carry the licenses of what they bundle:
+OpenCascade (LGPL 2.1 with its exception), cadrum, the Rust dependencies and the Noto Sans font.

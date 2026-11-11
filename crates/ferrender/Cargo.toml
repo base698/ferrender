@@ -2,6 +2,7 @@
 name = "ferrender"
 version = "0.4.0"
 edition = "2024"
+license = "MIT"
 
 [lints]
 workspace = true

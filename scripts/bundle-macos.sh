@@ -16,6 +16,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/ferrender "$app/Contents/MacOS/ferrender"
 # The embedded font is redistributed with the app; include its license and provenance.
 mkdir -p "$app/Contents/Resources/licenses"
+cp LICENSE "$app/Contents/Resources/licenses/Ferrender-MIT.txt"
 cp crates/fr-core/assets/fonts/OFL.txt "$app/Contents/Resources/licenses/NotoSans-OFL.txt"
 cp crates/fr-core/assets/fonts/PROVENANCE.txt "$app/Contents/Resources/licenses/NotoSans-PROVENANCE.txt"
 python3 scripts/bundle-dependency-notices.py --output "$app/Contents/Resources/licenses/rust-dependencies"
