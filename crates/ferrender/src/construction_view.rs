@@ -115,7 +115,12 @@ pub fn interact(app: &mut App, painter: &Painter, hover: Option<Pos2>, clicked: 
             }
         } else if clicked.is_some() { app.toast("Choose an existing sketch point or body vertex, or type coordinates."); }
     } else if let Some(pos) = clicked {
-        if d.kind == 0 && !d.pick_to && let Some(plane) = pick_plane_before_face(app, pos) {
+        if d.kind == 0 && d.pick_to && let Some((_, point)) = pick_point(app, pos) && let Some((plane, _, _)) = offset_base(app) {
+            // A sketch point or body corner: the plane is moved along its normal to pass through it.
+            let distance = (point - plane.origin).dot(plane.normal());
+            d.text = format!("{} mm", fr_core::units::trim_num(distance, 6));
+            d.pick_to = false;
+        } else if d.kind == 0 && !d.pick_to && let Some(plane) = pick_plane_before_face(app, pos) {
             d.base = Some(PlaneRef::Plane(plane));
         } else if let Some(face) = pick_face(app, pos) {
             if face.plane.is_none() { app.toast("Choose a flat face."); return; }
@@ -130,7 +135,7 @@ pub fn interact(app: &mut App, painter: &Painter, hover: Option<Pos2>, clicked: 
                     d.pick_to = false;
                 }
             } else if let Some(body) = app.plane_source().body(face.body) {
-                let reference = PlaneRef::Face { body: body.id, at: body.to_local(face.at), frame: body.local_frame() };
+                let reference = PlaneRef::Face { body: body.id, at: body.to_local(face.at), frame: body.local_frame(), tag: None };
                 if d.kind == 0 { d.base = Some(reference); }
                 else {
                     if d.faces.len() == 2 { d.faces.clear(); }

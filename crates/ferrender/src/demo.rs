@@ -241,7 +241,7 @@ fn readme_part() {
     run(&mut h, Action::Cancel);
 
     // Section Analysis through the bore.
-    h.state_mut().section = crate::app::Section { on: true, axis: 1, offset: 20.0, flip: false };
+    h.state_mut().section = crate::app::Section { on: true, axis: 1, plane: None, offset: 20.0, flip: false };
     h.state_mut().show_section = true;
     look(&mut h, "iso", 1.5, Some([44.0, 14.0, 6.0]));
     shot(&mut h, "section.png");

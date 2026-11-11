@@ -44,7 +44,7 @@ impl Face {
         let plane = body.mesh.face_plane(&tris).map(|(p, n)| Plane::from_normal(n * n.dot(p), n));
         let outline = body.mesh.face_loops(&tris);
         let loops = plane.map_or(Vec::new(), |pl| outline.iter().map(|l| l.iter().map(|p| pl.to_local(*p)).collect()).collect());
-        let at = body.mesh.tris[tri].iter().sum::<DVec3>() / 3.0;
+        let at = body.mesh.tri(tri).iter().sum::<DVec3>() / 3.0;
         let exact_id = body.mesh.face_ids.get(tri).copied();
         Face { body: body.id, area: body.mesh.face_area(&tris), tris, plane, outline, loops, exact_edges: None, exact_id, at }
     }
@@ -76,6 +76,9 @@ impl Face {
                     }
                     Seg::Circle(centre,r) => { let c=sk.point_at(centre,1e-7); sk.add(Geom::Circle{c,r},false) },
                     Seg::Spline(points) => { let ids=points.map(|p|sk.point_at(p,1e-7)); sk.add_spline(ids,false)? },
+                    // A sketch has no part-ellipse entity; faces never give one in any case.
+                    Seg::EllipseArc(..) => continue,
+                    Seg::Ellipse(centre,u,v) => { let c=sk.point_at(centre,1e-7); let a=sk.point_at(centre+u,1e-7); sk.add_ellipse(c,a,v.length(),false)? },
                 };
                 sk.fixed.extend(sk.ent_points(id));
                 if matches!(sk.entities[&id].geom,Geom::Circle{..}) {sk.fixed.insert(id);}

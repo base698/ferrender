@@ -1,7 +1,7 @@
 # TODO
 
-Checked items were addressed on the `cadrum-kernel` branch (2026-10-06); notes on
-how are at the end. Unchecked items are still open.
+Checked items are done (the first on the `cadrum-kernel` work of 2026-10-06, long since
+part of `main`); notes on how are at the end. Unchecked items are still open.
 
 What an AI agent driving Ferrender over MCP needed and didn't have. Collected while
 building a screw, a panel with four screws, and a blocky crocodile figure (24 bodies).
@@ -66,11 +66,17 @@ Ordered roughly by how much each one cost.
 ## Missing shapes and features
 
 - [x] **Threads.** `thread` on a rod or hole, and `hole` with `"modeled": true`. A general
-      helix and sweep (springs, coils) is still not there.
-- [ ] **Loft** between profiles, for limbs, snouts and tails that change section.
+      helix (springs, coils) is still not there.
+- [x] **Sweep** a profile along a path in another sketch: tangent runs exactly, sharp corners
+      mitred, closed paths, Follow or Fixed orientation. Still missing: paths that leave one
+      plane (helix, 3D splines), twist and scale along the path, a guide rail, and rounded
+      instead of mitred corners.
+- [x] **Loft** between profiles, for limbs, snouts and tails that change section. Sections
+      need equal edge counts and no holes; a section that is a single point, guide rails and
+      a closed loop of sections are not built.
 - [x] **Spline sketch items.** 0.2 adds editable curves through four fit points.
-- [ ] **Sphere and ellipse** sketch items or primitives. Joints, eyes and beads
-      were faked with flat-ended cylinders.
+- [x] **Sphere and ellipse** sketch items or primitives. Sphere, cone and torus are
+      primitives (0.3); the ellipse is a sketch item (0.4).
 - [ ] **More spline controls.** Arbitrary fit-point counts, periodic splines, and tangent
       constraints for spline endpoints.
 - [x] **Edge fillet and chamfer on solids.** Sketch corners can be rounded; body edges
@@ -98,7 +104,7 @@ proposed or noted as limits along the way and are still open.
 
 ### Set aside after the Fusion tutorial review ("leave for later")
 
-- [ ] **Loft** between profiles (the moka pot's spout). The kernel has it; not wired up.
+- [x] **Loft** between profiles (the moka pot's spout).
 - [x] **Threads** and a **Hole** feature with a thread catalog (clearance, tapped,
       counterbore, countersink). Still open on these:
   - [ ] Check the catalog's tap drill and clearance numbers against ISO 273 and the inch
@@ -139,10 +145,12 @@ proposed or noted as limits along the way and are still open.
 
 - [ ] **The built-in Assistant against the live Claude API** (no key in the build
       environment).
-- [ ] **Linux build and run.**
+- [x] **Linux build and run.** CI builds, tests (the full UI suite under software
+      Vulkan) and packages Linux x86-64 on every pull request. A real desktop session
+      is still only checked by hand.
 - [ ] **Trackpad gestures, paste between two windows, Enter confirming a dialog** by hand.
 - [ ] **STEP files opened in another CAD program.**
-- [ ] **Merge `cadrum-kernel` into `main`** once it has been tried.
+- [x] **Merge `cadrum-kernel` into `main`.** The exact kernel has been on `main` since 0.2.2.
 
 ## How the checked items were addressed
 

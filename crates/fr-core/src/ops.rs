@@ -19,7 +19,7 @@ enum Shape {
 fn shape(sk: &Sketch, id: Id) -> Option<Shape> {
     match sk.entities.get(&id)?.geom {
         Geom::Line { a, b } => Some(Shape::Seg(sk.pos(a), sk.pos(b))),
-        Geom::Spline { .. } => None,
+        Geom::Spline { .. } | Geom::Ellipse { .. } => None,
         Geom::Circle { c, r } => Some(Shape::Arc { c: sk.pos(c), r, a0: 0.0, sweep: TAU }),
         Geom::Arc { c, .. } => {
             let (a0, sweep) = sk.arc_angles(id)?;
@@ -204,6 +204,7 @@ impl Sketch {
             let geom = match e.geom {
                 Geom::Line { a, b } => Geom::Line { a: map[&a], b: map[&b] },
                 Geom::Spline { a,b,c,d } => Geom::Spline { a:map[&a], b:map[&b], c:map[&c], d:map[&d] },
+                Geom::Ellipse { c, a, b } => Geom::Ellipse { c: map[&c], a: map[&a], b: map[&b] },
                 Geom::Circle { c, r } => Geom::Circle { c: map[&c], r },
                 // A reflection turns counter-clockwise into clockwise, so the ends swap.
                 Geom::Arc { c, s, e } => Geom::Arc { c: map[&c], s: map[&e], e: map[&s] },
@@ -302,6 +303,7 @@ impl Sketch {
                 }
                 Some(Geom::Line { a, b }) => lines.push((*id, a, b)),
                 Some(Geom::Arc { .. } | Geom::Spline { .. }) => return Err("Offset works on lines and circles; arcs and splines are not supported yet.".into()),
+                Some(Geom::Ellipse { .. }) => return Err("Offset works on lines and circles; the offset of an ellipse is not an ellipse, so it is not supported.".into()),
                 None => {}
             }
         }
@@ -349,6 +351,22 @@ impl Sketch {
                 self.fixed.extend([c, id]);
                 out.push(id);
                 continue;
+            }
+            // Seen edge-on, a flat outline falls along one line. That is one line from end to
+            // end, whose middle is the outline's middle, not every step of the outline along it.
+            if let Some(first) = pts.first() {
+                let far = |from: DVec2| pts.iter().copied().max_by(|a, b| a.distance(from).total_cmp(&b.distance(from))).unwrap_or(from);
+                let (a, b) = (far(*first), far(far(*first)));
+                let along = b - a;
+                if along.length() > 1e-6 && pts.iter().all(|p| (along.perp_dot(*p - a) / along.length()).abs() < 1e-6) {
+                    let (a, b) = (self.point_at(a, 1e-6), self.point_at(b, 1e-6));
+                    let exists = self.entities.values().any(|e| matches!(e.geom, Geom::Line { a: x, b: y } if (x, y) == (a, b) || (x, y) == (b, a)));
+                    if a != b && !exists {
+                        out.push(self.add_line(a, b));
+                        self.fixed.extend([a, b]);
+                    }
+                    continue;
+                }
             }
             let ids: Vec<Id> = pts.iter().map(|p| self.point_at(*p, 1e-6)).collect();
             for i in 0..ids.len() {

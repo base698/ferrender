@@ -58,7 +58,7 @@ impl App {
         self.finish_sketch();
         self.cancel_tool();
         self.dialog = Dialog::None;
-        match self.session.edit(|doc| doc.activate_component(id)) {
+        match self.session.edit_without_rebuild(|doc| doc.activate_component(id)) {
             Ok(()) => { self.sel_component = Some(id); self.sel_body = None; self.sel_face = None; self.refresh(); }
             Err(error) => self.toast(error),
         }
@@ -178,7 +178,7 @@ fn component_node(app: &mut App, ui: &mut Ui, id: Id) {
                     }
                 });
                 egui::CollapsingHeader::new(format!("{} Construction", icon::FOLDER)).default_open(true).show(ui, |ui| {
-                    let planes: Vec<_> = app.doc().features.iter().filter_map(|f| if f.owner == id { if let FeatureKind::Plane(p) = &f.kind { Some((f.id, f.name.clone(), p.visible, f.suppressed)) } else { None } } else { None }).collect();
+                    let planes: Vec<_> = app.doc().features.iter().filter_map(|f| if f.owner == id { if let FeatureKind::Plane(p) = &f.kind { Some((f.id, f.name.clone(), p.visible, app.doc().is_suppressed(f.id))) } else { None } } else { None }).collect();
                     if planes.is_empty() { ui.small(RichText::new("None yet").color(colors.muted)); }
                     for (plane, name, visible, suppressed) in planes {
                         ui.horizontal(|ui| {
@@ -192,7 +192,7 @@ fn component_node(app: &mut App, ui: &mut Ui, id: Id) {
                     }
                 });
                 egui::CollapsingHeader::new(format!("{} Sketches", icon::FOLDER)).default_open(true).show(ui, |ui| {
-                    let sketches: Vec<_> = app.doc().sketches().filter(|(f, _)| f.owner == id).map(|(f, sk)| (f.id, f.name.clone(), sk.visible, f.suppressed)).collect();
+                    let sketches: Vec<_> = app.doc().sketches().filter(|(f, _)| f.owner == id).map(|(f, sk)| (f.id, f.name.clone(), sk.visible, app.doc().is_suppressed(f.id))).collect();
                     if sketches.is_empty() { ui.small(RichText::new("None yet").color(colors.muted)); }
                     for (sid, name, visible, suppressed) in sketches {
                         ui.horizontal(|ui| {
@@ -209,9 +209,13 @@ fn component_node(app: &mut App, ui: &mut Ui, id: Id) {
                     for (body, name, visible) in bodies {
                         ui.horizontal(|ui| {
                             if crate::panels::eye(ui, visible) { let _ = app.execute(&json!({"op":"set_visible","id":body,"visible":!visible})); }
-                            let response = ui.selectable_label(app.sel_body == Some(body), name);
+                            // A body tagged as lumber for the Loads panel says so.
+                            let lumber = app.doc().structural_members.contains_key(&body);
+                            let shown = if lumber { format!("{name}  {}", icon::SCALES) } else { name.clone() };
+                            let response = ui.selectable_label(app.sel_body == Some(body), shown);
+                            let response = if lumber { response.on_hover_text("Tagged as lumber: counted in Inspect \u{2192} Loads") } else { response };
                             if response.clicked() { if matches!(app.dialog,Dialog::Remove(_) | Dialog::Split(_)) {crate::body_ops_ui::choose_body(app,body);} else if let Dialog::Combine(d)=&mut app.dialog {if d.target.is_none(){d.target=Some(body);}else if d.target!=Some(body){if let Some(i)=d.tools.iter().position(|id|*id==body){d.tools.remove(i);}else{d.tools.push(body);}}} app.sel_body = Some(body); app.sel_feature = app.doc().feature(body).map(|f| f.id); app.sel_component = None; app.sel_face = None; }
-                            response.context_menu(|ui| { for (name, action) in [("Move", Action::Transform), ("Remove Body", Action::RemoveBody), ("Split Body", Action::SplitBody), ("Join Bodies", Action::JoinBodies)] { if ui.button(name).clicked() { app.sel_body = Some(body); app.sel_face = None; app.sel_component = None; let ctx = ui.ctx().clone(); app.run(&ctx, action); ui.close(); } } });
+                            response.context_menu(|ui| { if ui.button("Rename").clicked() { app.rename = Some((body, name.clone())); app.rename_body = true; ui.close(); } for (name, action) in [("Move", Action::Transform), ("Remove Body", Action::RemoveBody), ("Split Body", Action::SplitBody), ("Join Bodies", Action::JoinBodies)] { if ui.button(name).clicked() { app.sel_body = Some(body); app.sel_face = None; app.sel_component = None; let ctx = ui.ctx().clone(); app.run(&ctx, action); ui.close(); } } });
                         });
                     }
                 });

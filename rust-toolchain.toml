@@ -1,0 +1,6 @@
+# The compiler CI and releases are built with. Raise it deliberately: a new
+# release brings new clippy lints, and CI denies warnings.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy"]
+profile = "minimal"

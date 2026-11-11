@@ -1,0 +1,8 @@
+{
+  "tag": "occt-8_0_1_rev2",
+  "assets": {
+    "aarch64-apple-darwin": {"size": 33429718, "sha256": "d9e0f3b34e6fb3599a6be5f143e775b0e04953c3fcef634cc0f5d55e0ee16904"},
+    "x86_64-apple-darwin": {"size": 34758892, "sha256": "9f4036cd4843fba3a36a67448420565573286686d8653f550f32c35d3eac36b3"},
+    "x86_64-unknown-linux-gnu": {"size": 45844540, "sha256": "95e068936c0cb4ba2668707c0dca209d3396103dfc1db85eb72d192badfb4143"}
+  }
+}

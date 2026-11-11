@@ -42,12 +42,22 @@ pub enum Appearance {
     Dark,
 }
 
+/// Scripts: remembered inputs per script, folders scripts may use, and shortcuts.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptsCfg {
+    /// Script name to its last inputs (as typed), kept as JSON text.
+    pub last_inputs: std::collections::BTreeMap<String, String>,
+    pub allowed_dirs: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub appearance: Appearance,
     pub ai: Ai,
     pub bridge: BridgeCfg,
+    pub scripts: ScriptsCfg,
 }
 
 impl Config {
@@ -62,7 +72,16 @@ impl Config {
         match std::fs::read_to_string(Self::path()) {
             Ok(text) => match toml::from_str(&text) {
                 Ok(c) => (c, None),
-                Err(e) => (Config::default(), Some(e.to_string())),
+                // The defaults that replace it are saved over the file at the next settings change.
+                // Keep what was there (the API key, allowed folders) so it can be repaired by hand.
+                Err(e) => {
+                    let kept = Self::path().with_extension("toml.broken");
+                    let note = match std::fs::copy(Self::path(), &kept) {
+                        Ok(_) => format!("{e} (the unreadable settings were kept as {})", kept.display()),
+                        Err(_) => e.to_string(),
+                    };
+                    (Config::default(), Some(note))
+                }
             },
             Err(_) => (Config::default(), None),
         }

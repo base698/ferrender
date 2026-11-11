@@ -205,8 +205,8 @@ fn nested_placement_moves_exact_mesh_and_modeled_threads_without_changing_local_
         assert_eq!(placed.threads.len(), original.threads.len());
         let mut expected_lo = DVec3::splat(f64::INFINITY);
         let mut expected_hi = DVec3::splat(f64::NEG_INFINITY);
-        for point in original.mesh.tris.iter().flatten() {
-            let point = world.transform_point3(*point);
+        for point in original.mesh.tris().flatten() {
+            let point = world.transform_point3(point);
             expected_lo = expected_lo.min(point); expected_hi = expected_hi.max(point);
         }
         bounds(placed, expected_lo, expected_hi);
@@ -214,7 +214,7 @@ fn nested_placement_moves_exact_mesh_and_modeled_threads_without_changing_local_
         for (thread, original_thread) in placed.threads.iter().zip(&original.threads) {
             assert_eq!(thread.open_edges(), 0);
             let mut lo = DVec3::splat(f64::INFINITY); let mut hi = DVec3::splat(f64::NEG_INFINITY);
-            for point in original_thread.tris.iter().flatten() { let point = world.transform_point3(*point); lo=lo.min(point); hi=hi.max(point); }
+            for point in original_thread.tris().flatten() { let point = world.transform_point3(point); lo=lo.min(point); hi=hi.max(point); }
             let (actual_lo, actual_hi) = thread.bbox().unwrap();
             point_near(actual_lo, lo); point_near(actual_hi, hi);
         }

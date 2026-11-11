@@ -55,7 +55,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "get_scene_info",
-            "description": "Get the Ferrender document: active component, component tree, units, parameters, the feature timeline (sketches, primitives, extrudes, revolves, with any errors) and the bodies with their sizes and volumes. Call this first; never assume the document is empty.",
+            "description": "Get the Ferrender document: active component, component tree, units, parameters, the feature timeline (sketches, primitives, extrudes, revolves, sweeps, lofts, with any errors) and the bodies with their sizes and volumes. Call this first; never assume the document is empty.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
@@ -74,8 +74,18 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
+            "name": "list_scripts",
+            "description": "The scripts available to run: the user's scripts folder (~/.config/ferrender/scripts), the open document's scripts folder, and the bundled samples. Each entry has a path (or sample name), its META (name, description, inputs) and whether it is a sample.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "run_script",
+            "description": "Run a Rhai script against the document as one undo step. Give \"path\" (a file, or a sample name such as spur-gear.rhai), or \"source\" (the script text). \"inputs\" is an object of the script's declared inputs; \"allow\" lists extra folders the script may read and write (its own folder and the document's are always allowed); \"timeout\" is a limit in seconds, after which the run fails at its next operation. Files the script writes appear only when the run succeeds. Returns the script's log, result, exported files and the features it made. Scripts call the same commands as execute_ferrender_commands as functions, e.g. extrude(#{sketch: s, distance: 10}); see the reference's Scripts section.",
+            "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "source": {"type": "string"}, "inputs": {"type": "object"}, "allow": {"type": "array", "items": {"type": "string"}}}}
+        },
+        {
             "name": "execute_ferrender_commands",
-            "description": "Run modelling commands in order; each is one undo step and execution stops at the first error. Commands are JSON objects with an \"op\": create_component, activate_component, move_component, create_plane, create_sketch, add_geometry, add_constraint, set_dimension, move, trim, mirror, offset, fillet, chamfer, project, delete, extrude, revolve, primitive, pattern, fillet_edges, chamfer_edges, shell, transform, combine, edit_feature, delete_feature, rollback, set_parameter, set_visible, import_stl, export_stl, export_step, save, open, undo, redo. Call get_reference for the arguments of each. Results list only the bodies a command changed. Inside a command, \"$last_sketch\", \"$last_feature\" and \"$last_body\" stand for the newest of each.",
+            "description": "Run modelling commands in order; each is one undo step and execution stops at the first error. Commands are JSON objects with an \"op\": create_component, activate_component, move_component, create_plane, create_sketch, add_geometry, add_constraint, set_dimension, move, trim, mirror, offset, fillet, chamfer, project, delete, extrude, revolve, sweep, loft, primitive, pattern, fillet_edges, chamfer_edges, shell, transform, combine, edit_feature, delete_feature, rollback, set_parameter, set_visible, import_mesh (STL, OBJ or 3MF), mesh_measure, mesh_repair, mesh_decimate, mesh_smooth, mesh_subdivide, mesh_cut, mesh_mirror, mesh_offset, mesh_extrude_region, mesh_sculpt, mesh_from_image, export_stl, export_step, save, open, undo, redo. Call get_reference for the arguments of each. Results list only the bodies a command changed. Inside a command, \"$last_sketch\", \"$last_feature\" and \"$last_body\" stand for the newest of each.",
             "inputSchema": {"type": "object", "properties": {"commands": {"type": "array", "items": {"type": "object"}, "description": "Command objects, each with an \"op\"."}}, "required": ["commands"]}
         }
     ])
@@ -97,9 +107,42 @@ fn call(b: &mut Backend, name: &str, args: &Value) -> Result<Value, String> {
             }
             cmd["op"] = json!("get_viewport_screenshot");
             let v = b.run(&cmd)?;
-            Ok(json!([{"type": "image", "data": v["png_base64"], "mimeType": "image/png"}]))
+            let mut content = Vec::new();
+            if let Some(warning) = v["geometry_warning"].as_str() {
+                content.push(json!({"type": "text", "text": warning}));
+            }
+            content.push(json!({"type": "image", "data": v["png_base64"], "mimeType": "image/png"}));
+            Ok(json!(content))
         }
         "get_reference" => Ok(json!([{"type": "text", "text": api::REFERENCE}])),
+        "list_scripts" => {
+            let scene = b.run(&json!({"op": "get_scene_info"}))?;
+            let doc_dir = scene["file"].as_str().map(std::path::PathBuf::from).and_then(|p| p.parent().map(|d| d.join("scripts")));
+            let mut out = Vec::new();
+            for dir in [Some(crate::config::Config::path().parent().unwrap().join("scripts")), doc_dir].into_iter().flatten() {
+                let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "rhai")).collect();
+                paths.sort();
+                for p in paths {
+                    let meta = fr_core::script::read_source(&p).and_then(|s| fr_core::script::meta(&s));
+                    out.push(json!({"path": p.display().to_string(), "sample": false, "meta": meta.as_ref().ok(), "error": meta.err()}));
+                }
+            }
+            for (name, source) in fr_core::script::SAMPLES {
+                out.push(json!({"path": name, "sample": true, "meta": fr_core::script::meta(source).ok()}));
+            }
+            Ok(text(json!({"scripts": out})))
+        }
+        "run_script" => {
+            let mut cmd = args.clone();
+            if !cmd.is_object() { cmd = json!({}); }
+            if let Some(name) = cmd["path"].as_str() && let Some((_, source)) = fr_core::script::SAMPLES.iter().find(|s| s.0 == name) {
+                cmd["source"] = json!(source);
+                cmd.as_object_mut().unwrap().remove("path");
+            }
+            cmd["op"] = json!("run_script");
+            Ok(text(b.run(&cmd)?))
+        }
         "execute_ferrender_commands" => Ok(text(b.run(&json!({"op": "batch", "commands": args["commands"]}))?)),
         other => Err(format!("unknown tool '{other}'")),
     }

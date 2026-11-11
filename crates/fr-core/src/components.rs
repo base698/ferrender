@@ -42,7 +42,7 @@ impl Built {
     pub fn sketch_plane(&self,doc:&Document,id:Id)->Option<Plane> {
         let f=doc.feature(id)?;
         let FeatureKind::Sketch(sk)=&f.kind else {return None};
-        if self.errors.contains_key(&id) || f.suppressed || !self.components.contains_key(&f.owner)
+        if self.errors.contains_key(&id) || doc.is_suppressed(f.id) || !self.components.contains_key(&f.owner)
             || !doc.features.iter().take(doc.active()).any(|f|f.id==id) {return None;}
         Some(sk.plane.transformed(self.component_placement(f.owner)))
     }
@@ -61,7 +61,7 @@ impl Document {
     pub fn component_available(&self,mut id:Id)->bool {
         for _ in 0..=32 {
             if id==0 {return true;}
-            let Some(f)=self.features.iter().take(self.active()).find(|f|f.id==id && !f.suppressed && matches!(f.kind,FeatureKind::Component(_))) else {return false};
+            let Some(f)=self.features.iter().take(self.active()).find(|f|f.id==id && !self.is_suppressed(f.id) && matches!(f.kind,FeatureKind::Component(_))) else {return false};
             id=f.owner;
         }
         false
@@ -97,8 +97,13 @@ impl Document {
     }
     pub fn delete_feature(&mut self,id:Id)->Result<Vec<Id>,String> {
         let f=self.feature(id).ok_or("the feature does not exist")?;
-        let subtree=matches!(f.kind,FeatureKind::Component(_));
-        let removed:Vec<_>=self.features.iter().filter(|f|f.id==id || (subtree && self.component_contains(id,f.owner))).map(|f|f.id).collect();
+        let mut ids = std::collections::BTreeSet::from([f.id]);
+        // Ownership always refers to earlier features. One ordered pass removes
+        // a script's generated components and their descendants as well as its outputs.
+        for f in &self.features {
+            if ids.contains(&f.owner) || f.made_by.is_some_and(|by| ids.contains(&by)) { ids.insert(f.id); }
+        }
+        let removed: Vec<_> = self.features.iter().filter(|f| ids.contains(&f.id)).map(|f| f.id).collect();
         if let Some(at)=self.rollback {self.rollback=Some(at-self.features.iter().take(at).filter(|f|removed.contains(&f.id)).count());}
         let removed_patterns:Vec<_>=self.features.iter().filter(|f|removed.contains(&f.id) && matches!(f.kind,FeatureKind::Pattern(_)|FeatureKind::Split(_))).map(|f|f.id).collect();
         self.features.retain(|f|!removed.contains(&f.id));

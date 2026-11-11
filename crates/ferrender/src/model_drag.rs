@@ -12,7 +12,7 @@ pub fn sketch_target(app:&App,pos:Pos2,on_plane:Option<Plane>)->Option<DVec3> {
     let mut points=Vec::new();let mut edges=Vec::new();
     for feature in app.doc().features.iter().take(before) {
         let fr_core::FeatureKind::Sketch(sk)=&feature.kind else {continue};
-        if feature.suppressed || !sk.visible || source.errors.contains_key(&feature.id) || !source.component_visible(feature.owner) {continue;}
+        if app.doc().is_suppressed(feature.id) || !sk.visible || source.errors.contains_key(&feature.id) || !source.component_visible(feature.owner) {continue;}
         let Some(plane)=source.sketch_plane(app.doc(),feature.id) else {continue};
         let accept=|p:DVec3|on_plane.is_none_or(|plane|(p-plane.origin).dot(plane.normal()).abs()<1e-5);
         for p in sk.points.values() {let world=plane.to_world(*p);let distance=crate::view::to_screen(app,world).distance(pos);if distance<=10. && accept(world) {points.push((distance,world));}}
@@ -65,12 +65,11 @@ pub fn interact(app:&mut App,ui:&Ui,resp:&Response)->bool {
     if !valid {let active=app.pattern_drag.gesture.is_some();app.pattern_drag.clear();return active;}
     let current_key=if let Dialog::Pattern(p)=&app.dialog{key(app,p)}else{unreachable!()};
     if app.pattern_drag.gesture.as_ref().is_some_and(|g|g.key!=current_key || g.camera!=app.cam || matches!(&app.dialog,Dialog::Pattern(p) if g.expected != [p.text.clone(),p.text2.clone()])){app.pattern_drag.clear();return down||released;}
-    if app.pattern_drag.gesture.is_none() && pressed && resp.hovered() && let Some(pos)=pos {
-        if let Some(h)=handles(app).into_iter().filter(|h|h.screen.distance(pos)<=13.).min_by(|a,b|a.screen.distance(pos).total_cmp(&b.screen.distance(pos))) {
+    if app.pattern_drag.gesture.is_none() && pressed && resp.hovered() && let Some(pos)=pos
+        && let Some(h)=handles(app).into_iter().filter(|h|h.screen.distance(pos)<=13.).min_by(|a,b|a.screen.distance(pos).total_cmp(&b.screen.distance(pos))) {
             app.pattern_drag.gesture=Some(Gesture{key:current_key,index:h.index,start:pos,origin:h.origin,axis:h.axis,screen_axis:h.screen_axis,span:h.span,count:h.count,camera:app.cam,expected:if let Dialog::Pattern(p)=&app.dialog{[p.text.clone(),p.text2.clone()]}else{unreachable!()},moved:false});
             app.drag=crate::app::Drag::None;
         }
-    }
     let Some(mut g)=app.pattern_drag.gesture.take() else{return false};
     if let Some(pos)=pos && (g.moved || pos.distance(g.start)>=3.) {
         g.moved=true;

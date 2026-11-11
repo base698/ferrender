@@ -101,7 +101,7 @@ fn plane_file_roundtrip_validates_order_and_keeps_legacy_schema() {
     assert_eq!(s.doc,io::from_json(&encoded).unwrap());
     let mut bad=s.doc.clone();
     let FeatureKind::Plane(plane)=&mut bad.feature_mut(p).unwrap().kind else {panic!()};
-    if let fr_core::planes::PlaneKind::Offset {base,..}=&mut plane.kind { *base=fr_core::planes::PlaneRef::Face {body,at:DVec3::ZERO,frame:None}; }
+    if let fr_core::planes::PlaneKind::Offset {base,..}=&mut plane.kind { *base=fr_core::planes::PlaneRef::Face {tag:None,body,at:DVec3::ZERO,frame:None}; }
     assert!(io::from_json(&io::to_json(&bad)).unwrap_err().contains("earlier"));
     let mut dangling=s.doc.clone(); dangling.features.retain(|f|f.id!=p);
     let reopened=Session::new(io::from_json(&io::to_json(&dangling)).unwrap());

@@ -166,6 +166,25 @@ impl ReferenceImage {
     /// Cheap identity for a GPU texture cache; changing placement does not replace the texture.
     pub fn same_pixels(&self, other: &Self) -> bool { Arc::ptr_eq(&self.png, &other.png) }
 
+    /// The embedded pixels as a PNG file, for an exported script's sidecar.
+    pub fn png_bytes(&self) -> Result<Vec<u8>, String> {
+        STANDARD.decode(self.png.as_bytes()).map_err(|_| "Invalid embedded reference image encoding.".to_owned())
+    }
+
+    /// How many bytes the image takes inside a JSON document.
+    pub fn embedded_len(&self) -> usize { self.png.len() }
+
+    /// The same placement with another file's pixels.
+    pub fn with_pixels_from(&self, path: &Path) -> Result<Self, String> {
+        let mut image = Self::from_file(path, self.width)?;
+        image.origin = self.origin;
+        image.rotation = self.rotation;
+        image.opacity = self.opacity;
+        image.visible = self.visible;
+        if !self.name.is_empty() { image.name = self.name.clone(); }
+        Ok(image)
+    }
+
     pub fn height(&self) -> f64 { self.width * f64::from(self.pixel_height) / f64::from(self.pixel_width) }
 
     /// Bottom-left, bottom-right, top-right, top-left in sketch coordinates.

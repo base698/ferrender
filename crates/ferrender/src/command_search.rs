@@ -66,16 +66,21 @@ pub fn commands(app: &App) -> Vec<Command> {
     add("Redo",Action::Redo,"","Redo the last undone change.","edit history",(!app.session.can_redo()).then_some("There is nothing to redo."));
     add("New Sketch",Action::NewSketch,"","Draw on a plane or flat face.","create sketch drawing",None);
     add("Text / Emboss",Action::Text,"",if sketch.is_some(){"Creates solid lettering; finishes the current sketch."}else{"Create solid lettering, or emboss or engrave a flat face."},"text font lettering letters emboss engrave label",None);
-    let profiles=app.doc().sketches().any(|(f,s)|!f.suppressed && app.session.built.sketch_plane(app.doc(),f.id).is_some() && !fr_core::profile::profiles(s).is_empty());
+    let profiles=app.doc().sketches().any(|(f,s)|!app.doc().is_suppressed(f.id) && app.session.built.sketch_plane(app.doc(),f.id).is_some() && !fr_core::profile::profiles(s).is_empty());
     add("Extrude",Action::Extrude,"E","Pull a closed profile or flat face into a solid.","model extrude pad pocket",(!(profiles || app.sel_face.as_ref().is_some_and(|f|f.plane.is_some()))).then_some("Draw a closed profile or select a flat face first."));
     add("Revolve",Action::Revolve,"","Turn a closed profile around an axis.","model revolve lathe",(!profiles).then_some("Draw a closed profile first."));
+    add("Sweep",Action::Sweep,"","Carry a closed profile along a path drawn in another sketch.","model sweep pipe path rail tube handle frame",(!profiles).then_some("Draw a path in one sketch and a closed profile in another first."));
+    let stacked=app.doc().sketches().filter(|(f,s)|!app.doc().is_suppressed(f.id) && !fr_core::profile::profiles(s).is_empty()).count()>=2;
+    add("Loft",Action::Loft,"","Skin a solid through closed profiles drawn on different planes.","model loft skin blend sections hull bottle duct transition",(!stacked).then_some("Draw a closed profile in each of two sketches on different planes first."));
     if let Some((_,sk))=sketch {
         add("Finish Sketch",Action::FinishSketch,"","Return to the model.","exit close sketch done",None);
         for (title,tool,key,hint) in [
             ("Select",Tool::Select,"V","Select and drag sketch geometry."),
             ("Line",Tool::Line,"L","Draw connected straight lines."),
             ("Rectangle",Tool::Rect,"R","Draw a rectangle from opposite corners."),
+            ("Center Rectangle",Tool::CenterRect,"","Draw a rectangle from its center and one corner."),
             ("Circle",Tool::Circle,"C","Draw a circle from its center and radius."),
+            ("Ellipse",Tool::Ellipse,"","Draw an ellipse from its center, the end of one axis, and its width."),
             ("Arc",Tool::Arc,"A","Draw an arc using its center and endpoints."),
             ("3-Point Arc",Tool::Arc3,"","Choose two endpoints, then the bulge."),
             ("Tangent Arc",Tool::TangentArc,"","Continue a line or arc smoothly."),
@@ -117,27 +122,32 @@ pub fn commands(app: &App) -> Vec<Command> {
         add("Join Bodies",Action::JoinBodies,"","Join selected bodies into one.","model join union combine",two);
         add("Combine",Action::Combine,"","Join, cut or intersect selected bodies.","model boolean combine cut subtract intersect",two);
         let chosen=app.sel_feature.or(app.sel_body);
-        let source=app.doc().features.iter().take(app.doc().active()).any(|f|!f.suppressed && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner)
+        let source=app.doc().features.iter().take(app.doc().active()).any(|f|!app.doc().is_suppressed(f.id) && !app.session.built.errors.contains_key(&f.id) && app.session.built.components.contains_key(&f.owner)
             && (Some(f.id)==chosen || f.owner==app.doc().active_component)
-            && (matches!(f.kind,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)) || matches!(&f.kind,FeatureKind::Text(t) if t.op==Op::New)));
+            && (matches!(f.kind,FeatureKind::Extrude(_)|FeatureKind::Revolve(_)|FeatureKind::Sweep(_)|FeatureKind::Loft(_)|FeatureKind::Primitive(_)|FeatureKind::Import(_)) || matches!(&f.kind,FeatureKind::Text(t) if t.op==Op::New)));
         add("Pattern / Mirror",Action::Pattern,"","Repeat a source in a line, grid, circle or mirror.","model pattern array mirror circular linear grid",(!source).then_some("Create a repeatable solid feature first."));
         add("Fillet Edges",Action::Blend(false),"","Round exact solid edges.","model fillet round",need_exact);
         add("Chamfer Edges",Action::Blend(true),"","Bevel exact solid edges.","model chamfer bevel",need_exact);
         add("Shell",Action::Shell,"","Hollow an exact solid.","model shell wall thickness",need_exact);
+        add("Tilt Face",Action::Tilt,"","Tilt a flat face about a hinge lying in it.","model tilt rotate face angle draft slant taper",need_exact);
         add("Hole",Action::Hole,"","Drill a hole into an exact solid.","model hole drill counterbore countersink",need_exact);
         add("Thread",Action::Thread,"","Add threads to a rod or hole.","model thread screw",need_exact);
         add("Measure",Action::Measure,"I","Measure distances and angles.","view measure inspect",need_body);
+        add("Loads",Action::Loads,"","Put a deck load on tagged lumber and see stress and sag.","inspect loads structural beam joist stress deflection sag lumber",need_body);
     }
     let deleting=if sketch.is_some() {selected} else {app.sel_feature.is_some_and(|id|app.doc().feature(id).is_some())};
     add("Delete",Action::Delete,"Del","Delete the selected geometry or feature.","edit delete",(!deleting).then_some("Select geometry or a feature first."));
     for (title,action,hint) in [
         ("New Design",Action::New,"Start a new design."),("Open Design",Action::Open,"Open a saved Ferrender design."),
         ("Save",Action::Save,"Save the current design."),("Save As",Action::SaveAs,"Save the design to another file."),
-        ("Recover Unsaved Work",Action::Recover,"Open available recovery copies."),("Import STL",Action::Import,"Import a mesh body."),
+        ("Recover Unsaved Work",Action::Recover,"Open available recovery copies."),("Import Mesh",Action::Import,"Import an STL, OBJ or 3MF as a mesh body."),
         ("Parameters",Action::Parameters,"Edit named dimensions and values."),("Assistant",Action::Assistant,"Open the modeling assistant."),
         ("About Ferrender",Action::About,"Check version and commit information."),
     ] {add(title,action,"",hint,"file edit help",None);}
     add("Export STL",Action::Export,"","Export visible bodies for printing.","file export stl print",need_body);
+    for (k,name) in crate::app::MESH_OPS.iter().enumerate() { add(name,Action::Mesh(k),"","Mesh editing: applies to the selected body as a timeline step.","mesh scan stl decimate smooth repair cut mirror offset thicken",need_body); }
+    add("Relief from Image",Action::Relief,"","Build a height-field mesh from a photo or depth map.","mesh relief lithophane image photo",None);
+    add("Sculpt",Action::Sculpt,"","Pull, push, inflate, smooth or flatten a mesh with a brush; each click is a stroke.","mesh sculpt brush",need_body);
     add("Export STEP",Action::ExportStep,"","Export visible exact solids.","file export step cad",need_exact);
     for (title,name) in [("Home View","iso"),("Top View","top"),("Front View","front"),("Right View","right"),("Back View","back"),("Left View","left"),("Bottom View","bottom")] {add(title,Action::View(name),"","Change the viewing direction.","view camera",None);}
     add("Fit View",Action::Fit,"F","Fit the design in the view.","view zoom fit",None);

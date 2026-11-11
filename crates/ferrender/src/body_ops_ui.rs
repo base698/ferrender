@@ -111,7 +111,7 @@ pub fn interact(app:&mut App,painter:&Painter,hover:Option<Pos2>,clicked:Option<
         } else if let Some(id)=crate::construction_view::pick_plane_before_face(app,pos) {choose_plane(app,PlaneRef::Plane(id));}
         else if let Some(face)=crate::view::pick_face(app,pos) {
             if face.plane.is_none(){app.toast("Choose a flat face or construction plane.");return;}
-            if let Some(body)=source(app).body(face.body){let r=PlaneRef::Face{body:body.id,at:body.to_local(face.at),frame:body.local_frame()};choose_plane(app,r);}
+            if let Some(body)=source(app).body(face.body){let r=PlaneRef::Face{tag:None,body:body.id,at:body.to_local(face.at),frame:body.local_frame()};choose_plane(app,r);}
         }
     } else if let Some(pos)=hover && let Some((id,..))=crate::view::pick_body(app,source(app),pos) && let Some(body)=source(app).body(id) {
         for edge in &body.edges {painter.add(egui::Shape::line(edge.iter().map(|p|crate::view::to_screen(app,*p)).collect(),Stroke::new(1.,color)));}
